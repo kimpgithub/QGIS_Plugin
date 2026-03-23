@@ -27,24 +27,36 @@
 
 ## 설치 방법
 
-1. `gis_scan_tools` 폴더를 QGIS 플러그인 디렉토리에 복사:
-   - Windows: `C:\Users\{사용자}\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
-   - Linux: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
-   - macOS: `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/`
+### 1. Tesseract OCR 엔진 설치
 
-2. QGIS 재시작
+pytesseract는 Tesseract 엔진이 별도로 설치되어 있어야 합니다.
 
-3. 메뉴 → 플러그인 → 플러그인 관리 및 설치 → "GIS Scan Tools" 활성화
+- Windows: https://github.com/UB-Mannheim/tesseract/wiki 에서 인스톨러 다운로드 후 설치
+- 설치 시 **한국어(kor)** 언어 데이터 체크
+- 설치 경로 (기본값): `C:\Program Files\Tesseract-OCR\`
 
-## 의존성
+### 2. Python 라이브러리 설치
 
-- Python 3.8+
-- OpenCV (cv2)
-- NumPy
-- GeoPandas
-- Shapely
-- Pillow (PIL)
-- pytesseract (OCR용)
+**OSGeo4W Shell**을 열고 아래 명령 실행:
+
+```
+pip install opencv-python scipy pytesseract koreanize-matplotlib
+```
+
+> `numpy`, `geopandas`, `shapely`, `rasterio`, `matplotlib`, `Pillow`은 QGIS에 기본 포함되어 있어 별도 설치 불필요
+
+### 3. 플러그인 설치
+
+`gis_scan_tools` 폴더를 QGIS 플러그인 디렉토리에 복사:
+- Windows: `C:\Users\{사용자}\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
+- Linux: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
+- macOS: `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/`
+
+또는 QGIS → 플러그인 → ZIP에서 설치 → `gis_scan_tools.zip` 선택
+
+### 4. 플러그인 활성화
+
+QGIS 재시작 → 메뉴 → 플러그인 → 플러그인 관리 및 설치 → "GIS Scan Tools" 활성화
 
 ## 사용법
 
