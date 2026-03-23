@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Pencil -->
+  <path d="M3,21 L3,17 L14,6 L18,10 L7,21 Z" fill="none" stroke="#2563eb" stroke-width="1.8"/>
+  <path d="M14,6 L18,10" stroke="#2563eb" stroke-width="1.8"/>
+  <path d="M16,4 L20,8 L18,10 L14,6 Z" fill="#2563eb" stroke="#1e40af" stroke-width="0.8"/>
+  <line x1="3" y1="21" x2="7" y2="21" stroke="#2563eb" stroke-width="1.8"/>
+</svg>

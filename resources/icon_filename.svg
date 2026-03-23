@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- File with rename arrow -->
+  <path d="M6,3 L14,3 L18,7 L18,21 L6,21 Z" fill="none" stroke="#2563eb" stroke-width="1.8"/>
+  <polyline points="14,3 14,7 18,7" fill="none" stroke="#2563eb" stroke-width="1.2"/>
+  <line x1="9" y1="12" x2="15" y2="12" stroke="#2563eb" stroke-width="1.2"/>
+  <line x1="9" y1="15" x2="13" y2="15" stroke="#2563eb" stroke-width="1.2"/>
+  <!-- Rename arrow -->
+  <path d="M2,9 L5,6 L5,8 L10,8 L10,10 L5,10 L5,12 Z" fill="#ef4444"/>
+</svg>

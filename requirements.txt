@@ -1,0 +1,10 @@
+opencv-python
+numpy
+geopandas
+shapely
+rasterio
+scipy
+matplotlib
+koreanize-matplotlib
+Pillow
+pytesseract
