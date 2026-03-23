@@ -44,7 +44,7 @@
 - GeoPandas
 - Shapely
 - Pillow (PIL)
-- easyocr (경계 검수 OCR용, 선택)
+- pytesseract (OCR용)
 
 ## 사용법
 

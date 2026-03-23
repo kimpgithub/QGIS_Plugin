@@ -23,12 +23,7 @@ import koreanize_matplotlib
 import os
 import re
 
-try:
-    import easyocr
-    HAS_EASYOCR = True
-except ImportError:
-    HAS_EASYOCR = False
-    print("Warning: easyocr 미설치. OCR 기능 제한됨")
+import pytesseract
 
 plt.rcParams['axes.unicode_minus'] = False
 
@@ -194,27 +189,24 @@ class BoundaryValidator:
         return self
 
     def extract_admin_code_ocr(self) -> str:
-        """이미지 헤더에서 행정리경계코드 OCR 추출 (easyocr 사용)"""
-        if not HAS_EASYOCR:
-            print("easyocr 미설치. 파일명에서 코드 추출 시도...")
-            return self._extract_code_from_filename()
-
+        """이미지 헤더에서 행정리경계코드 OCR 추출 (pytesseract 사용)"""
         # 원본 이미지에서 헤더 추출 (지도 추출 전 원본 사용)
         h, w = self.original_image.shape[:2]
 
         # 헤더 영역 추출 (상단 8%)
         header = self.original_image[0:int(h*0.08), :]
 
-        # easyocr Reader 초기화 (한글+영어)
-        reader = easyocr.Reader(['ko', 'en'], gpu=False, verbose=False)
+        # 그레이스케일 변환
+        if len(header.shape) == 3:
+            gray = cv2.cvtColor(header, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = header
 
-        # OCR 수행
-        results = reader.readtext(header)
+        # pytesseract OCR 수행 (숫자 우선)
+        all_text = pytesseract.image_to_string(gray, config='--psm 6 -c tessedit_char_whitelist=0123456789')
+        print(f"OCR 인식 텍스트: {all_text.strip()[:100]}...")
 
         # 8자리 숫자 패턴 찾기
-        all_text = ' '.join([text for _, text, _ in results])
-        print(f"OCR 인식 텍스트: {all_text[:100]}...")
-
         matches = re.findall(r'\d{8}', all_text)
 
         if matches:
