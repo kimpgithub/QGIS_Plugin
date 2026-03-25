@@ -1,39 +1,14 @@
 @echo off
-
-REM === Find OSGeo4W environment ===
-if defined OSGEO4W_ROOT goto :do_install
-
-set "OSGEO_ENV="
-for /d %%D in ("C:\Program Files\QGIS*") do (
-    if exist "%%D\OSGeo4W.bat" (
-        set "OSGEO_ENV=%%D\OSGeo4W.bat"
-        goto :found
-    )
-)
-if exist "C:\OSGeo4W\OSGeo4W.bat" (
-    set "OSGEO_ENV=C:\OSGeo4W\OSGeo4W.bat"
-    goto :found
-)
-
-echo ERROR: QGIS/OSGeo4W not found.
-echo Please run this file from OSGeo4W Shell.
-pause
-exit /b 1
-
-:found
-echo Found OSGeo4W: %OSGEO_ENV%
-call "%OSGEO_ENV%"
-goto :do_install
-
-:do_install
 echo ============================================
 echo  GIS Scan Tools - Install Dependencies
+echo ============================================
+echo  Run this from OSGeo4W Shell
 echo ============================================
 echo.
 
 REM === 1. Python packages ===
 echo [1/3] Installing Python packages...
-python -m pip install psycopg2-binary pytesseract opencv-python numpy geopandas shapely rasterio scipy matplotlib koreanize-matplotlib Pillow
+pip install psycopg2-binary pytesseract opencv-python numpy geopandas shapely rasterio scipy matplotlib koreanize-matplotlib Pillow
 echo.
 
 REM === 2. Tesseract OCR ===
