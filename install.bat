@@ -1,13 +1,64 @@
 @echo off
 chcp 65001 >nul
+
+REM === OSGeo4W 환경 자동 탐색 ===
+REM 이미 OSGeo4W 환경이면 바로 설치 진행
+if defined OSGEO4W_ROOT goto :do_install
+
+REM QGIS 설치 경로 탐색
+set "OSGEO_ENV="
+for %%P in (
+    "C:\Program Files\QGIS 3.42.1"
+    "C:\Program Files\QGIS 3.40.5"
+    "C:\Program Files\QGIS 3.40.4"
+    "C:\Program Files\QGIS 3.38.3"
+    "C:\Program Files\QGIS 3.36.3"
+    "C:\Program Files\QGIS 3.34.15"
+    "C:\Program Files\QGIS 3.34.14"
+    "C:\OSGeo4W"
+) do (
+    if exist "%%~P\OSGeo4W.bat" (
+        set "OSGEO_ENV=%%~P\OSGeo4W.bat"
+        goto :found
+    )
+)
+
+REM 와일드카드로 재탐색
+for /d %%D in ("C:\Program Files\QGIS*") do (
+    if exist "%%D\OSGeo4W.bat" (
+        set "OSGEO_ENV=%%D\OSGeo4W.bat"
+        goto :found
+    )
+)
+
+echo QGIS/OSGeo4W 설치를 찾을 수 없습니다.
+echo OSGeo4W Shell에서 직접 이 파일을 실행하세요.
+pause
+exit /b 1
+
+:found
+echo OSGeo4W 환경 발견: %OSGEO_ENV%
+echo OSGeo4W 환경을 로드하고 설치를 진행합니다...
+echo.
+
+REM OSGeo4W 환경을 로드한 뒤 이 스크립트의 :do_install로 재진입
+call "%OSGEO_ENV%"
+goto :do_install
+
+:do_install
 echo ============================================
 echo  GIS Scan Tools - 의존성 설치
 echo ============================================
 echo.
 
-REM === Python 패키지 설치 (OSGeo4W Shell 환경 기준) ===
+REM === Python 패키지 설치 ===
 echo [1/3] Python 패키지 설치 중...
-pip install psycopg2-binary pytesseract opencv-python numpy geopandas shapely rasterio scipy matplotlib koreanize-matplotlib Pillow
+python -m pip install --quiet psycopg2-binary pytesseract opencv-python numpy geopandas shapely rasterio scipy matplotlib koreanize-matplotlib Pillow
+if %errorlevel% equ 0 (
+    echo Python 패키지 설치 완료!
+) else (
+    echo Python 패키지 설치 중 오류 발생. 로그를 확인하세요.
+)
 echo.
 
 REM === Tesseract OCR 설치 확인 ===
@@ -24,7 +75,6 @@ echo Tesseract가 설치되어 있지 않습니다. 다운로드 중...
 set "INSTALLER=%TEMP%\tesseract-installer.exe"
 set "URL=https://github.com/tesseract-ocr/tesseract/releases/download/5.5.0/tesseract-ocr-w64-setup-5.5.0.20241111.exe"
 
-REM curl로 다운로드
 curl -L -o "%INSTALLER%" "%URL%"
 
 if not exist "%INSTALLER%" (
