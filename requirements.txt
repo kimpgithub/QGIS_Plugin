@@ -8,3 +8,4 @@ matplotlib
 koreanize-matplotlib
 Pillow
 pytesseract
+psycopg2-binary
