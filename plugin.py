@@ -1302,10 +1302,15 @@ class GISScanToolsDialog(QDialog):
                     uri.setConnection(host, port, dbname, user, password)
                     uri.setDataSource(schema, table, geom_col)
 
-                    # extent 공간 필터
+                    # extent 공간 필터 (extent는 EPSG:5179 기준)
+                    if srid == 5179:
+                        envelope = f"ST_MakeEnvelope({xmin},{ymin},{xmax},{ymax},{srid})"
+                    else:
+                        envelope = (f"ST_Transform("
+                                    f"ST_MakeEnvelope({xmin},{ymin},{xmax},{ymax},5179)"
+                                    f",{srid})")
                     uri.setSql(
-                        f'ST_Intersects("{geom_col}", '
-                        f"ST_MakeEnvelope({xmin},{ymin},{xmax},{ymax},{srid}))"
+                        f'ST_Intersects("{geom_col}", {envelope})'
                     )
 
                     layer = QgsVectorLayer(uri.uri(False), layer_name, 'postgres')
