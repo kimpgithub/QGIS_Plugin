@@ -12,12 +12,13 @@ from qgis.PyQt.QtWidgets import (
     QTextEdit, QGroupBox, QFormLayout, QSpinBox, QMessageBox,
     QProgressBar, QApplication, QTableWidget, QTableWidgetItem,
     QComboBox, QHeaderView, QAbstractItemView, QRadioButton,
-    QButtonGroup, QShortcut
+    QButtonGroup, QShortcut, QCheckBox
 )
 from qgis.PyQt.QtGui import QIcon, QColor, QKeySequence
 from qgis.PyQt.QtCore import Qt, QTimer, QThread, pyqtSignal
 from qgis.core import (
-    QgsProject, QgsRasterLayer, QgsVectorLayer, QgsRectangle, QgsFillSymbol
+    QgsProject, QgsRasterLayer, QgsVectorLayer, QgsRectangle,
+    QgsFillSymbol, QgsLineSymbol, QgsDataSourceUri, QgsLayerTreeLayer,
 )
 
 
@@ -304,6 +305,33 @@ class GISScanToolsDialog(QDialog):
 
         input_group.setLayout(form)
         layout.addWidget(input_group)
+
+        # PostGIS 참조 레이어 설정
+        pg_group = QGroupBox('PostGIS 참조 레이어')
+        pg_form = QFormLayout()
+
+        self.pg_enabled = QCheckBox('좌표 생성 후 참조 레이어 자동 로드')
+        pg_form.addRow(self.pg_enabled)
+
+        self.pg_host_edit = QLineEdit('localhost')
+        pg_form.addRow('Host:', self.pg_host_edit)
+
+        self.pg_port_edit = QLineEdit('5432')
+        self.pg_port_edit.setMaximumWidth(80)
+        pg_form.addRow('Port:', self.pg_port_edit)
+
+        self.pg_db_edit = QLineEdit('census')
+        pg_form.addRow('Database:', self.pg_db_edit)
+
+        self.pg_user_edit = QLineEdit('postgres')
+        pg_form.addRow('User:', self.pg_user_edit)
+
+        self.pg_pw_edit = QLineEdit()
+        self.pg_pw_edit.setEchoMode(QLineEdit.Password)
+        pg_form.addRow('Password:', self.pg_pw_edit)
+
+        pg_group.setLayout(pg_form)
+        layout.addWidget(pg_group)
 
         # 실행 버튼
         run_btn = QPushButton('좌표 생성 실행')
@@ -1091,6 +1119,247 @@ class GISScanToolsDialog(QDialog):
         except Exception as e:
             self.log(f'meta.json 저장 실패: {e}')
 
+    # === PostGIS 참조 레이어 ===
+
+    def _load_postgis_reference_layers(self, results):
+        """좌표 생성 결과를 기반으로 PostGIS 참조 레이어를 로드한다.
+
+        Args:
+            results: 단일 result dict 또는 result dict 리스트
+        """
+        if not self.pg_enabled.isChecked():
+            return
+
+        if isinstance(results, dict):
+            results = [results]
+        if not results:
+            return
+
+        # DB 접속 정보
+        host = self.pg_host_edit.text().strip() or 'localhost'
+        port = self.pg_port_edit.text().strip() or '5432'
+        dbname = self.pg_db_edit.text().strip() or 'census'
+        user = self.pg_user_edit.text().strip() or 'postgres'
+        password = self.pg_pw_edit.text().strip()
+
+        # 전체 결과에서 sido_cd 집합과 adm_cd 집합, 통합 extent 계산
+        sido_codes = set()
+        adm_codes = set()
+        xmin = ymin = float('inf')
+        xmax = ymax = float('-inf')
+
+        for r in results:
+            adm_cd = r.get('admin_code', '')
+            if len(adm_cd) >= 2:
+                sido_codes.add(adm_cd[:2])
+                adm_codes.add(adm_cd)
+
+            # JGW에서 extent 계산 — result에서 직접 가져오기
+            jgw_path = r.get('jgw_path', '')
+            img_path = r.get('image_path', '')
+            top_left = r.get('top_left')  # (x, y) 튜플
+            pixel_size = r.get('pixel_size')
+
+            if top_left and pixel_size and img_path:
+                try:
+                    from PIL import Image
+                    with Image.open(img_path) as im:
+                        w, h = im.size
+                    x0 = top_left[0]
+                    y0 = top_left[1]
+                    x1 = x0 + w * pixel_size
+                    y1 = y0 - h * pixel_size  # y는 아래로 감소
+                    xmin = min(xmin, x0, x1)
+                    xmax = max(xmax, x0, x1)
+                    ymin = min(ymin, y0, y1)
+                    ymax = max(ymax, y0, y1)
+                except Exception as e:
+                    self.log(f'PostGIS: extent 계산 오류 — {e}')
+            elif jgw_path and os.path.exists(jgw_path) and img_path and os.path.exists(img_path):
+                try:
+                    from .tools.common import parse_jgw
+                    from PIL import Image
+                    jgw = parse_jgw(jgw_path)
+                    with Image.open(img_path) as im:
+                        w, h = im.size
+                    x0 = jgw.offset_x
+                    y0 = jgw.offset_y
+                    x1 = x0 + w * jgw.pixel_size_x
+                    y1 = y0 + h * jgw.pixel_size_y
+                    xmin = min(xmin, x0, x1)
+                    xmax = max(xmax, x0, x1)
+                    ymin = min(ymin, y0, y1)
+                    ymax = max(ymax, y0, y1)
+                except Exception as e:
+                    self.log(f'PostGIS: extent 계산 오류 — {e}')
+
+        if not sido_codes or xmin == float('inf'):
+            self.log('PostGIS: sido_cd 또는 extent를 계산할 수 없습니다.')
+            return
+
+        # extent에 10% 버퍼 추가
+        dx = (xmax - xmin) * 0.1
+        dy = (ymax - ymin) * 0.1
+        xmin -= dx; xmax += dx; ymin -= dy; ymax += dy
+
+        self.update_status('PostGIS 참조 레이어 로드 중...')
+
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(
+                host=host, port=port, dbname=dbname,
+                user=user, password=password)
+            cur = conn.cursor()
+
+            # 1) sido_cd가 포함된 스키마 탐색
+            cur.execute("""
+                SELECT schema_name FROM information_schema.schemata
+                WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'public')
+            """)
+            all_schemas = [row[0] for row in cur.fetchall()]
+
+            target_schemas = []
+            for schema in all_schemas:
+                for sc in sido_codes:
+                    if sc in schema:
+                        target_schemas.append(schema)
+                        break
+
+            if not target_schemas:
+                self.log(f'PostGIS: sido {sido_codes}에 해당하는 스키마를 찾지 못했습니다.')
+                conn.close()
+                return
+
+            self.log(f'PostGIS: 스키마 발견 → {target_schemas}')
+
+            # 2) geometry 컬럼이 있는 테이블 조회
+            cur.execute("""
+                SELECT f_table_schema, f_table_name, f_geometry_column, srid
+                FROM geometry_columns
+                WHERE f_table_schema = ANY(%s)
+            """, (target_schemas,))
+            geo_tables = cur.fetchall()
+
+            conn.close()
+
+            if not geo_tables:
+                self.log('PostGIS: geometry 테이블을 찾지 못했습니다.')
+                return
+
+            # 3) 테이블 분류 (키워드 매칭)
+            # 역할: jijuk(지적도), buld(건물), road(도로)
+            LAYER_RULES = [
+                {
+                    'keywords': ['jijuk'],
+                    'name': '지적도',
+                    'match_adm_cd': True,  # 테이블명에 adm_cd가 있어야 함
+                    'style': {'type': 'fill', 'color': '200,200,200,40',
+                              'outline_color': '150,150,150,180', 'outline_width': '0.2'},
+                },
+                {
+                    'keywords': ['buld', 'building'],
+                    'name': '건물',
+                    'match_adm_cd': False,
+                    'style': {'type': 'fill', 'color': '200,180,220,60',
+                              'outline_color': '160,140,180,180', 'outline_width': '0.2'},
+                },
+                {
+                    'keywords': ['sprd', 'manage', 'road'],
+                    'name': '도로',
+                    'match_adm_cd': False,
+                    'style': {'type': 'line', 'color': '180,180,180,150',
+                              'width': '0.3'},
+                },
+            ]
+
+            loaded_count = 0
+            project = QgsProject.instance()
+            root = project.layerTreeRoot()
+
+            for schema, table, geom_col, srid in geo_tables:
+                for rule in LAYER_RULES:
+                    # 키워드 매칭
+                    if not any(kw in table.lower() for kw in rule['keywords']):
+                        continue
+
+                    # jijuk는 adm_cd가 테이블명에 포함된 것만
+                    if rule['match_adm_cd']:
+                        if not any(ac in table for ac in adm_codes):
+                            continue
+
+                    # 이미 로드된 레이어인지 확인
+                    layer_name = f"[참조] {rule['name']} ({table})"
+                    already = any(
+                        lyr.name() == layer_name
+                        for lyr in project.mapLayers().values())
+                    if already:
+                        loaded_count += 1
+                        break
+
+                    # QgsDataSourceUri로 PostGIS 레이어 생성
+                    uri = QgsDataSourceUri()
+                    uri.setConnection(host, port, dbname, user, password)
+                    uri.setDataSource(schema, table, geom_col)
+
+                    # extent 공간 필터
+                    uri.setSql(
+                        f'ST_Intersects("{geom_col}", '
+                        f"ST_MakeEnvelope({xmin},{ymin},{xmax},{ymax},{srid}))"
+                    )
+
+                    layer = QgsVectorLayer(uri.uri(False), layer_name, 'postgres')
+                    if not layer.isValid():
+                        self.log(f'PostGIS: 레이어 로드 실패 — {schema}.{table}')
+                        break
+
+                    # read-only + non-selectable
+                    layer.setReadOnly(True)
+
+                    # 스타일 적용
+                    style = rule['style']
+                    if style['type'] == 'fill':
+                        symbol = QgsFillSymbol.createSimple({
+                            'color': style['color'],
+                            'outline_color': style['outline_color'],
+                            'outline_width': style['outline_width'],
+                        })
+                        layer.renderer().setSymbol(symbol)
+                    elif style['type'] == 'line':
+                        symbol = QgsLineSymbol.createSimple({
+                            'color': style['color'],
+                            'width': style['width'],
+                        })
+                        layer.renderer().setSymbol(symbol)
+
+                    layer.triggerRepaint()
+
+                    # 레이어 추가 (맨 아래 배치)
+                    project.addMapLayer(layer, False)
+                    root.insertChildNode(-1, QgsLayerTreeLayer(layer))
+
+                    # non-selectable 설정
+                    try:
+                        project.setLayerIsSelectable(layer.id(), False)
+                    except AttributeError:
+                        pass
+
+                    loaded_count += 1
+                    self.log(f'PostGIS: {layer_name} 로드 완료')
+                    break
+
+            if loaded_count > 0:
+                self.log(f'PostGIS: 참조 레이어 {loaded_count}개 로드 완료')
+                self.iface.mapCanvas().refresh()
+            else:
+                self.log('PostGIS: 조건에 맞는 참조 레이어가 없습니다.')
+
+        except ImportError:
+            self.log('PostGIS: psycopg2 모듈이 설치되지 않았습니다. '
+                     'pip install psycopg2-binary')
+        except Exception as e:
+            self.log(f'PostGIS 참조 레이어 로드 실패: {e}')
+
     # === 유틸리티 함수 ===
 
     def browse_file(self, line_edit, filter_str):
@@ -1219,6 +1488,9 @@ class GISScanToolsDialog(QDialog):
                     QgsProject.instance().addMapLayer(layer)
                     self.log(f'QGIS에 레이어 추가됨: {os.path.basename(layer_path)}')
 
+            # PostGIS 참조 레이어 로드
+            self._load_postgis_reference_layers(result)
+
             self.finish_task(True,
                 f'{result["admin_name"]} ({result["elapsed"]:.1f}초, cost={result["cost"]:.2f}px)')
 
@@ -1272,6 +1544,9 @@ class GISScanToolsDialog(QDialog):
 
             if n_ok > 0:
                 self.log(f'\nQGIS에 {n_ok}개 레이어 추가됨')
+
+            # PostGIS 참조 레이어 로드 (전체 결과의 통합 extent)
+            self._load_postgis_reference_layers(batch_result['results'])
 
             self.iface.messageBar().pushSuccess(
                 '완료', f'일괄 좌표 생성: {n_ok}/{n_total} 성공')
