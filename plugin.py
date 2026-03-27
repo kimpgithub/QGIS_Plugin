@@ -12,13 +12,14 @@ from qgis.PyQt.QtWidgets import (
     QTextEdit, QGroupBox, QFormLayout, QSpinBox, QMessageBox,
     QProgressBar, QApplication, QTableWidget, QTableWidgetItem,
     QComboBox, QHeaderView, QAbstractItemView, QRadioButton,
-    QButtonGroup, QShortcut, QCheckBox
+    QButtonGroup, QShortcut, QCheckBox, QDockWidget
 )
 from qgis.PyQt.QtGui import QIcon, QColor, QKeySequence
 from qgis.PyQt.QtCore import Qt, QTimer, QThread, pyqtSignal
 from qgis.core import (
     QgsProject, QgsRasterLayer, QgsVectorLayer, QgsRectangle,
     QgsFillSymbol, QgsLineSymbol, QgsDataSourceUri, QgsLayerTreeLayer,
+    QgsCoordinateTransform, QgsCoordinateReferenceSystem,
 )
 
 
@@ -34,6 +35,7 @@ class GISScanToolsPlugin:
         self.toolbar = self.iface.addToolBar('GIS Scan Tools')
         self.toolbar.setObjectName('GISScanTools')
         self.dialog = None
+        self.adm_dock = None
 
     def initGui(self):
         """플러그인 GUI 초기화 — 작업흐름 순서 툴바"""
@@ -79,6 +81,7 @@ class GISScanToolsPlugin:
 
         # --- 유틸리티 ---
         _add_btn('icon_adminbnd.svg', '행정경계', self._toggle_boundary_layer)
+        _add_btn('icon_review.svg', '읍면동 목록', self._toggle_adm_dock)
 
     def unload(self):
         """플러그인 언로드"""
@@ -89,6 +92,10 @@ class GISScanToolsPlugin:
             sc.setEnabled(False)
             sc.deleteLater()
         self.shortcuts.clear()
+        if self.adm_dock is not None:
+            self.iface.removeDockWidget(self.adm_dock)
+            self.adm_dock.deleteLater()
+            self.adm_dock = None
         del self.toolbar
 
     # === 편집 핸들러 ===
@@ -179,6 +186,200 @@ class GISScanToolsPlugin:
         layer.triggerRepaint()
 
         QgsProject.instance().addMapLayer(layer)
+
+    # === 읍면동 목록 Dock ===
+
+    def _toggle_adm_dock(self):
+        """읍면동 목록 도킹 패널 토글"""
+        if self.adm_dock is not None:
+            vis = self.adm_dock.isVisible()
+            self.adm_dock.setVisible(not vis)
+            return
+
+        # --- Dock 생성 ---
+        self.adm_dock = QDockWidget('읍면동 목록', self.iface.mainWindow())
+        self.adm_dock.setObjectName('GISScanTools_AdmDock')
+        self.adm_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+
+        container = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        # 검색창
+        search_layout = QHBoxLayout()
+        search_label = QLabel('검색:')
+        self._adm_search = QLineEdit()
+        self._adm_search.setPlaceholderText('읍면동 코드 또는 이름 검색...')
+        self._adm_search.textChanged.connect(self._filter_adm_table)
+        search_layout.addWidget(search_label)
+        search_layout.addWidget(self._adm_search)
+        layout.addLayout(search_layout)
+
+        # 테이블
+        self._adm_table = QTableWidget()
+        self._adm_table.setColumnCount(4)
+        self._adm_table.setHorizontalHeaderLabels(
+            ['코드', '읍면동', '시군구', '시도'])
+        self._adm_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._adm_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._adm_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._adm_table.horizontalHeader().setStretchLastSection(True)
+        self._adm_table.verticalHeader().setDefaultSectionSize(22)
+        self._adm_table.verticalHeader().setVisible(False)
+        self._adm_table.doubleClicked.connect(self._on_adm_double_click)
+        layout.addWidget(self._adm_table)
+
+        # 상태바
+        self._adm_status = QLabel()
+        layout.addWidget(self._adm_status)
+
+        container.setLayout(layout)
+        self.adm_dock.setWidget(container)
+
+        self.iface.addDockWidget(Qt.RightDockWidgetArea, self.adm_dock)
+
+        # SHP 데이터 로드
+        self._load_adm_data()
+
+    def _load_adm_data(self):
+        """SHP에서 읍면동 데이터 로드"""
+        import geopandas as gpd
+
+        shp_path = os.path.join(self.plugin_dir, 'data', 'bnd_adm_pg.shp')
+        if not os.path.exists(shp_path):
+            self._adm_status.setText('SHP 파일을 찾을 수 없습니다.')
+            return
+
+        gdf = gpd.read_file(shp_path, encoding='cp949')
+        self._adm_gdf = gdf  # 더블클릭 시 geometry 조회용
+
+        self._adm_table.setRowCount(len(gdf))
+        for i, (_, row) in enumerate(gdf.iterrows()):
+            self._adm_table.setItem(i, 0, QTableWidgetItem(str(row['adm_cd'])))
+            self._adm_table.setItem(i, 1, QTableWidgetItem(str(row.get('adm_nm', ''))))
+            self._adm_table.setItem(i, 2, QTableWidgetItem(str(row.get('sigungu_nm', ''))))
+            self._adm_table.setItem(i, 3, QTableWidgetItem(str(row.get('sido_nm', ''))))
+
+        self._adm_table.resizeColumnsToContents()
+        self._adm_status.setText(f'총 {len(gdf)}개 읍면동')
+
+    def _filter_adm_table(self, text):
+        """검색 텍스트로 테이블 필터링"""
+        text = text.strip().lower()
+        visible_count = 0
+        for row in range(self._adm_table.rowCount()):
+            match = False
+            if not text:
+                match = True
+            else:
+                for col in range(self._adm_table.columnCount()):
+                    item = self._adm_table.item(row, col)
+                    if item and text in item.text().lower():
+                        match = True
+                        break
+            self._adm_table.setRowHidden(row, not match)
+            if match:
+                visible_count += 1
+        self._adm_status.setText(
+            f'{visible_count}개 표시 / 총 {self._adm_table.rowCount()}개')
+
+    def _on_adm_double_click(self, index):
+        """더블클릭 시 해당 읍면동으로 QGIS 맵 이동"""
+        row = index.row()
+        code_item = self._adm_table.item(row, 0)
+        if code_item is None:
+            return
+
+        adm_cd = code_item.text()
+        if not hasattr(self, '_adm_gdf'):
+            return
+
+        matched = self._adm_gdf[self._adm_gdf['adm_cd'].astype(str) == adm_cd]
+        if len(matched) == 0:
+            return
+
+        geom = matched.iloc[0].geometry
+        b = geom.bounds  # (minx, miny, maxx, maxy) in EPSG:5179
+
+        # SHP CRS(5179) → 프로젝트 CRS 변환
+        canvas = self.iface.mapCanvas()
+        project_crs = canvas.mapSettings().destinationCrs()
+        shp_crs = QgsCoordinateReferenceSystem('EPSG:5179')
+
+        if project_crs.authid() != 'EPSG:5179':
+            transform = QgsCoordinateTransform(
+                shp_crs, project_crs, QgsProject.instance())
+            rect = QgsRectangle(b[0], b[1], b[2], b[3])
+            rect = transform.transformBoundingBox(rect)
+        else:
+            rect = QgsRectangle(b[0], b[1], b[2], b[3])
+
+        # 약간의 여백 추가 (10%)
+        rect.scale(1.1)
+        canvas.setExtent(rect)
+        canvas.refresh()
+
+        # 해당 행정코드의 래스터 레이어를 최상단으로 이동
+        self._raise_raster_by_code(adm_cd, rect)
+
+        adm_nm = self._adm_table.item(row, 1).text() if self._adm_table.item(row, 1) else ''
+        self.iface.messageBar().pushInfo('이동', f'{adm_cd} {adm_nm}')
+
+    def _raise_raster_by_code(self, adm_cd, extent_fallback=None):
+        """행정코드로 래스터 레이어를 찾아 최상단으로 이동.
+        이름 매칭 우선, 실패 시 extent 폴백."""
+        root = QgsProject.instance().layerTreeRoot()
+
+        # 1) 이름에 행정코드가 포함된 래스터 레이어 찾기
+        found = None
+        for node in reversed(root.children()):
+            if not isinstance(node, QgsLayerTreeLayer):
+                continue
+            layer = node.layer()
+            if layer is None or not isinstance(layer, QgsRasterLayer):
+                continue
+            if adm_cd in layer.name():
+                found = node
+                break
+
+        # 2) 이름 매칭 실패 시 extent 폴백
+        if found is None and extent_fallback is not None:
+            for node in reversed(root.children()):
+                if not isinstance(node, QgsLayerTreeLayer):
+                    continue
+                layer = node.layer()
+                if layer is None or not isinstance(layer, QgsRasterLayer):
+                    continue
+                center = layer.extent().center()
+                if extent_fallback.contains(center):
+                    found = node
+                    break
+
+        # 3) 최상단으로 이동 (삽입 먼저 → 제거 나중, 레이어 참조 보존)
+        if found is not None and root.children().index(found) != 0:
+            clone = found.clone()
+            root.insertChildNode(0, clone)
+            root.removeChildNode(found)
+
+        # 4) 행정경계 SHP는 항상 맨 위
+        _ensure_boundary_on_top()
+
+
+def _ensure_boundary_on_top():
+    """'행정경계 (읍면동)' 레이어를 레이어 트리 최상단으로 유지"""
+    root = QgsProject.instance().layerTreeRoot()
+    for node in root.children():
+        if not isinstance(node, QgsLayerTreeLayer):
+            continue
+        layer = node.layer()
+        if layer and layer.name() == '행정경계 (읍면동)':
+            if root.children().index(node) == 0:
+                return  # 이미 최상단
+            clone = node.clone()
+            root.insertChildNode(0, clone)
+            root.removeChildNode(node)
+            return
 
 
 class GISScanToolsDialog(QDialog):
@@ -1485,13 +1686,15 @@ class GISScanToolsDialog(QDialog):
             # 메타데이터 저장 (검수 탭용)
             self._save_georef_meta(result)
 
-            # QGIS에 레이어 추가 (TIFF 우선, 없으면 원본 이미지)
-            layer_path = result.get('tif_path') or result.get('image_path', '')
+            # QGIS에 레이어 추가 (JPG+JGW, CRS=EPSG:5179)
+            layer_path = result.get('image_path', '')
             if layer_path and os.path.exists(layer_path):
                 layer = QgsRasterLayer(layer_path, os.path.basename(layer_path))
                 if layer.isValid():
+                    layer.setCrs(QgsCoordinateReferenceSystem('EPSG:5179'))
                     QgsProject.instance().addMapLayer(layer)
                     self.log(f'QGIS에 레이어 추가됨: {os.path.basename(layer_path)}')
+            _ensure_boundary_on_top()
 
             # PostGIS 참조 레이어 로드
             self._load_postgis_reference_layers(result)
@@ -1538,17 +1741,20 @@ class GISScanToolsDialog(QDialog):
             n_total = batch_result['total']
             n_err = len(batch_result['errors'])
 
-            # 메타데이터 저장 + QGIS에 추가 (TIFF 우선)
+            # 메타데이터 저장 + QGIS에 추가 (JPG+JGW, CRS=EPSG:5179)
+            crs_5179 = QgsCoordinateReferenceSystem('EPSG:5179')
             for result in batch_result['results']:
                 self._save_georef_meta(result)
-                layer_path = result.get('tif_path') or result.get('image_path', '')
+                layer_path = result.get('image_path', '')
                 if layer_path and os.path.exists(layer_path):
                     layer = QgsRasterLayer(layer_path, os.path.basename(layer_path))
                     if layer.isValid():
+                        layer.setCrs(crs_5179)
                         QgsProject.instance().addMapLayer(layer)
 
             if n_ok > 0:
                 self.log(f'\nQGIS에 {n_ok}개 레이어 추가됨')
+                _ensure_boundary_on_top()
 
             # PostGIS 참조 레이어 로드 (전체 결과의 통합 extent)
             self._load_postgis_reference_layers(batch_result['results'])
@@ -1752,8 +1958,10 @@ class GISScanToolsDialog(QDialog):
                 self.update_status('QGIS에 레이어 추가 중...')
                 layer = QgsRasterLayer(merged_path, os.path.basename(merged_path))
                 if layer.isValid():
+                    layer.setCrs(QgsCoordinateReferenceSystem('EPSG:5179'))
                     QgsProject.instance().addMapLayer(layer)
                     self.log(f'QGIS에 레이어 추가됨: {os.path.basename(merged_path)}')
+                _ensure_boundary_on_top()
 
             self.finish_task(True, f'병합 완료 ({grid}, {n_ok}/{n_total})')
 
