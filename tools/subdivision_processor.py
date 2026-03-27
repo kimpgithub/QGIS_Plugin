@@ -543,8 +543,8 @@ class SubdivisionProcessor:
 
                 jgw, cost, gcps, map_image, map_bbox = fft_result
 
-                # 크롭 이미지 저장
-                name_base = os.path.splitext(sheet_name)[0]
+                # 크롭 이미지 저장 (_crop 접미사로 원본 보호)
+                name_base = os.path.splitext(sheet_name)[0] + '_crop'
                 out_img_path = os.path.join(output_dir, f"{name_base}.jpg")
                 _, encoded = cv2.imencode('.jpg', map_image,
                                           [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -735,9 +735,9 @@ class SubdivisionProcessor:
                 # JGW
                 jgw = JGWParams(ps_f, 0.0, 0.0, -ps_f, ox_f, oy_f)
 
-                # 출력 저장
+                # 출력 저장 (_crop 접미사로 원본 보호)
                 try:
-                    name_base = os.path.splitext(sheet_name)[0]
+                    name_base = os.path.splitext(sheet_name)[0] + '_crop'
                     out_img_path = os.path.join(output_dir, f"{name_base}.jpg")
                     _, encoded = cv2.imencode('.jpg', map_image,
                                               [cv2.IMWRITE_JPEG_QUALITY, 95])
