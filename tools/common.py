@@ -336,9 +336,7 @@ def extract_orange_mask(image: np.ndarray) -> np.ndarray:
 # ============================================================
 
 def convert_pdf_to_images(pdf_path: str, dpi: int = 300, output_dir: str = None) -> dict:
-    """PDF → JPG + Tiled TIFF 변환
-
-    JPG는 보관/이미지처리용, Tiled TIFF는 QGIS용 (대형 이미지도 GDAL 메모리 초과 없음).
+    """PDF → JPG 변환
 
     Args:
         pdf_path: PDF 파일 경로
@@ -346,14 +344,13 @@ def convert_pdf_to_images(pdf_path: str, dpi: int = 300, output_dir: str = None)
         output_dir: 출력 폴더 (None이면 PDF와 같은 위치)
 
     Returns:
-        {'jpg': jpg_path, 'tif': tif_path}
+        {'jpg': jpg_path}
     """
     import fitz  # PyMuPDF
 
     base = os.path.splitext(os.path.basename(pdf_path))[0]
     out_dir = output_dir or os.path.dirname(pdf_path)
     jpg_path = os.path.join(out_dir, base + ".jpg")
-    tif_path = os.path.join(out_dir, base + ".tif")
 
     # PyMuPDF 렌더링
     doc = fitz.open(pdf_path)
@@ -367,23 +364,10 @@ def convert_pdf_to_images(pdf_path: str, dpi: int = 300, output_dir: str = None)
         img = img[:, :, :3]
     doc.close()
 
-    # 1) JPG 저장 (보관용)
     save_image(cv2.cvtColor(img, cv2.COLOR_RGB2BGR), jpg_path)
     print(f"  [PDF→JPG] {os.path.basename(pdf_path)} → {os.path.basename(jpg_path)} ({pix.width}x{pix.height}, {dpi} DPI)")
 
-    # 2) Tiled TIFF 저장 (QGIS용) - GDAL 사용
-    from osgeo import gdal
-    driver = gdal.GetDriverByName('GTiff')
-    ds = driver.Create(tif_path, pix.width, pix.height, 3, gdal.GDT_Byte,
-                       ['TILED=YES', 'COMPRESS=JPEG', 'JPEG_QUALITY=95',
-                        'BLOCKXSIZE=256', 'BLOCKYSIZE=256'])
-    for i in range(3):
-        ds.GetRasterBand(i + 1).WriteArray(img[:, :, i])
-    ds.FlushCache()
-    ds = None
-    print(f"  [PDF→TIF] {os.path.basename(pdf_path)} → {os.path.basename(tif_path)} (Tiled TIFF, COMPRESS=JPEG)")
-
-    return {'jpg': jpg_path, 'tif': tif_path}
+    return {'jpg': jpg_path}
 
 
 def convert_pdf_to_jpg(pdf_path: str, dpi: int = 300, output_path: str = None) -> str:
@@ -628,7 +612,7 @@ def compute_aoi(
 def clip_shp_to_aoi(
     gdf, aoi_box, buffer_ratio: float = 0.3
 ) -> List:
-    """AOI(+버퍼)와 교차하는 SHP 경계를 클리핑
+    """AOI(+버퍼)와 교차하는 SHP 경계를 클리핑 (공간 인덱스 활용)
 
     Returns:
         클리핑된 경계 geometry 리스트
@@ -644,7 +628,13 @@ def clip_shp_to_aoi(
         aoi_box.bounds[3] + by,
     )
 
-    visible = gdf[gdf.geometry.intersects(search_box)]
+    # 공간 인덱스로 후보 축소 후 정밀 intersects 확인
+    if hasattr(gdf, 'sindex'):
+        candidate_idx = list(gdf.sindex.intersection(search_box.bounds))
+        candidates = gdf.iloc[candidate_idx]
+        visible = candidates[candidates.geometry.intersects(search_box)]
+    else:
+        visible = gdf[gdf.geometry.intersects(search_box)]
     print(f"  [클리핑] AOI 교차 행정구역: {len(visible)}개")
 
     all_boundaries = []
@@ -829,7 +819,7 @@ def refine_position(
     else:
         init = np.array([init_pixel_size, init_offset_x, init_offset_y])
     result = minimize(cost, init, method="Powell",
-                      options={"maxiter": 500, "ftol": 1e-10})
+                      options={"maxiter": 300, "ftol": 1e-6})
 
     if fix_scale:
         ps = init_pixel_size
