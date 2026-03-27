@@ -305,15 +305,13 @@ class SHPGeoreferencer:
         print(f"처리: {os.path.basename(image_path)}")
         print(f"{'='*50}")
 
-        # --- Step 0: PDF → JPG + TIFF ---
-        tif_path = None
+        # --- Step 0: PDF → JPG ---
         pdf_info = None
         if image_path.lower().endswith('.pdf'):
-            print("\n[Step 0] PDF → JPG + TIFF 변환 + 텍스트 추출")
+            print("\n[Step 0] PDF → JPG 변환 + 텍스트 추출")
             pdf_info = self._extract_info_from_pdf(image_path)
             pdf_result = convert_pdf_to_images(image_path, dpi=300, output_dir=output_dir)
-            image_path = pdf_result['jpg']    # 이미지 처리는 JPG로
-            tif_path = pdf_result['tif']      # QGIS용 TIFF 경로 보관
+            image_path = pdf_result['jpg']
 
         # --- DPI 자동 감지 ---
         dpi = get_image_dpi(image_path)
@@ -415,7 +413,7 @@ class SHPGeoreferencer:
         print("\n[Step 5] 1차 Powell 리파인 (기하 기반)")
         aoi1 = compute_aoi(init_ox, init_oy, init_ps, (map_h, map_w))
         boundaries = clip_shp_to_aoi(self.gdf, aoi1, buffer_ratio=0.5)
-        shp_pts1 = sample_points_from_boundaries(boundaries, num_points=3000)
+        shp_pts1 = sample_points_from_boundaries(boundaries, num_points=2000)
 
         if len(shp_pts1) < 50:
             raise ValueError(f"경계점 부족 ({len(shp_pts1)}개)")
@@ -434,7 +432,7 @@ class SHPGeoreferencer:
                 fft_ox, fft_oy = fft_result
                 aoi_fft = compute_aoi(fft_ox, fft_oy, init_ps, (map_h, map_w))
                 bnd_fft = clip_shp_to_aoi(self.gdf, aoi_fft, buffer_ratio=0.5)
-                pts_fft = sample_points_from_boundaries(bnd_fft, num_points=3000)
+                pts_fft = sample_points_from_boundaries(bnd_fft, num_points=2000)
                 if len(pts_fft) >= 50:
                     ps_f, ox_f, oy_f, cost_f = refine_position(
                         pts_fft, dist_map, init_ps, fft_ox, fft_oy, (map_h, map_w),
@@ -447,21 +445,27 @@ class SHPGeoreferencer:
         if opt_cost > 10:
             raise ValueError(f"정합 실패: cost={opt_cost:.1f}px > 10px")
 
-        # --- Step 5b: 재클리핑 + 2차 리파인 (정밀 AOI) ---
-        print("\n[Step 5b] 재클리핑 + 2차 Powell 리파인")
-        aoi2 = compute_aoi(opt_ox, opt_oy, opt_ps, (map_h, map_w))
-        boundaries = clip_shp_to_aoi(self.gdf, aoi2, buffer_ratio=0.05)
-        shp_pts2 = sample_points_from_boundaries(boundaries, num_points=5000)
+        # --- Step 5b: 재클리핑 + 2차 리파인 (정밀 AOI) — cost > 0.5px일 때만 ---
+        if opt_cost > 0.5:
+            print("\n[Step 5b] 재클리핑 + 2차 Powell 리파인")
+            aoi2 = compute_aoi(opt_ox, opt_oy, opt_ps, (map_h, map_w))
+            boundaries = clip_shp_to_aoi(self.gdf, aoi2, buffer_ratio=0.05)
+            shp_pts2 = sample_points_from_boundaries(boundaries, num_points=3000)
 
-        if len(shp_pts2) >= 50:
-            ps2, ox2, oy2, cost2 = refine_position(
-                shp_pts2, dist_map, opt_ps, opt_ox, opt_oy, (map_h, map_w),
-            )
-            if cost2 <= opt_cost:
-                print(f"  -> 2차 리파인 채택: cost {opt_cost:.3f} → {cost2:.3f}px")
-                opt_ps, opt_ox, opt_oy, opt_cost = ps2, ox2, oy2, cost2
-            else:
-                print(f"  -> 2차 리파인 미채택: {cost2:.3f}px > {opt_cost:.3f}px")
+            if len(shp_pts2) >= 50:
+                ps2, ox2, oy2, cost2 = refine_position(
+                    shp_pts2, dist_map, opt_ps, opt_ox, opt_oy, (map_h, map_w),
+                )
+                if cost2 <= opt_cost:
+                    print(f"  -> 2차 리파인 채택: cost {opt_cost:.3f} → {cost2:.3f}px")
+                    opt_ps, opt_ox, opt_oy, opt_cost = ps2, ox2, oy2, cost2
+                else:
+                    print(f"  -> 2차 리파인 미채택: {cost2:.3f}px > {opt_cost:.3f}px")
+        else:
+            print(f"\n[Step 5b] 스킵 (cost={opt_cost:.3f}px ≤ 0.5)")
+            # boundaries를 GCP 생성용으로 다시 클리핑
+            aoi2 = compute_aoi(opt_ox, opt_oy, opt_ps, (map_h, map_w))
+            boundaries = clip_shp_to_aoi(self.gdf, aoi2, buffer_ratio=0.05)
 
         # --- Step 7: GCP 생성 ---
         print("\n[Step 7] GCP 생성")
@@ -498,19 +502,16 @@ class SHPGeoreferencer:
         write_jgw(jgw_path, jgw_params)
         print(f"  JGW 저장: {jgw_path}")
 
-        # TIFF용 TFW 생성 (JGW와 동일 포맷)
-        if tif_path:
-            tfw_path = os.path.splitext(tif_path)[0] + '.tfw'
-            write_jgw(tfw_path, jgw_params)
-            print(f"  TFW 저장: {tfw_path}")
-
-        # 이미지명과 출력명이 다르면 QGIS 자동매칭용 JGW 추가 생성
+        # 이미지 파일명이 행정코드와 다르면 행정코드명으로 리네임
         img_base = os.path.splitext(os.path.basename(image_path))[0]
+        img_ext = os.path.splitext(image_path)[1]  # .jpg 등
         if img_base != base_name:
-            img_jgw_dir = output_dir or os.path.dirname(image_path)
-            img_jgw_path = os.path.join(img_jgw_dir, f"{img_base}.jgw")
-            write_jgw(img_jgw_path, jgw_params)
-            print(f"  JGW 저장 (QGIS용): {img_jgw_path}")
+            dst_dir = output_dir or os.path.dirname(image_path)
+            dst_img = os.path.join(dst_dir, f"{base_name}{img_ext}")
+            if not os.path.exists(dst_img):
+                os.rename(image_path, dst_img)
+                print(f"  이미지 리네임: {os.path.basename(image_path)} → {base_name}{img_ext}")
+            image_path = dst_img
 
         # --- Step 9: VRT 출력 ---
         gcp_vrt = None
@@ -528,7 +529,6 @@ class SHPGeoreferencer:
 
         return {
             'image_path': image_path,
-            'tif_path': tif_path,
             'admin_code': admin_code,
             'admin_name': admin_name,
             'base_name': base_name,
