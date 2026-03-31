@@ -821,7 +821,7 @@ class GISScanToolsDialog(QDialog):
                         admin_code = code_match.group(1)
 
                         if is_subdivision:
-                            # 분할도: 검은색 잉크 추출 OCR로 시트번호 인식
+                            # 분할도: 검은색 잉크 추출 + 큰 글자만 남겨 시트번호 인식
                             import cv2
                             sheet_crop = img.crop((0, int(h*0.08), int(w*0.10), int(h*0.13)))
                             sheet_rgb = np.array(sheet_crop.convert('RGB'))
@@ -829,6 +829,16 @@ class GISScanToolsDialog(QDialog):
                             trimmed_rgb = sheet_rgb[int(sh_h*0.30):, :]
                             black_mask = np.all(trimmed_rgb < 50, axis=2)
                             black_only = np.where(black_mask, 0, 255).astype(np.uint8)
+                            # 큰 contour만 남기기 (행정코드·지명·프레임선 제거)
+                            _, _tbin = cv2.threshold(black_only, 0, 255, cv2.THRESH_BINARY_INV)
+                            _cnts, _ = cv2.findContours(_tbin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            _min_dim_th = trimmed_rgb.shape[0] * 0.2
+                            clean = np.ones_like(black_only) * 255
+                            for _c in _cnts:
+                                _x, _y, _cw, _ch = cv2.boundingRect(_c)
+                                if min(_cw, _ch) >= _min_dim_th:
+                                    cv2.drawContours(clean, [_c], -1, 0, -1)
+                            black_only = clean
                             nm_match = None
                             for _sc in [0.25, 0.2, 0.3]:
                                 sm = cv2.resize(black_only, None, fx=_sc, fy=_sc,
