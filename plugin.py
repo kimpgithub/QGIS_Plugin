@@ -624,8 +624,8 @@ class GISScanToolsDialog(QDialog):
 
         desc_label = QLabel(
             '분할도를 병합하여 하나의 이미지로 만듭니다.\n'
-            'N-분할 자동 감지, 메인 이미지 기준 AKAZE 매칭으로 좌표 생성합니다.\n'
-            '메인 이미지(JGW 필요)를 반드시 지정하세요.'
+            '메인 이미지 폴더와 분할도 폴더를 선택하면\n'
+            '행정코드(8자리)로 자동 매칭하여 일괄 처리합니다.'
         )
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet('color: #666; margin-bottom: 10px;')
@@ -635,32 +635,31 @@ class GISScanToolsDialog(QDialog):
         form = QFormLayout()
 
         self.merger_main_edit = QLineEdit()
-        self.merger_main_edit.setPlaceholderText('SHP와 정합된 메인 이미지 (JGW 필요)')
+        self.merger_main_edit.setPlaceholderText('메인 이미지 폴더 (JGW 필요)')
         main_btn = QPushButton('찾기...')
-        main_btn.clicked.connect(lambda: self.browse_file(
-            self.merger_main_edit, '이미지 (*.jpg *.tif)'))
+        main_btn.clicked.connect(lambda: self.browse_folder(self.merger_main_edit))
         main_row = QHBoxLayout()
         main_row.addWidget(self.merger_main_edit)
         main_row.addWidget(main_btn)
-        form.addRow('메인 이미지:', main_row)
+        form.addRow('메인 이미지 폴더:', main_row)
 
         self.merger_input_edit = QLineEdit()
+        self.merger_input_edit.setPlaceholderText('분할도 이미지 폴더')
         input_btn = QPushButton('찾기...')
-        input_btn.clicked.connect(self.browse_merger_input_folder)
+        input_btn.clicked.connect(lambda: self.browse_folder(self.merger_input_edit))
         input_row = QHBoxLayout()
         input_row.addWidget(self.merger_input_edit)
         input_row.addWidget(input_btn)
         form.addRow('분할도 폴더:', input_row)
 
         self.merger_output_edit = QLineEdit()
-        self.merger_output_edit.setPlaceholderText('분할도 폴더 선택 시 자동 설정')
+        self.merger_output_edit.setPlaceholderText('비워두면 분할도 폴더에 저장')
         output_btn = QPushButton('찾기...')
-        output_btn.clicked.connect(lambda: self.browse_save_file(
-            self.merger_output_edit, '이미지 (*.jpg)'))
+        output_btn.clicked.connect(lambda: self.browse_folder(self.merger_output_edit))
         output_row = QHBoxLayout()
         output_row.addWidget(self.merger_output_edit)
         output_row.addWidget(output_btn)
-        form.addRow('출력 파일:', output_row)
+        form.addRow('출력 폴더:', output_row)
 
         input_group.setLayout(form)
         layout.addWidget(input_group)
@@ -822,8 +821,35 @@ class GISScanToolsDialog(QDialog):
                         admin_code = code_match.group(1)
 
                         if is_subdivision:
-                            # 분할도: N-M 패턴 추출 시도
-                            nm_match = re.search(r'(\d+)\s*[-/]\s*(\d+)', text)
+                            # 분할도: 검은색 잉크 추출 OCR로 시트번호 인식
+                            import cv2
+                            sheet_crop = img.crop((0, int(h*0.08), int(w*0.10), int(h*0.13)))
+                            sheet_rgb = np.array(sheet_crop.convert('RGB'))
+                            sh_h = sheet_rgb.shape[0]
+                            trimmed_rgb = sheet_rgb[int(sh_h*0.30):, :]
+                            black_mask = np.all(trimmed_rgb < 50, axis=2)
+                            black_only = np.where(black_mask, 0, 255).astype(np.uint8)
+                            nm_match = None
+                            for _sc in [0.25, 0.2, 0.3]:
+                                sm = cv2.resize(black_only, None, fx=_sc, fy=_sc,
+                                                interpolation=cv2.INTER_AREA)
+                                _, sbin = cv2.threshold(
+                                    sm, 0, 255,
+                                    cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                                stxt = pytesseract.image_to_string(
+                                    Image.fromarray(sbin),
+                                    config='--psm 7 --oem 3 '
+                                           '-c tessedit_char_whitelist=0123456789-'
+                                ).strip()
+                                nm_match = re.match(r'^(\d+)-(\d+)$', stxt)
+                                if not nm_match:
+                                    nm2 = re.match(r'^(\d)(\d+)$', stxt)
+                                    if nm2:
+                                        stxt = f'{nm2.group(1)}-{nm2.group(2)}'
+                                        nm_match = re.match(r'^(\d+)-(\d+)$', stxt)
+                                if nm_match:
+                                    break
+
                             if nm_match:
                                 n, m = nm_match.group(1), nm_match.group(2)
                                 ext = os.path.splitext(fname)[1]
@@ -1580,14 +1606,6 @@ class GISScanToolsDialog(QDialog):
         if path:
             line_edit.setText(path)
 
-    def browse_merger_input_folder(self):
-        """분할도 병합 - 입력 폴더 선택 시 출력 파일 자동 설정"""
-        path = QFileDialog.getExistingDirectory(self, '분할도 폴더 선택')
-        if path:
-            self.merger_input_edit.setText(path)
-            output_path = os.path.join(path, 'merged_map.jpg')
-            self.merger_output_edit.setText(output_path)
-
     def browse_save_file(self, line_edit, filter_str):
         """저장 파일 선택 다이얼로그"""
         path, _ = QFileDialog.getSaveFileName(self, '저장 위치 선택', '', filter_str)
@@ -1882,90 +1900,134 @@ class GISScanToolsDialog(QDialog):
             QMessageBox.critical(self, '오류', str(e))
 
     def run_merging(self):
-        """분할도 병합 실행 (N-분할 통합 처리)"""
-        main_image = self.merger_main_edit.text().strip()
-        input_dir = self.merger_input_edit.text().strip()
-        output_file = self.merger_output_edit.text().strip()
+        """분할도 병합 실행 — 폴더 기반 일괄 처리
 
-        if not all([main_image, input_dir, output_file]):
+        메인 폴더에서 {8자리코드}.jpg + .jgw 쌍을 찾고,
+        분할도 폴더에서 {같은코드}_{N}-{M}.jpg 매칭 → 세트별 순차 처리.
+        """
+        main_folder = self.merger_main_edit.text().strip()
+        sub_folder = self.merger_input_edit.text().strip()
+        output_folder = self.merger_output_edit.text().strip() or sub_folder
+
+        if not main_folder or not sub_folder:
             QMessageBox.warning(self, '경고',
-                '메인 이미지, 분할도 폴더, 출력 파일을 모두 입력해주세요.')
+                '메인 이미지 폴더와 분할도 폴더를 모두 선택해주세요.')
             return
 
-        main_jgw_path = os.path.splitext(main_image)[0] + '.jgw'
-        if not os.path.exists(main_jgw_path):
+        # SHP 경로 (좌표생성 탭에서 가져옴)
+        shp_path = self.georef_shp_edit.text().strip() if hasattr(self, 'georef_shp_edit') else None
+        if not shp_path or not os.path.exists(shp_path):
             QMessageBox.warning(self, '경고',
-                f'메인 이미지의 JGW 파일이 없습니다:\n{main_jgw_path}\n\n'
-                '좌표 생성 탭에서 먼저 메인 이미지의 JGW를 생성하세요.')
+                'SHP 경로가 필요합니다.\n좌표 생성 탭에서 SHP 파일을 지정해주세요.')
             return
 
-        self.start_task('분할도 병합')
+        # 1) 메인 폴더에서 {8자리}.jpg + .jgw 쌍 수집
+        image_exts = ('.jpg', '.jpeg', '.tif', '.tiff')
+        main_pairs = {}  # {admin_code: (image_path, jgw_path)}
+        for fname in sorted(os.listdir(main_folder)):
+            base, ext = os.path.splitext(fname)
+            if ext.lower() not in image_exts:
+                continue
+            m = re.match(r'^(\d{8})$', base)
+            if not m:
+                continue
+            code = m.group(1)
+            jgw_ext = '.jgw' if ext.lower() in ('.jpg', '.jpeg') else '.tfw'
+            jgw_path = os.path.join(main_folder, base + jgw_ext)
+            if os.path.exists(jgw_path):
+                main_pairs[code] = (
+                    os.path.join(main_folder, fname), jgw_path)
+
+        if not main_pairs:
+            QMessageBox.warning(self, '경고',
+                '메인 폴더에서 JGW가 있는 메인 이미지를 찾을 수 없습니다.\n'
+                '파일명이 {8자리코드}.jpg 형식이어야 합니다.')
+            return
+
+        # 2) 분할도 폴더에서 행정코드별 분할도 존재 여부 확인
+        sub_pattern = re.compile(r'^(\d{8})_\d+-\d+\.(jpg|jpeg|tif|tiff)$', re.IGNORECASE)
+        sub_codes = set()
+        for fname in os.listdir(sub_folder):
+            sm = sub_pattern.match(fname)
+            if sm:
+                sub_codes.add(sm.group(1))
+
+        # 매칭되는 세트만 처리
+        matched_codes = sorted(set(main_pairs.keys()) & sub_codes)
+        if not matched_codes:
+            QMessageBox.warning(self, '경고',
+                '메인 이미지와 분할도가 매칭되는 행정코드가 없습니다.')
+            return
+
+        self.start_task('분할도 일괄 병합')
+        self.log(f'메인 폴더: {main_folder}')
+        self.log(f'분할도 폴더: {sub_folder}')
+        self.log(f'매칭: {len(matched_codes)}개 세트 / '
+                 f'메인 {len(main_pairs)}개, 분할도 {len(sub_codes)}개 코드')
+
+        from .tools.subdivision_processor import process_subdivisions
+        import io, sys
+
+        total_sets = len(matched_codes)
+        n_set_ok = 0
+
         try:
-            from .tools.subdivision_processor import process_subdivisions
+            for set_idx, code in enumerate(matched_codes, 1):
+                main_image, main_jgw = main_pairs[code]
+                output_path = os.path.join(output_folder, f'{code}_merged.jpg')
 
-            self.log(f'메인 이미지: {os.path.basename(main_image)}')
-            self.log(f'분할도 폴더: {input_dir}')
+                self.update_status(f'[{set_idx}/{total_sets}] {code} 처리 중...')
+                self.log(f'\n{"="*40}')
+                self.log(f'[{set_idx}/{total_sets}] {code}')
 
-            def on_progress(current, total, filename):
-                self.update_status(f'분할도 매칭: {filename} ({current}/{total})')
-                self.log(f'  [{current}/{total}] {filename}')
+                def on_progress(current, total, filename):
+                    self.update_status(
+                        f'[{set_idx}/{total_sets}] {code} — {filename} ({current}/{total})')
+                    QApplication.processEvents()
+
+                _old_stdout = sys.stdout
+                _capture = io.StringIO()
+                sys.stdout = _capture
+
+                try:
+                    result = process_subdivisions(
+                        sub_folder, output_path,
+                        main_image_path=main_image,
+                        main_jgw_path=main_jgw,
+                        progress_callback=on_progress,
+                        shp_path=shp_path,
+                    )
+                finally:
+                    sys.stdout = _old_stdout
+                    captured = _capture.getvalue()
+                    if captured.strip():
+                        self.log(captured.rstrip())
+
+                grid = result.get('grid', '?')
+                n_ok = result.get('n_success', 0)
+                n_total = result.get('n_total', 0)
+                self.log(f'  → {grid}, {n_ok}/{n_total} 성공')
+
+                if result.get('errors'):
+                    for err in result['errors']:
+                        self.log(f'  실패: 시트 {err["sheet"]} — {err["error"]}')
+
+                merged_path = result.get('output')
+                if merged_path and os.path.exists(merged_path):
+                    layer = QgsRasterLayer(merged_path, os.path.basename(merged_path))
+                    if layer.isValid():
+                        layer.setCrs(QgsCoordinateReferenceSystem('EPSG:5179'))
+                        QgsProject.instance().addMapLayer(layer)
+                    _ensure_boundary_on_top()
+
+                n_set_ok += 1
                 QApplication.processEvents()
 
-            # SHP 경로 (좌표생성 탭에서 가져옴, 필수)
-            shp_path = self.georef_shp_edit.text().strip() if hasattr(self, 'georef_shp_edit') else None
-            if not shp_path or not os.path.exists(shp_path):
-                QMessageBox.warning(self, '경고',
-                    'SHP 경로가 필요합니다.\n좌표 생성 탭에서 SHP 파일을 지정해주세요.')
-                return
-
-            self.update_status('분할도 처리 중...')
-
-            # print 출력을 로그 창에 캡처
-            import io, sys
-            _old_stdout = sys.stdout
-            _capture = io.StringIO()
-            sys.stdout = _capture
-
-            try:
-                result = process_subdivisions(
-                    input_dir, output_file,
-                    main_image_path=main_image,
-                    main_jgw_path=main_jgw_path,
-                    progress_callback=on_progress,
-                    shp_path=shp_path,
-                )
-            finally:
-                sys.stdout = _old_stdout
-                captured = _capture.getvalue()
-                if captured.strip():
-                    self.log(captured.rstrip())
-
-            grid = result.get('grid', '?')
-            n_ok = result.get('n_success', 0)
-            n_total = result.get('n_total', 0)
-            scale = result.get('scale', 0)
-
-            method = result.get('method', '?')
-            self.log(f'그리드: {grid}, 스케일: {scale:.2f}, 매칭: {method}')
-            self.log(f'성공: {n_ok}/{n_total}')
-
-            if result.get('errors'):
-                for err in result['errors']:
-                    self.log(f'  실패: 시트 {err["sheet"]} — {err["error"]}')
-
-            merged_path = result.get('output')
-            if merged_path and os.path.exists(merged_path):
-                self.update_status('QGIS에 레이어 추가 중...')
-                layer = QgsRasterLayer(merged_path, os.path.basename(merged_path))
-                if layer.isValid():
-                    layer.setCrs(QgsCoordinateReferenceSystem('EPSG:5179'))
-                    QgsProject.instance().addMapLayer(layer)
-                    self.log(f'QGIS에 레이어 추가됨: {os.path.basename(merged_path)}')
-                _ensure_boundary_on_top()
-
-            self.finish_task(True, f'병합 완료 ({grid}, {n_ok}/{n_total})')
+            self.finish_task(True,
+                f'{n_set_ok}/{total_sets} 세트 병합 완료')
 
         except Exception as e:
             self.log(f'오류: {str(e)}')
-            self.finish_task(False, str(e))
+            self.finish_task(False,
+                f'{n_set_ok} 완료, 오류 발생: {e}')
             QMessageBox.critical(self, '오류', str(e))
