@@ -88,7 +88,8 @@ class MainSiftCache:
 
 def match_and_warp(scan_jpg, admin_code, pdf_jpg, pdf_jgw_path,
                    out_dir, cache, target_ps=None,
-                   scan_scale=0.5, save_intermediates=True):
+                   scan_scale=0.5, save_intermediates=True,
+                   output_basename=None):
     """단일 스캔 처리. 결과 dict 반환.
 
     Args:
@@ -228,10 +229,11 @@ def match_and_warp(scan_jpg, admin_code, pdf_jpg, pdf_jgw_path,
         borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
     print(f'  warpPerspective: {time.time()-t:.1f}s')
 
-    # 9) 저장
-    warped_jpg = os.path.join(out_dir, 'warped_scan.jpg')
-    warped_jgw = os.path.join(out_dir, 'warped_scan.jgw')
-    warped_prj = os.path.join(out_dir, 'warped_scan.prj')
+    # 9) 저장 (파일명: output_basename.{jpg,jgw,prj}, 기본 'warped_scan')
+    base = output_basename or 'warped_scan'
+    warped_jpg = os.path.join(out_dir, f'{base}.jpg')
+    warped_jgw = os.path.join(out_dir, f'{base}.jgw')
+    warped_prj = os.path.join(out_dir, f'{base}.prj')
     cv2.imwrite(warped_jpg, warped, [cv2.IMWRITE_JPEG_QUALITY, 92])
     write_jgw(warped_jgw, JGWParams(
         pixel_size_x=target_ps, rotation_x=0.0, rotation_y=0.0,
@@ -309,7 +311,8 @@ def main():
                 r = match_and_warp(
                     scan, code, pdf_jpg, pdf_jgw, sub_out, cache,
                     target_ps=args.target_ps,
-                    save_intermediates=not args.no_intermediates)
+                    save_intermediates=not args.no_intermediates,
+                    output_basename=sub_name)
                 resw = r.get('residual_world_m', {})
                 osz = r.get('output_size', [0, 0])
                 w.writerow([

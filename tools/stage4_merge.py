@@ -84,24 +84,27 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
         result.update(status='ERROR', message='sheet_bboxes에 admin 없음')
         return result
 
-    # 워핑 시트 수집: warped/{code}/{code}_{sheet_id}/warped_scan.jpg
-    sheet_jpgs = sorted(glob.glob(os.path.join(
-        warped_dir, admin_code, f'{admin_code}_*', 'warped_scan.jpg')))
-    if not sheet_jpgs:
-        result.update(status='ERROR', message='워핑 시트 없음')
-        return result
-
+    # 워핑 시트 수집: warped/{code}/{code}_{sheet_id}/{code}_{sheet_id}.jpg
+    # (구버전 warped_scan.jpg도 폴백으로 지원)
     sheets = []
-    for sj in sheet_jpgs:
-        folder = os.path.basename(os.path.dirname(sj))
-        # folder format: {admin_code}_{sheet_id}
-        if not folder.startswith(f'{admin_code}_'):
-            continue
-        sid = folder[len(admin_code) + 1:]
-        if sid not in bboxes:
-            continue
-        jgw_path = os.path.splitext(sj)[0] + '.jgw'
-        sheets.append((sid, sj, jgw_path))
+    code_dir = os.path.join(warped_dir, admin_code)
+    if os.path.isdir(code_dir):
+        for folder in sorted(os.listdir(code_dir)):
+            if not folder.startswith(f'{admin_code}_'):
+                continue
+            sid = folder[len(admin_code) + 1:]
+            if sid not in bboxes:
+                continue
+            cand = [
+                os.path.join(code_dir, folder, f'{folder}.jpg'),
+                os.path.join(code_dir, folder, 'warped_scan.jpg'),
+            ]
+            for sj in cand:
+                if os.path.exists(sj):
+                    jgw_path = os.path.splitext(sj)[0] + '.jgw'
+                    if os.path.exists(jgw_path):
+                        sheets.append((sid, sj, jgw_path))
+                        break
 
     if not sheets:
         result.update(status='ERROR', message='유효 시트 매칭 없음')
