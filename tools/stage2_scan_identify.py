@@ -73,14 +73,75 @@ def crop_header(img, ratio_h=0.18, ratio_w=0.40):
     return img[:int(h * ratio_h), :int(w * ratio_w)]
 
 
+_TESS_CMD = None
+_TESS_CHECKED = False
+_TESS_ERROR = None
+
+
+def _find_tesseract():
+    """tesseract 바이너리 자동 탐색 (Windows 경로 포함)."""
+    import shutil as _sh
+    cmd = _sh.which('tesseract')
+    if cmd:
+        return cmd
+    # Windows 일반 경로
+    candidates = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        os.path.expanduser(r'~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def check_tesseract():
+    """tesseract 바이너리/언어팩 확인. (cmd, error_msg) 반환."""
+    global _TESS_CMD, _TESS_CHECKED, _TESS_ERROR
+    if _TESS_CHECKED:
+        return _TESS_CMD, _TESS_ERROR
+    _TESS_CHECKED = True
+    cmd = _find_tesseract()
+    if not cmd:
+        _TESS_ERROR = ('tesseract 바이너리를 찾을 수 없습니다.\n'
+                       'Windows: install.bat 실행 또는 '
+                       'https://github.com/UB-Mannheim/tesseract/wiki 에서 설치\n'
+                       'Linux/Mac: conda install -c conda-forge tesseract')
+        return None, _TESS_ERROR
+    try:
+        r = subprocess.run([cmd, '--list-langs'],
+                           capture_output=True, text=True, timeout=10)
+        langs = r.stdout
+        if 'kor' not in langs:
+            _TESS_ERROR = (f'tesseract 한국어 언어팩(kor) 없음. 설치된 언어:\n'
+                           f'{langs[:300]}')
+            _TESS_CMD = cmd  # 영어만으로도 8자리 숫자는 인식 가능 → 진행
+            return cmd, _TESS_ERROR
+    except Exception as e:
+        _TESS_ERROR = f'tesseract 실행 오류: {e}'
+        return None, _TESS_ERROR
+    _TESS_CMD = cmd
+    return cmd, None
+
+
 def _tesseract(img, config='--psm 6', lang='kor+eng'):
+    cmd, err = check_tesseract()
+    if not cmd:
+        return ''
+    # 한국어 언어팩 없으면 영어만
+    if err and 'kor' not in err:
+        pass  # 다른 오류
+    elif err:
+        lang = 'eng'
+
     import tempfile
     tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
     tmp.close()
     try:
         _imwrite(tmp.name, img)
         r = subprocess.run(
-            ['tesseract', tmp.name, '-', '-l', lang] + config.split(),
+            [cmd, tmp.name, '-', '-l', lang] + config.split(),
             capture_output=True, text=True, timeout=30)
         return r.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -338,9 +399,20 @@ def identify_scan(scan_jpg, sheet_cache, valid_codes, fast_ocr=False):
     # admin_code 식별 (OCR)
     code, conf = ocr_admin_code(img, valid_codes=valid_codes, fast=fast_ocr)
     if code is None:
+        # 진단: tesseract 자체가 안 도는지, OCR은 도는데 코드만 못찾는지
+        cmd, err = check_tesseract()
+        if not cmd:
+            msg = f'OCR 환경 문제: {err}'
+        elif err:
+            msg = f'OCR 부분 동작 (한국어 언어팩 없음): {err[:200]}'
+        else:
+            # tesseract OK였는데도 못찾음 — raw text 일부 노출
+            hdr = crop_header(img)
+            raw = _tesseract(hdr, '--psm 6', 'kor+eng' if not err else 'eng')
+            msg = (f'OCR은 동작하나 8자리 행정코드 미검출. '
+                   f'헤더 raw text(일부): {raw[:150].strip()!r}')
         return {'status': 'FAIL', 'admin_code': None, 'sheet_id': None,
-                'method': 'OCR_FAIL',
-                'message': 'OCR로 admin_code 추출 실패'}
+                'method': 'OCR_FAIL', 'message': msg}
 
     # sheet_id 식별 (SIFT)
     sid, inliers = identify_sheet(img, code, sheet_cache)
