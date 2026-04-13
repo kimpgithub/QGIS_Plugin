@@ -8,7 +8,7 @@ echo.
 
 REM === 1. Python packages ===
 echo [1/3] Installing Python packages...
-pip install psycopg2-binary pytesseract opencv-python numpy geopandas shapely rasterio scipy matplotlib koreanize-matplotlib Pillow
+pip install psycopg2-binary pytesseract opencv-python numpy geopandas shapely rasterio scipy matplotlib koreanize-matplotlib Pillow PyMuPDF scikit-image
 echo.
 
 REM === 2. Tesseract OCR ===
