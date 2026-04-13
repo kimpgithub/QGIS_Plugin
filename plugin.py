@@ -147,11 +147,15 @@ class StageTab(QWidget):
         ctrl = QHBoxLayout()
         self.btn_run = QPushButton(f'{self.stage_name} 실행')
         self.btn_run.clicked.connect(self._on_run)
+        self.btn_stop = QPushButton('중단')
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self._on_stop)
         self.btn_open_out = QPushButton('출력 폴더 열기')
         self.btn_open_out.clicked.connect(self._open_out_dir)
         self.btn_open_csv = QPushButton('상태 CSV 열기')
         self.btn_open_csv.clicked.connect(self._open_status_csv)
         ctrl.addWidget(self.btn_run)
+        ctrl.addWidget(self.btn_stop)
         ctrl.addStretch()
         ctrl.addWidget(self.btn_open_out)
         ctrl.addWidget(self.btn_open_csv)
@@ -195,6 +199,7 @@ class StageTab(QWidget):
             return
 
         self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
         self.log.clear()
         self.log.append(f'=== {self.stage_name} 시작 ===')
         self.log.append(f'argv: {" ".join(argv)}')
@@ -206,6 +211,21 @@ class StageTab(QWidget):
         self.worker.failed.connect(self._on_failed)
         self.worker.start()
 
+    def _on_stop(self):
+        if not self.worker or not self.worker.isRunning():
+            return
+        if QMessageBox.question(
+                self, '중단 확인',
+                '실행 중인 작업을 강제 중단합니다.\n'
+                '진행 중인 항목은 손실되지만 이미 저장된 산출물은 보존됩니다.\n계속할까요?'
+        ) != QMessageBox.Yes:
+            return
+        self.worker.terminate()
+        self.worker.wait(2000)
+        self.log.append('\n[중단됨]')
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
     def _on_progress(self, line):
         self.log.append(line)
         self.log.verticalScrollBar().setValue(
@@ -215,11 +235,13 @@ class StageTab(QWidget):
     def _on_done(self, result):
         self.log.append(f'\n=== {self.stage_name} 완료 ===')
         self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
         self._load_status_csv()
 
     def _on_failed(self, msg):
         self.log.append(f'\n[ERROR]\n{msg}')
         self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
         QMessageBox.critical(self, f'{self.stage_name} 실패', msg[:500])
 
     def _load_status_csv(self):

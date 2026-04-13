@@ -87,6 +87,7 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
     # 워핑 시트 수집: warped/{code}/{code}_{sheet_id}/{code}_{sheet_id}.jpg
     # (구버전 warped_scan.jpg도 폴백으로 지원)
     sheets = []
+    skipped = []
     code_dir = os.path.join(warped_dir, admin_code)
     if os.path.isdir(code_dir):
         for folder in sorted(os.listdir(code_dir)):
@@ -94,17 +95,25 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
                 continue
             sid = folder[len(admin_code) + 1:]
             if sid not in bboxes:
+                skipped.append((sid, 'NO_BBOX'))
                 continue
             cand = [
                 os.path.join(code_dir, folder, f'{folder}.jpg'),
                 os.path.join(code_dir, folder, 'warped_scan.jpg'),
             ]
+            found = False
             for sj in cand:
                 if os.path.exists(sj):
                     jgw_path = os.path.splitext(sj)[0] + '.jgw'
                     if os.path.exists(jgw_path):
                         sheets.append((sid, sj, jgw_path))
+                        found = True
                         break
+            if not found:
+                skipped.append((sid, 'NO_JPG'))
+    if skipped:
+        result['skipped'] = [{'sheet': s, 'reason': r} for s, r in skipped]
+        print(f'  ⚠ 누락 시트: {skipped}')
 
     if not sheets:
         result.update(status='ERROR', message='유효 시트 매칭 없음')

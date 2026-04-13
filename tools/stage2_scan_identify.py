@@ -121,10 +121,12 @@ class SheetCache:
     """분할 PDF 렌더 + SIFT keypoint + 메인 정합 bbox 캐시."""
 
     def __init__(self, pdf_input_dir, pdf_main_dir,
-                 sheet_match_scale=0.25):
+                 sheet_match_scale=0.25, cache_dir=None):
         self.pdf_input_dir = pdf_input_dir
         self.pdf_main_dir = pdf_main_dir
         self.scale = sheet_match_scale
+        self.cache_dir = cache_dir or '/tmp/_sheet_cache'
+        os.makedirs(self.cache_dir, exist_ok=True)
         self._sheet_meta = {}      # admin_code → {sheet_id: pdf_path}
         self._sheet_sift = {}      # pdf_path → (kp, des) at low-res
         self._main_sift = {}       # admin_code → (g_main_map, kp, des, main_bbox, main_jgw)
@@ -148,9 +150,8 @@ class SheetCache:
         return list(self._sheet_meta.get(admin_code, {}).items())
 
     def _render_pdf(self, pdf_path, dpi=300):
-        cache_jpg = os.path.join('/tmp/_sheet_cache',
+        cache_jpg = os.path.join(self.cache_dir,
                                  os.path.basename(pdf_path) + '.jpg')
-        os.makedirs('/tmp/_sheet_cache', exist_ok=True)
         if os.path.exists(cache_jpg):
             return cv2.imread(cache_jpg)
         doc = fitz.open(pdf_path)
@@ -354,7 +355,8 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     print(f'[Stage 2] 시트 캐시 초기화')
-    cache = SheetCache(args.pdf_input, args.pdf_main)
+    cache = SheetCache(args.pdf_input, args.pdf_main,
+                       cache_dir=os.path.join(args.out_dir, '_sheet_cache'))
     valid_codes = set(cache.admins_with_sheets())
     print(f'  → {len(valid_codes)}개 admin 코드 (분할 PDF 보유)')
     if not valid_codes:
