@@ -9,3 +9,5 @@ koreanize-matplotlib
 Pillow
 pytesseract
 psycopg2-binary
+PyMuPDF
+scikit-image
