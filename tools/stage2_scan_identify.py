@@ -33,6 +33,26 @@ import cv2
 import fitz
 import numpy as np
 
+
+def _imread(path):
+    """Unicode 경로 안전 imread (한글 경로 대응)."""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def _imwrite(path, img, params=None):
+    ext = os.path.splitext(path)[1] or '.jpg'
+    ok, buf = cv2.imencode(ext, img, params or [])
+    if not ok:
+        return False
+    buf.tofile(path)
+    return True
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from gis_scan_tools.tools._legacy.common import (
@@ -54,14 +74,22 @@ def crop_header(img, ratio_h=0.18, ratio_w=0.40):
 
 
 def _tesseract(img, config='--psm 6', lang='kor+eng'):
-    cv2.imwrite('/tmp/_ocr.png', img)
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    tmp.close()
     try:
+        _imwrite(tmp.name, img)
         r = subprocess.run(
-            ['tesseract', '/tmp/_ocr.png', '-', '-l', lang] + config.split(),
+            ['tesseract', tmp.name, '-', '-l', lang] + config.split(),
             capture_output=True, text=True, timeout=30)
         return r.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ''
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
 
 
 def ocr_admin_code(scan_img, valid_codes=None, fast=False):
@@ -153,12 +181,12 @@ class SheetCache:
         cache_jpg = os.path.join(self.cache_dir,
                                  os.path.basename(pdf_path) + '.jpg')
         if os.path.exists(cache_jpg):
-            return cv2.imread(cache_jpg)
+            return _imread(cache_jpg)
         doc = fitz.open(pdf_path)
         pix = doc[0].get_pixmap(dpi=dpi)
         pix.save(cache_jpg)
         doc.close()
-        return cv2.imread(cache_jpg)
+        return _imread(cache_jpg)
 
     def _preprocess(self, img, scale=1.0):
         g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
@@ -188,7 +216,7 @@ class SheetCache:
         main_jpg = os.path.join(self.pdf_main_dir, f'{admin_code}.jpg')
         main_jgw = parse_jgw(os.path.join(self.pdf_main_dir,
                                           f'{admin_code}.jgw'))
-        main_img = cv2.imread(main_jpg)
+        main_img = _imread(main_jpg)
         main_map, main_bbox = extract_map_region(main_img)
         g = self._preprocess(main_map, scale=self.scale)
         sift = cv2.SIFT_create(nfeatures=20000, contrastThreshold=0.03)
@@ -302,7 +330,7 @@ def identify_sheet(scan_img, admin_code, sheet_cache, min_inliers=30):
 # ============================================================
 
 def identify_scan(scan_jpg, sheet_cache, valid_codes, fast_ocr=False):
-    img = cv2.imread(scan_jpg)
+    img = _imread(scan_jpg)
     if img is None:
         return {'status': 'ERROR', 'admin_code': None, 'sheet_id': None,
                 'method': 'LOAD_FAIL', 'message': 'cv2.imread 실패'}

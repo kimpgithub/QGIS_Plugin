@@ -24,6 +24,27 @@ import time
 import cv2
 import numpy as np
 
+
+def _imread(path):
+    """Unicode 경로 안전 imread."""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def _imwrite(path, img, params=None):
+    ext = os.path.splitext(path)[1] or '.jpg'
+    ok, buf = cv2.imencode(ext, img, params or [])
+    if not ok:
+        return False
+    buf.tofile(path)
+    return True
+
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from gis_scan_tools.tools._legacy.common import (
@@ -49,7 +70,7 @@ def save_thumb(path, img, max_dim=2000, q=85):
     if max(img.shape[:2]) > max_dim:
         s = max_dim / max(img.shape[:2])
         img = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-    cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, q])
+    _imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, q])
 
 
 # ============================================================
@@ -66,7 +87,7 @@ class MainSiftCache:
     def get(self, admin_code, pdf_jpg, pdf_jgw_path):
         if admin_code in self.cache:
             return self.cache[admin_code]
-        main_img = cv2.imread(pdf_jpg)
+        main_img = _imread(pdf_jpg)
         if main_img is None:
             raise RuntimeError(f'PDF 이미지 로드 실패: {pdf_jpg}')
         main_jgw = parse_jgw(pdf_jgw_path)
@@ -103,7 +124,7 @@ def match_and_warp(scan_jpg, admin_code, pdf_jpg, pdf_jgw_path,
     }
 
     # 1) 입력 + 메인 SIFT 캐시
-    scan_img = cv2.imread(scan_jpg)
+    scan_img = _imread(scan_jpg)
     if scan_img is None:
         result.update(status='ERROR', message='scan 로드 실패')
         return result
@@ -120,7 +141,7 @@ def match_and_warp(scan_jpg, admin_code, pdf_jpg, pdf_jgw_path,
     # 2) 스캔 SIFT
     g_scan = preprocess(scan_img, scale=scan_scale)
     if save_intermediates:
-        cv2.imwrite(os.path.join(out_dir, '03_scan_prep.jpg'), g_scan,
+        _imwrite(os.path.join(out_dir, '03_scan_prep.jpg'), g_scan,
                     [cv2.IMWRITE_JPEG_QUALITY, 85])
     sift = cv2.SIFT_create(nfeatures=50000, contrastThreshold=0.025,
                            edgeThreshold=20, sigma=1.6)
@@ -234,7 +255,7 @@ def match_and_warp(scan_jpg, admin_code, pdf_jpg, pdf_jgw_path,
     warped_jpg = os.path.join(out_dir, f'{base}.jpg')
     warped_jgw = os.path.join(out_dir, f'{base}.jgw')
     warped_prj = os.path.join(out_dir, f'{base}.prj')
-    cv2.imwrite(warped_jpg, warped, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    _imwrite(warped_jpg, warped, [cv2.IMWRITE_JPEG_QUALITY, 92])
     write_jgw(warped_jgw, JGWParams(
         pixel_size_x=target_ps, rotation_x=0.0, rotation_y=0.0,
         pixel_size_y=-target_ps,

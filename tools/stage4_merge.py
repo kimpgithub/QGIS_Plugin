@@ -19,6 +19,26 @@ import time
 import cv2
 import numpy as np
 
+
+def _imread(path):
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def _imwrite(path, img, params=None):
+    ext = os.path.splitext(path)[1] or '.jpg'
+    ok, buf = cv2.imencode(ext, img, params or [])
+    if not ok:
+        return False
+    buf.tofile(path)
+    return True
+
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from gis_scan_tools.tools._legacy.common import (
@@ -31,7 +51,7 @@ except ImportError:
 
 
 def main_map_world_bbox(pdf_jpg, pdf_jgw_path):
-    img = cv2.imread(pdf_jpg)
+    img = _imread(pdf_jpg)
     jgw = parse_jgw(pdf_jgw_path)
     _, (mbx, mby, mbw, mbh) = extract_map_region(img)
     minx = jgw.top_left_x + mbx * jgw.pixel_size_x
@@ -126,7 +146,7 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
     canvas = np.full((ch, cw, 3), 255, np.uint8)
 
     for sid, sj, jgw_path in sheets:
-        img = cv2.imread(sj)
+        img = _imread(sj)
         jgw = parse_jgw(jgw_path)
         wb = bboxes[sid]
         crop, cj = crop_to_world_bbox(img, jgw, wb)
@@ -149,7 +169,7 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
     out_jpg = os.path.join(out_dir, f'{admin_code}_scan_merged.jpg')
     out_jgw = os.path.join(out_dir, f'{admin_code}_scan_merged.jgw')
     out_prj = os.path.join(out_dir, f'{admin_code}_scan_merged.prj')
-    cv2.imwrite(out_jpg, canvas, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    _imwrite(out_jpg, canvas, [cv2.IMWRITE_JPEG_QUALITY, 92])
     write_jgw(out_jgw, JGWParams(
         pixel_size_x=target_ps, rotation_x=0, rotation_y=0,
         pixel_size_y=-target_ps,
