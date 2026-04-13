@@ -275,7 +275,8 @@ def main():
     with open(args.identification, encoding='utf-8') as f:
         for row in csv.DictReader(f):
             if row['status'] == 'OK' and row['admin_code']:
-                targets.append((row['scan_path'], row['admin_code']))
+                targets.append((row['scan_path'], row['admin_code'],
+                                row.get('sheet_id', '')))
     print(f'[Stage 3] 처리 대상 {len(targets)}장')
 
     cache = MainSiftCache()
@@ -288,8 +289,9 @@ def main():
                     'output_w', 'output_h', 'message', 'elapsed_s'])
 
         n_ok = n_fail = 0
-        for i, (scan, code) in enumerate(targets, 1):
-            print(f'\n[{i}/{len(targets)}] {code} | {os.path.basename(scan)}')
+        for i, (scan, code, sheet_id) in enumerate(targets, 1):
+            label = f'{code}_{sheet_id}' if sheet_id else code
+            print(f'\n[{i}/{len(targets)}] {label} | {os.path.basename(scan)}')
             pdf_jpg = os.path.join(args.pdf_main, f'{code}.jpg')
             pdf_jgw = os.path.join(args.pdf_main, f'{code}.jgw')
             if not os.path.exists(pdf_jpg) or not os.path.exists(pdf_jgw):
@@ -298,9 +300,10 @@ def main():
                 n_fail += 1
                 continue
 
-            # 출력 디렉토리: out/{code}/{scan_basename_without_ext}/
-            scan_base = os.path.splitext(os.path.basename(scan))[0]
-            sub_out = os.path.join(args.out_dir, code, scan_base)
+            # 출력 디렉토리: out/{code}/{code}_{sheet_id}/
+            sub_name = f'{code}_{sheet_id}' if sheet_id else \
+                os.path.splitext(os.path.basename(scan))[0]
+            sub_out = os.path.join(args.out_dir, code, sub_name)
 
             try:
                 r = match_and_warp(

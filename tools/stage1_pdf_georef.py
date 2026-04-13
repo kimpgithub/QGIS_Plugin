@@ -35,12 +35,17 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # 입력 수집
+    # 입력 수집 — 메인 PDF만 (파일명이 8자리 행정코드만, 분할 _N-i 제외)
+    import re as _re
     inputs = []
     for ext in ('*.pdf', '*.jpg', '*.jpeg', '*.tif', '*.tiff'):
         inputs += glob.glob(os.path.join(args.in_dir, '**', ext), recursive=True)
-    inputs = sorted(set(p for p in inputs if 'checkpoint' not in p))
-    print(f'[Stage 1] 입력 {len(inputs)}개 처리 시작')
+    inputs = sorted(set(
+        p for p in inputs
+        if 'checkpoint' not in p
+        and _re.match(r'^\d{8}\.', os.path.basename(p))
+    ))
+    print(f'[Stage 1] 메인 PDF/이미지 {len(inputs)}개 처리 시작 (분할 _N-i 제외)')
 
     g = SHPGeoreferencer(args.shp)
 
