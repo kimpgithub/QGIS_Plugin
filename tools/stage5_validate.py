@@ -16,8 +16,25 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from gis_scan_tools.tools._legacy.boundary_validator import BoundaryValidator
+    from gis_scan_tools.tools.stage2_scan_identify import check_tesseract
 except ImportError:
     from .boundary_validator import BoundaryValidator
+    from .stage2_scan_identify import check_tesseract
+
+
+def _configure_pytesseract():
+    """pytesseract가 tesseract.exe를 찾도록 경로 설정 (Windows 대응)."""
+    cmd, err = check_tesseract()
+    if cmd:
+        try:
+            import pytesseract
+            pytesseract.pytesseract.tesseract_cmd = cmd
+        except ImportError:
+            pass
+        # PATH에도 추가 (다른 subprocess 호출 대비)
+        tess_dir = os.path.dirname(cmd)
+        if tess_dir not in os.environ.get('PATH', ''):
+            os.environ['PATH'] = tess_dir + os.pathsep + os.environ.get('PATH', '')
 
 
 def main():
@@ -30,6 +47,7 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+    _configure_pytesseract()
 
     targets = sorted(glob.glob(os.path.join(
         args.merged, '*_scan_merged.jpg')))
