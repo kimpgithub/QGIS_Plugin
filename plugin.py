@@ -398,9 +398,9 @@ class Stage2Tab(StageTab):
         super().__init__(common)
 
     def build_options(self):
-        self.fast = QCheckBox('OCR fast 모드 (1-variant)')
+        self.thorough = QCheckBox('OCR thorough 모드 (4-variant, 느림/정밀)')
         self.copy_unmatched = QCheckBox('짝 못찾은 스캔을 _unmatched/에 복사')
-        self.opt_layout.addRow(self.fast)
+        self.opt_layout.addRow(self.thorough)
         self.opt_layout.addRow(self.copy_unmatched)
 
     def io_summary(self):
@@ -424,8 +424,8 @@ class Stage2Tab(StageTab):
                 '--pdf-input', self.common.pdf_input.text(),
                 '--pdf-main', self.common.sub(SUB_PDF_GEO),
                 '--out', self.get_out_dir()]
-        if self.fast.isChecked():
-            argv.append('--fast')
+        if self.thorough.isChecked():
+            argv.append('--thorough')
         if self.copy_unmatched.isChecked():
             argv.append('--copy-unmatched')
         return argv

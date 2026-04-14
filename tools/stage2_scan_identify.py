@@ -259,16 +259,56 @@ class SheetCache:
         return cv2.GaussianBlur(g, (0, 0), 0.8)
 
     def get_sheet_sift_lowres(self, pdf_path):
-        """분할 PDF 저해상도(0.25x) SIFT keypoints — 스캔 매칭용."""
+        """분할 PDF 저해상도 SIFT — 디스크 pickle 캐시."""
+        import pickle
         if pdf_path in self._sheet_sift:
             return self._sheet_sift[pdf_path]
+        cache_pkl = os.path.join(
+            self.cache_dir,
+            os.path.basename(pdf_path) + '.sift.pkl')
+        if os.path.exists(cache_pkl):
+            try:
+                with open(cache_pkl, 'rb') as f:
+                    data = pickle.load(f)
+                # kp는 직렬화 불가 → pt/size/angle만 복원
+                kp = [cv2.KeyPoint(x=p[0], y=p[1], size=p[2], angle=p[3])
+                      for p in data['kp']]
+                self._sheet_sift[pdf_path] = (kp, data['des'], data['shape'])
+                return self._sheet_sift[pdf_path]
+            except Exception:
+                pass
         img = self._render_pdf(pdf_path)
         sheet_map, _ = extract_map_region(img)
         g = self._preprocess(sheet_map, scale=self.scale)
         sift = cv2.SIFT_create(nfeatures=10000, contrastThreshold=0.03)
         kp, des = sift.detectAndCompute(g, None)
         self._sheet_sift[pdf_path] = (kp, des, g.shape)
+        try:
+            with open(cache_pkl, 'wb') as f:
+                pickle.dump({
+                    'kp': [(k.pt[0], k.pt[1], k.size, k.angle) for k in kp],
+                    'des': des,
+                    'shape': g.shape,
+                }, f)
+        except Exception:
+            pass
         return self._sheet_sift[pdf_path]
+
+    def get_sheet_fft_thumb(self, pdf_path, size=256):
+        """분할 PDF의 FFT용 썸네일 (빠른 시트 식별용)."""
+        if not hasattr(self, '_sheet_fft'):
+            self._sheet_fft = {}
+        if pdf_path in self._sheet_fft:
+            return self._sheet_fft[pdf_path]
+        img = self._render_pdf(pdf_path)
+        sheet_map, _ = extract_map_region(img)
+        g = cv2.cvtColor(sheet_map, cv2.COLOR_BGR2GRAY)
+        g = cv2.resize(g, (size, size), interpolation=cv2.INTER_AREA)
+        # Hann window
+        hw = cv2.createHanningWindow((size, size), cv2.CV_32F)
+        g = (g.astype(np.float32) - g.mean()) * hw
+        self._sheet_fft[pdf_path] = g
+        return g
 
     def get_main_sift_for_sheet_align(self, admin_code):
         """메인 PDF의 지도영역 SIFT (분할 PDF↔메인 정합용, 풀해상도)."""
@@ -339,16 +379,39 @@ class SheetCache:
 # 스캔 → 시트 매칭
 # ============================================================
 
-def identify_sheet(scan_img, admin_code, sheet_cache, min_inliers=30):
-    """스캔이 admin_code의 어느 분할 시트와 가장 잘 맞는지.
+def _fft_thumb(img, size=256):
+    """FFT 비교용 그레이 썸네일 + Hann 윈도우."""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    g = cv2.resize(g, (size, size), interpolation=cv2.INTER_AREA)
+    hw = cv2.createHanningWindow((size, size), cv2.CV_32F)
+    return (g.astype(np.float32) - g.mean()) * hw
 
-    Returns: (sheet_id, n_inliers) or (None, best_inl)
+
+def identify_sheet(scan_img, admin_code, sheet_cache, min_inliers=30,
+                   fft_topk=3):
+    """시트 식별 — FFT 1차 필터 → SIFT 2차 확정.
+
+    1. FFT phase correlation으로 top_k 후보
+    2. top_k에만 SIFT 매칭 → best inlier 선택
     """
     sheets = sheet_cache.get_sheets(admin_code)
     if not sheets:
         return None, 0
 
-    # 스캔 저해상도 SIFT
+    # 1) FFT 1차 필터
+    scan_thumb = _fft_thumb(scan_img)
+    scored = []
+    for sid, pdf_path in sheets:
+        pdf_thumb = sheet_cache.get_sheet_fft_thumb(pdf_path)
+        try:
+            _, peak = cv2.phaseCorrelate(scan_thumb, pdf_thumb)
+        except cv2.error:
+            peak = 0.0
+        scored.append((peak, sid, pdf_path))
+    scored.sort(key=lambda x: -x[0])
+    candidates = scored[:fft_topk]
+
+    # 2) SIFT 2차 확정
     g = scan_img
     g = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY) if g.ndim == 3 else g
     g = cv2.resize(g, None, fx=sheet_cache.scale, fy=sheet_cache.scale,
@@ -363,7 +426,7 @@ def identify_sheet(scan_img, admin_code, sheet_cache, min_inliers=30):
         {'algorithm': 1, 'trees': 5}, {'checks': 50})
 
     best_id, best_inl = None, 0
-    for sid, pdf_path in sheets:
+    for _, sid, pdf_path in candidates:
         kp_p, des_p, _ = sheet_cache.get_sheet_sift_lowres(pdf_path)
         if des_p is None:
             continue
@@ -448,7 +511,8 @@ def main():
     ap.add_argument('--pdf-main', required=True,
                     help='Stage 1 산출 폴더 (pdf_main_geo)')
     ap.add_argument('--out', dest='out_dir', required=True)
-    ap.add_argument('--fast', action='store_true', help='OCR 1-variant만')
+    ap.add_argument('--thorough', action='store_true',
+                    help='OCR 4-variant 다수결 (기본: fast 1-variant)')
     ap.add_argument('--copy-unmatched', action='store_true')
     args = ap.parse_args()
 
@@ -482,7 +546,8 @@ def main():
         t0 = time.time()
         for i, scan in enumerate(scans, 1):
             ti = time.time()
-            r = identify_scan(scan, cache, valid_codes, fast_ocr=args.fast)
+            r = identify_scan(scan, cache, valid_codes,
+                              fast_ocr=not args.thorough)
             dt = time.time() - ti
             w.writerow([scan, r['status'], r.get('admin_code') or '',
                         r.get('sheet_id') or '',
