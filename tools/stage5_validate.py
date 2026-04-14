@@ -68,6 +68,13 @@ def main():
                 continue
             try:
                 bv = BoundaryValidator(m, jgw, args.shp)
+                # admin_code는 파일명에서 직접 (OCR 불필요)
+                import re as _re
+                mt = _re.match(r'(\d{8})', os.path.basename(m))
+                if mt:
+                    bv.admin_code = mt.group(1)
+                    bv.extract_admin_code_ocr = lambda: bv.admin_code
+                    print(f'  admin_code (filename): {bv.admin_code}')
                 bv.run(output_dir=args.out_dir,
                        threshold_px=args.threshold)
                 w.writerow([m, 'OK', '', f'{time.time()-t0:.1f}'])
