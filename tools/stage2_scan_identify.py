@@ -84,20 +84,75 @@ if sys.platform == 'win32':
 
 
 def _find_tesseract():
-    """tesseract 바이너리 자동 탐색 (Windows 경로 포함)."""
+    """tesseract 바이너리 다단계 자동 탐색. 크로스플랫폼."""
     import shutil as _sh
+
+    # 1) 환경변수 오버라이드 (사용자가 명시적 지정)
+    env_cmd = os.environ.get('TESSERACT_CMD')
+    if env_cmd and os.path.exists(env_cmd):
+        return env_cmd
+
+    # 2) PATH
     cmd = _sh.which('tesseract')
     if cmd:
         return cmd
-    # Windows 일반 경로
-    candidates = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        os.path.expanduser(r'~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'),
-    ]
+
+    # 3) 플랫폼별 표준 설치 경로
+    if sys.platform == 'win32':
+        candidates = [
+            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+            os.path.expanduser(r'~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'),
+            os.path.expanduser(r'~\AppData\Local\Tesseract-OCR\tesseract.exe'),
+            # chocolatey
+            r'C:\ProgramData\chocolatey\bin\tesseract.exe',
+            # scoop
+            os.path.expanduser(r'~\scoop\apps\tesseract\current\tesseract.exe'),
+        ]
+    elif sys.platform == 'darwin':
+        candidates = [
+            '/opt/homebrew/bin/tesseract',      # Apple Silicon Homebrew
+            '/usr/local/bin/tesseract',          # Intel Homebrew
+            '/opt/local/bin/tesseract',          # MacPorts
+        ]
+    else:  # linux
+        candidates = [
+            '/usr/bin/tesseract',
+            '/usr/local/bin/tesseract',
+            '/opt/conda/bin/tesseract',
+            '/opt/conda/envs/ocr/bin/tesseract',
+        ]
+
     for c in candidates:
         if os.path.exists(c):
             return c
+
+    # 4) conda 환경 자동 탐색 (활성 환경 + 주변 env)
+    if 'CONDA_PREFIX' in os.environ:
+        p = os.path.join(os.environ['CONDA_PREFIX'],
+                         'Scripts' if sys.platform == 'win32' else 'bin',
+                         'tesseract' + ('.exe' if sys.platform == 'win32' else ''))
+        if os.path.exists(p):
+            return p
+
+    # 5) Windows 레지스트리 조회 (공식 인스톨러가 기록)
+    if sys.platform == 'win32':
+        try:
+            import winreg
+            for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for key in (r'SOFTWARE\Tesseract-OCR',
+                            r'SOFTWARE\WOW6432Node\Tesseract-OCR'):
+                    try:
+                        with winreg.OpenKey(root, key) as k:
+                            path, _ = winreg.QueryValueEx(k, 'Path')
+                            exe = os.path.join(path, 'tesseract.exe')
+                            if os.path.exists(exe):
+                                return exe
+                    except OSError:
+                        continue
+        except ImportError:
+            pass
+
     return None
 
 
