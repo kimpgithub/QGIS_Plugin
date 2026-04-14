@@ -333,8 +333,46 @@ class SheetCache:
         self._main_sift[admin_code] = (g, kp, des, main_bbox, main_jgw)
         return self._main_sift[admin_code]
 
+    def _bbox_from_grid(self, admin_code, sheet_id):
+        """SIFT 실패 폴백: sheet_id 'N-i' 패턴으로 그리드 위치 추정.
+
+        가정: sqrt(N) x sqrt(N) 정방 그리드, row-major (좌→우, 위→아래).
+        예: 4-1=NW, 4-2=NE, 4-3=SW, 4-4=SE.
+        9-1=top-left, 9-9=bottom-right.
+        """
+        import math
+        m = re.match(r'(\d+)-(\d+)', sheet_id)
+        if not m:
+            return None
+        N, i = int(m.group(1)), int(m.group(2))
+        cols = int(math.ceil(math.sqrt(N)))
+        rows = int(math.ceil(N / cols))
+        row = (i - 1) // cols
+        col = (i - 1) % cols
+
+        # 메인 지도영역 world bbox
+        if admin_code not in self._main_sift:
+            self.get_main_sift_for_sheet_align(admin_code)
+        _, _, _, main_bbox, main_jgw = self._main_sift[admin_code]
+        mbx, mby, mbw, mbh = main_bbox
+        minx = main_jgw.top_left_x + mbx * main_jgw.pixel_size_x
+        maxx = main_jgw.top_left_x + (mbx + mbw) * main_jgw.pixel_size_x
+        maxy = main_jgw.top_left_y + mby * main_jgw.pixel_size_y
+        miny = main_jgw.top_left_y + (mby + mbh) * main_jgw.pixel_size_y
+
+        cell_w = (maxx - minx) / cols
+        cell_h = (maxy - miny) / rows
+        qx0 = minx + col * cell_w
+        qx1 = minx + (col + 1) * cell_w
+        qy1 = maxy - row * cell_h
+        qy0 = maxy - (row + 1) * cell_h
+        return (qx0, qy0, qx1, qy1)
+
     def compute_sheet_world_bbox(self, admin_code, sheet_id):
-        """sheet PDF ↔ main PDF 아핀으로 sheet의 world bbox 계산. 캐시."""
+        """sheet PDF ↔ main PDF 아핀으로 sheet의 world bbox 계산. 캐시.
+
+        SIFT/affine 실패 시 그리드 휴리스틱 폴백.
+        """
         cached = self._sheet_world_bbox.get(admin_code, {}).get(sheet_id)
         if cached:
             return cached
@@ -361,10 +399,25 @@ class SheetCache:
 
         src = np.float32([kp_s[m.queryIdx].pt for m in good]) / self.scale
         dst = np.float32([kp_m[m.trainIdx].pt for m in good]) / self.scale
-        A, _ = cv2.estimateAffinePartial2D(
+        A, inl_mask = cv2.estimateAffinePartial2D(
             src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0)
         if A is None:
-            return None
+            print(f'  [SIFT 실패→그리드 폴백] {admin_code} {sheet_id}: A=None')
+            bbox = self._bbox_from_grid(admin_code, sheet_id)
+            if bbox:
+                self._sheet_world_bbox.setdefault(admin_code, {})[sheet_id] = bbox
+            return bbox
+        n_inl = int(inl_mask.sum()) if inl_mask is not None else 0
+        # affine 스케일 검증
+        det = (A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0])
+        scale = abs(det) ** 0.5
+        if not (0.15 <= scale <= 0.7) or n_inl < 30:
+            print(f'  [SIFT 부정합→그리드 폴백] {admin_code} {sheet_id}: '
+                  f'scale={scale:.3f}, inliers={n_inl}/{len(good)}')
+            bbox = self._bbox_from_grid(admin_code, sheet_id)
+            if bbox:
+                self._sheet_world_bbox.setdefault(admin_code, {})[sheet_id] = bbox
+            return bbox
 
         # sheet_map 4 corners → main_map → main 전체 → world
         sh, sw = sheet_map.shape[:2]
