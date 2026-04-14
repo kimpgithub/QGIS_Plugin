@@ -197,6 +197,25 @@ def ocr_sheet_id(scan_img):
             pass
 
 
+def _extract_admin_codes(text, valid_codes=None):
+    """텍스트에서 8자리 행정코드 추출. OCR 잡음(공백/괄호) 보정."""
+    candidates = set(re.findall(r'\d{8}', text))
+    # OCR이 8자리 사이에 공백을 끼워넣는 케이스 ("2252031 7" → "22520317")
+    # 괄호 안 또는 인접한 디지트 토큰들을 합쳐 8자리 형성 시도
+    digit_runs = re.findall(r'\d+', text)
+    for i in range(len(digit_runs)):
+        merged = ''
+        for j in range(i, min(i + 5, len(digit_runs))):
+            merged += digit_runs[j]
+            if len(merged) == 8:
+                candidates.add(merged)
+            elif len(merged) > 8:
+                break
+    if valid_codes is not None:
+        candidates = {c for c in candidates if c in valid_codes}
+    return list(candidates)
+
+
 def ocr_admin_code(scan_img, valid_codes=None, fast=False):
     hdr = crop_header(scan_img)
     g = cv2.cvtColor(hdr, cv2.COLOR_BGR2GRAY)
@@ -217,9 +236,7 @@ def ocr_admin_code(scan_img, valid_codes=None, fast=False):
     all_codes = []
     for _, im, cfg, lang in variants:
         text = _tesseract(im, cfg, lang)
-        codes = re.findall(r'\d{8}', text)
-        if valid_codes is not None:
-            codes = [c for c in codes if c in valid_codes]
+        codes = _extract_admin_codes(text, valid_codes)
         all_codes.extend(codes)
 
     if not all_codes:
