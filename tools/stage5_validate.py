@@ -42,8 +42,14 @@ def main():
         for i, m in enumerate(targets, 1):
             t0 = time.time()
             print(f'\n[{i}/{len(targets)}] {os.path.basename(m)}')
+            jgw = os.path.splitext(m)[0] + '.jgw'
+            if not os.path.exists(jgw):
+                w.writerow([m, 'ERROR', f'JGW 없음: {jgw}',
+                            f'{time.time()-t0:.1f}'])
+                print(f'  ERROR: JGW 없음 {jgw}')
+                continue
             try:
-                bv = BoundaryValidator(m, args.shp)
+                bv = BoundaryValidator(m, jgw, args.shp)
                 bv.run(output_dir=args.out_dir,
                        threshold_px=args.threshold)
                 w.writerow([m, 'OK', '', f'{time.time()-t0:.1f}'])
