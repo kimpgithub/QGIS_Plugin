@@ -77,6 +77,11 @@ _TESS_CMD = None
 _TESS_CHECKED = False
 _TESS_ERROR = None
 
+_SUBPROCESS_KW = {}
+if sys.platform == 'win32':
+    # Windows: 콘솔창 깜빡임 방지
+    _SUBPROCESS_KW['creationflags'] = 0x08000000  # CREATE_NO_WINDOW
+
 
 def _find_tesseract():
     """tesseract 바이너리 자동 탐색 (Windows 경로 포함)."""
@@ -111,7 +116,8 @@ def check_tesseract():
         return None, _TESS_ERROR
     try:
         r = subprocess.run([cmd, '--list-langs'],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10,
+                           **_SUBPROCESS_KW)
         langs = r.stdout
         if 'kor' not in langs:
             _TESS_ERROR = (f'tesseract 한국어 언어팩(kor) 없음. 설치된 언어:\n'
@@ -142,7 +148,7 @@ def _tesseract(img, config='--psm 6', lang='kor+eng'):
         _imwrite(tmp.name, img)
         r = subprocess.run(
             [cmd, tmp.name, '-', '-l', lang] + config.split(),
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30, **_SUBPROCESS_KW)
         return r.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ''
@@ -185,7 +191,8 @@ def ocr_sheet_id(scan_img):
             [cmd, tmp.name, '-', '-l', 'eng',
              '--psm', '11',
              '-c', 'tessedit_char_whitelist=0123456789-'],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20,
+            **_SUBPROCESS_KW)
         m = re.findall(r'\d+-\d+', r.stdout)
         return m[0] if m else None
     except (subprocess.TimeoutExpired, FileNotFoundError):
