@@ -563,6 +563,46 @@ class SheetCache:
         self._sheet_world_bbox.setdefault(admin_code, {})[sheet_id] = bbox
         return bbox
 
+    def export_sheet_geo(self, admin_code, sheet_id, out_dir):
+        """분할 PDF의 지도영역 JPG + JGW를 Stage 3 매칭용으로 저장.
+
+        사전 조건: compute_sheet_world_bbox가 성공해 bbox가 캐시됨.
+        저장: {out_dir}/{admin}_{sheet}.{jpg,jgw,prj}
+        """
+        bbox = self._sheet_world_bbox.get(admin_code, {}).get(sheet_id)
+        if bbox is None:
+            return None
+        pdf_path = self._sheet_meta[admin_code][sheet_id]
+        sheet_img = self._render_pdf(pdf_path)
+        sheet_map, _ = extract_map_region(sheet_img)
+        sh, sw = sheet_map.shape[:2]
+        minx, miny, maxx, maxy = bbox
+        jpg_path = os.path.join(out_dir, f'{admin_code}_{sheet_id}.jpg')
+        jgw_path = os.path.join(out_dir, f'{admin_code}_{sheet_id}.jgw')
+        prj_path = os.path.join(out_dir, f'{admin_code}_{sheet_id}.prj')
+        os.makedirs(out_dir, exist_ok=True)
+
+        # 이미 저장돼 있으면 스킵 (재실행 가속)
+        if os.path.exists(jpg_path) and os.path.exists(jgw_path):
+            return jpg_path
+
+        from ._legacy.common import write_jgw, JGWParams, PRJ_5179
+        # JPG 저장 (_imwrite는 Unicode 경로 안전)
+        ok, buf = cv2.imencode('.jpg', sheet_map,
+                               [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if ok:
+            buf.tofile(jpg_path)
+        jgw = JGWParams(
+            pixel_size_x=(maxx - minx) / sw,
+            rotation_x=0.0, rotation_y=0.0,
+            pixel_size_y=-(maxy - miny) / sh,
+            top_left_x=minx, top_left_y=maxy,
+        )
+        write_jgw(jgw_path, jgw)
+        with open(prj_path, 'w') as f:
+            f.write(PRJ_5179)
+        return jpg_path
+
 
 # ============================================================
 # 스캔 → 시트 매칭
@@ -607,12 +647,16 @@ def identify_scan(scan_jpg, sheet_cache, valid_codes, fast_ocr=False):
                 'method': 'OCR', 'confidence': conf,
                 'message': f'sheet OCR={sid} but admin {code}의 분할 PDF에 없음'}
 
-    # sheet world bbox 계산 (Stage 4 병합용, 캐시)
+    # sheet world bbox 계산 (Stage 3 매칭용 + Stage 4 병합용)
     bbox = sheet_cache.compute_sheet_world_bbox(code, sid)
     if bbox is None:
         return {'status': 'FAIL', 'admin_code': code, 'sheet_id': sid,
                 'method': 'OCR', 'confidence': conf,
                 'message': 'sheet bbox 계산 실패 (분할 PDF↔메인 정합 실패)'}
+
+    # 분할 PDF를 JGW와 함께 내보내 Stage 3 매칭 템플릿으로 사용
+    if hasattr(sheet_cache, 'sheets_geo_dir'):
+        sheet_cache.export_sheet_geo(code, sid, sheet_cache.sheets_geo_dir)
 
     return {'status': 'OK', 'admin_code': code, 'sheet_id': sid,
             'method': 'OCR', 'confidence': conf, 'message': ''}
@@ -646,6 +690,9 @@ def main():
     cache = SheetCache(args.pdf_input, args.pdf_main,
                        cache_dir=os.path.join(args.out_dir, '_sheet_cache'),
                        bbox_cache_path=bbox_path)
+    # Stage 3 매칭 템플릿용 sheet geo 출력 경로
+    cache.sheets_geo_dir = os.path.join(args.out_dir, 'sheets_geo')
+    os.makedirs(cache.sheets_geo_dir, exist_ok=True)
     valid_codes = set(cache.admins_with_sheets())
     print(f'  → {len(valid_codes)}개 admin 코드 (분할 PDF 보유)')
     if not valid_codes:

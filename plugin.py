@@ -450,23 +450,17 @@ class Stage3Tab(StageTab):
         super().__init__(common)
 
     def build_options(self):
-        self.warp = QComboBox()
-        self.warp.addItems(['homography (빠름, 전역 평면)',
-                            'mesh (중간, Delaunay piecewise)',
-                            'tps (정밀, 비선형)'])
         self.no_intermediates = QCheckBox('중간산출 저장 안 함 (속도)')
-        self.keep_red = QCheckBox('빨강 마커 유지 (기본: SIFT 전 흰색 처리)')
-        self.opt_layout.addRow('워핑 방식:', self.warp)
         self.opt_layout.addRow(self.no_intermediates)
-        self.opt_layout.addRow(self.keep_red)
 
     def io_summary(self):
         proj = self.common.project_dir.text()
         return ([('Stage 2 CSV', os.path.join(
                     self.common.sub(SUB_SCAN_ID),
                     '_identification.csv') if proj else ''),
-                 ('Stage 1 출력', self.common.sub(SUB_PDF_GEO)
-                  if proj else '')],
+                 ('Stage 2 sheets_geo', os.path.join(
+                    self.common.sub(SUB_SCAN_ID),
+                    'sheets_geo') if proj else '')],
                 self.get_out_dir())
 
     def get_out_dir(self):
@@ -478,13 +472,11 @@ class Stage3Tab(StageTab):
         argv = ['--identification',
                 os.path.join(self.common.sub(SUB_SCAN_ID),
                              '_identification.csv'),
-                '--pdf-main', self.common.sub(SUB_PDF_GEO),
-                '--out', self.get_out_dir(),
-                '--warp', self.warp.currentText().split()[0]]
+                '--sheets-geo', os.path.join(
+                    self.common.sub(SUB_SCAN_ID), 'sheets_geo'),
+                '--out', self.get_out_dir()]
         if self.no_intermediates.isChecked():
             argv.append('--no-intermediates')
-        if self.keep_red.isChecked():
-            argv.append('--keep-red')
         return argv
 
 
