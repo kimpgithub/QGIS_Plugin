@@ -312,57 +312,41 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         return result
     result['n_gcps_tps'] = len(keep)
 
-    # 9) TPS 워핑 via gdalwarp
+    # 9) TPS 워핑 — 희소 격자 평가 + 조밀 보간 (gdalwarp의 1/10 속도)
     t = time.time()
-    import subprocess
-    vrt_path = os.path.join(out_dir, f'_{output_basename or "warped"}_gcp.vrt')
-    out_tif = os.path.join(out_dir, f'_{output_basename or "warped"}_tps.tif')
-    gcp_xml = '\n'.join(
-        f'    <GCP Id="" Info="" Pixel="{sx:.4f}" Line="{sy:.4f}" '
-        f'X="{wx:.6f}" Y="{wy:.6f}" Z="0"/>'
-        for (sx, sy), (wx, wy) in keep)
-    vrt = f'''<VRTDataset rasterXSize="{sw}" rasterYSize="{sh}">
-  <SRS>EPSG:5179</SRS>
-  <GCPList Projection="EPSG:5179">
-{gcp_xml}
-  </GCPList>
-  <VRTRasterBand dataType="Byte" band="1"><SimpleSource><SourceFilename relativeToVRT="0">{scan_jpg}</SourceFilename><SourceBand>1</SourceBand></SimpleSource></VRTRasterBand>
-  <VRTRasterBand dataType="Byte" band="2"><SimpleSource><SourceFilename relativeToVRT="0">{scan_jpg}</SourceFilename><SourceBand>2</SourceBand></SimpleSource></VRTRasterBand>
-  <VRTRasterBand dataType="Byte" band="3"><SimpleSource><SourceFilename relativeToVRT="0">{scan_jpg}</SourceFilename><SourceBand>3</SourceBand></SimpleSource></VRTRasterBand>
-</VRTDataset>'''
-    with open(vrt_path, 'w') as f:
-        f.write(vrt)
+    from scipy.interpolate import RBFInterpolator
+    cw = np.array([w for _, w in keep], dtype=np.float64)  # world (N,2)
+    cs = np.array([s for s, _ in keep], dtype=np.float64)  # scan_px (N,2)
 
-    cmd = [
-        'gdalwarp', '-tps', '-r', 'cubic',
-        '-tr', str(target_ps), str(target_ps),
-        '-te', str(out_minx), str(out_maxy - out_h * target_ps),
-               str(out_minx + out_w * target_ps), str(out_maxy),
-        '-t_srs', 'EPSG:5179',
-        '-dstnodata', '255',
-        '-overwrite',
-        vrt_path, out_tif,
-    ]
-    env = os.environ.copy()
-    for k, v in [('PROJ_DATA', '/opt/conda/envs/ocr/share/proj'),
-                 ('PROJ_LIB', '/opt/conda/envs/ocr/share/proj')]:
-        if os.path.exists(v):
-            env.setdefault(k, v)
-    kw = {'capture_output': True, 'text': True, 'env': env}
-    if sys.platform == 'win32':
-        kw['creationflags'] = 0x08000000
-    r = subprocess.run(cmd, **kw)
-    if r.returncode != 0:
-        result.update(status='FAIL',
-                      message=f'gdalwarp -tps 실패: {r.stderr[-200:]}')
-        return result
-    warped = _imread(out_tif)
-    try:
-        os.remove(vrt_path)
-        os.remove(out_tif)
-    except OSError:
-        pass
-    print(f'  TPS 워핑: {time.time()-t:.1f}s (GCP={len(keep)})')
+    # RBF(TPS) — world → scan pixel (x, y 별도)
+    rbf_x = RBFInterpolator(cw, cs[:, 0], kernel='thin_plate_spline',
+                             smoothing=0.0)
+    rbf_y = RBFInterpolator(cw, cs[:, 1], kernel='thin_plate_spline',
+                             smoothing=0.0)
+
+    # 희소 격자에서 평가 (16픽셀 간격)
+    STEP = 16
+    gy = np.arange(0, out_h + STEP, STEP)
+    gx = np.arange(0, out_w + STEP, STEP)
+    GX, GY = np.meshgrid(gx, gy)
+    world_xs = (out_minx + GX * target_ps).ravel()
+    world_ys = (out_maxy - GY * target_ps).ravel()
+    coords_wp = np.column_stack([world_xs, world_ys])
+    sx_grid = rbf_x(coords_wp).reshape(GX.shape).astype(np.float32)
+    sy_grid = rbf_y(coords_wp).reshape(GY.shape).astype(np.float32)
+
+    # 격자 → 전체 크기 업샘플
+    map_x = cv2.resize(sx_grid, (out_w, out_h),
+                       interpolation=cv2.INTER_LINEAR)
+    map_y = cv2.resize(sy_grid, (out_w, out_h),
+                       interpolation=cv2.INTER_LINEAR)
+
+    # cv2.remap
+    warped = cv2.remap(
+        scan_img, map_x, map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+    print(f'  TPS 워핑: {time.time()-t:.1f}s (GCP={len(keep)}, 격자={STEP}px)')
 
     # 10) 저장
     base = output_basename or f'{admin_code}_{sheet_id}'
