@@ -1,12 +1,14 @@
-"""Stage 3: 스캔 ↔ 분할 PDF SIFT 매칭 + 호모그래피 워핑
+"""Stage 3: 스캔 ↔ 분할 PDF SIFT 매칭 + TPS 워핑 (비선형)
 
 최적 조합:
 - 매칭 대상: 분할 PDF의 지도영역 (Stage 2가 sheets_geo/에 JGW와 함께 저장)
-- 스케일: scan과 sheet PDF 모두 0.5x로 정규화 (동일 물리 해상도 1.62m/px)
-- 특징점: SIFT 50,000개 (nfeatures)
+- 스케일: scan과 sheet PDF 모두 0.5x로 정규화 (동일 물리 해상도)
+- 특징점: SIFT 50,000개
 - 매칭 필터: FLANN + Lowe ratio 0.75
-- 모델: MAGSAC++ 호모그래피
-- 워핑: cv2.warpPerspective
+- outlier 거부: MAGSAC++ 호모그래피 (inlier 식별용으로만 사용)
+- 워핑: TPS (Thin-Plate Spline) via gdalwarp -tps
+  · inlier GCPs → 공간 균등 샘플 400개 → GDAL VRT
+  · 종이 접힘/휨 같은 비선형 왜곡 흡수
 
 CLI:
   python -m gis_scan_tools.tools.stage3_scan_warp \\
@@ -258,24 +260,23 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         save_thumb(os.path.join(out_dir, '04_matches_inliers.jpg'),
                    vis, max_dim=2400)
 
-    # 6) H를 원본 해상도로 변환 (scan_full → sheet_full)
-    # src,dst는 정규화(scan_scale, sheet scan_scale) 좌표계 → full로 스케일업
-    # scan_full = src / scan_scale, sheet_full = dst / scan_scale
-    # H_full @ scan_full = sheet_full
-    # H @ src = dst  ⇒  H @ (scan_full*scan_scale) = sheet_full*scan_scale
-    # ⇒ H_full = diag(1) since scales cancel (둘 다 동일 scan_scale로 정규화)
-    # 실제로는: H_full = S^-1 @ H @ S where S = diag(scan_scale, scan_scale, 1)
+    # 6) Inlier GCPs를 원본 해상도 + world 좌표로 변환
+    scan_full_inl = src[inl] / scan_scale  # scan 원본 픽셀
+    sheet_full_inl = dst[inl] / scan_scale  # sheet PDF 원본 픽셀
+    world_x = sheet_jgw.top_left_x + sheet_full_inl[:, 0] * sheet_jgw.pixel_size_x
+    world_y = sheet_jgw.top_left_y + sheet_full_inl[:, 1] * sheet_jgw.pixel_size_y
+    world_pts = np.column_stack([world_x, world_y])
+
+    # 7) 출력 raster bbox 계산 — inlier GCPs world 범위 + 여유
+    # 호모그래피로 대충 코너 추정해도 되지만, inlier world 범위가 더 안전
+    corners_sheet = np.float32(
+        [[0, 0], [sw, 0], [sw, sh], [0, sh]]).reshape(-1, 1, 2)
     S = np.diag([scan_scale, scan_scale, 1.0])
     H_full = np.linalg.inv(S) @ H @ S
-
-    # 7) 출력 raster bbox 계산
-    corners_scan = np.float32(
-        [[0, 0], [sw, 0], [sw, sh], [0, sh]]).reshape(-1, 1, 2)
-    corners_sheet = cv2.perspectiveTransform(
-        corners_scan, H_full).reshape(-1, 2)
-    # sheet pixel → world via sheet_jgw
-    cw_x = sheet_jgw.top_left_x + corners_sheet[:, 0] * sheet_jgw.pixel_size_x
-    cw_y = sheet_jgw.top_left_y + corners_sheet[:, 1] * sheet_jgw.pixel_size_y
+    corners_dst = cv2.perspectiveTransform(
+        corners_sheet, H_full).reshape(-1, 2)
+    cw_x = sheet_jgw.top_left_x + corners_dst[:, 0] * sheet_jgw.pixel_size_x
+    cw_y = sheet_jgw.top_left_y + corners_dst[:, 1] * sheet_jgw.pixel_size_y
     out_minx, out_maxx = float(cw_x.min()), float(cw_x.max())
     out_miny, out_maxy = float(cw_y.min()), float(cw_y.max())
     out_w = int(np.ceil((out_maxx - out_minx) / target_ps))
@@ -287,27 +288,81 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
                       message=f'출력 크기 비정상: {out_w}x{out_h}')
         return result
 
-    # 8) 합성 변환: output_pixel → scan_pixel
-    # output(px) → world: x_w=out_minx+ox*ps, y_w=out_maxy-oy*ps
-    # world → sheet_full(px): x_s=(x_w-sheet.tl.x)/sheet.ps_x, ...
-    # sheet_full → scan_full: H_full^-1
-    A_ow = np.array([[target_ps, 0, out_minx],
-                     [0, -target_ps, out_maxy],
-                     [0, 0, 1]], np.float64)
-    A_ws = np.array([[1.0 / sheet_jgw.pixel_size_x, 0,
-                      -sheet_jgw.top_left_x / sheet_jgw.pixel_size_x],
-                     [0, 1.0 / sheet_jgw.pixel_size_y,
-                      -sheet_jgw.top_left_y / sheet_jgw.pixel_size_y],
-                     [0, 0, 1]], np.float64)
-    M = np.linalg.inv(H_full) @ A_ws @ A_ow
+    # 8) GCP 서브샘플링 + 중복 제거 (TPS 안정성)
+    scan_pts = scan_full_inl
+    # 공간 균등 400개 (TPS O(N^3) 완화)
+    MAX_GCPS = 400
+    if len(scan_pts) > MAX_GCPS:
+        idx = np.linspace(0, len(scan_pts) - 1, MAX_GCPS).astype(int)
+        scan_pts = scan_pts[idx]
+        world_pts = world_pts[idx]
+    # GDAL은 동일 좌표 GCP 있으면 matrix singular → dedup
+    seen_s = set(); seen_w = set()
+    keep = []
+    for (sx, sy), (wx, wy) in zip(scan_pts, world_pts):
+        sk = (round(sx, 1), round(sy, 1))
+        wk = (round(wx, 2), round(wy, 2))
+        if sk in seen_s or wk in seen_w:
+            continue
+        seen_s.add(sk); seen_w.add(wk)
+        keep.append(((sx, sy), (wx, wy)))
+    if len(keep) < 10:
+        result.update(status='FAIL',
+                      message=f'TPS GCP 부족 (dedup 후 {len(keep)})')
+        return result
+    result['n_gcps_tps'] = len(keep)
 
-    # 9) warpPerspective
+    # 9) TPS 워핑 via gdalwarp
     t = time.time()
-    warped = cv2.warpPerspective(
-        scan_img, M, (out_w, out_h),
-        flags=cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP,
-        borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
-    print(f'  warpPerspective: {time.time()-t:.1f}s')
+    import subprocess
+    vrt_path = os.path.join(out_dir, f'_{output_basename or "warped"}_gcp.vrt')
+    out_tif = os.path.join(out_dir, f'_{output_basename or "warped"}_tps.tif')
+    gcp_xml = '\n'.join(
+        f'    <GCP Id="" Info="" Pixel="{sx:.4f}" Line="{sy:.4f}" '
+        f'X="{wx:.6f}" Y="{wy:.6f}" Z="0"/>'
+        for (sx, sy), (wx, wy) in keep)
+    vrt = f'''<VRTDataset rasterXSize="{sw}" rasterYSize="{sh}">
+  <SRS>EPSG:5179</SRS>
+  <GCPList Projection="EPSG:5179">
+{gcp_xml}
+  </GCPList>
+  <VRTRasterBand dataType="Byte" band="1"><SimpleSource><SourceFilename relativeToVRT="0">{scan_jpg}</SourceFilename><SourceBand>1</SourceBand></SimpleSource></VRTRasterBand>
+  <VRTRasterBand dataType="Byte" band="2"><SimpleSource><SourceFilename relativeToVRT="0">{scan_jpg}</SourceFilename><SourceBand>2</SourceBand></SimpleSource></VRTRasterBand>
+  <VRTRasterBand dataType="Byte" band="3"><SimpleSource><SourceFilename relativeToVRT="0">{scan_jpg}</SourceFilename><SourceBand>3</SourceBand></SimpleSource></VRTRasterBand>
+</VRTDataset>'''
+    with open(vrt_path, 'w') as f:
+        f.write(vrt)
+
+    cmd = [
+        'gdalwarp', '-tps', '-r', 'cubic',
+        '-tr', str(target_ps), str(target_ps),
+        '-te', str(out_minx), str(out_maxy - out_h * target_ps),
+               str(out_minx + out_w * target_ps), str(out_maxy),
+        '-t_srs', 'EPSG:5179',
+        '-dstnodata', '255',
+        '-overwrite',
+        vrt_path, out_tif,
+    ]
+    env = os.environ.copy()
+    for k, v in [('PROJ_DATA', '/opt/conda/envs/ocr/share/proj'),
+                 ('PROJ_LIB', '/opt/conda/envs/ocr/share/proj')]:
+        if os.path.exists(v):
+            env.setdefault(k, v)
+    kw = {'capture_output': True, 'text': True, 'env': env}
+    if sys.platform == 'win32':
+        kw['creationflags'] = 0x08000000
+    r = subprocess.run(cmd, **kw)
+    if r.returncode != 0:
+        result.update(status='FAIL',
+                      message=f'gdalwarp -tps 실패: {r.stderr[-200:]}')
+        return result
+    warped = _imread(out_tif)
+    try:
+        os.remove(vrt_path)
+        os.remove(out_tif)
+    except OSError:
+        pass
+    print(f'  TPS 워핑: {time.time()-t:.1f}s (GCP={len(keep)})')
 
     # 10) 저장
     base = output_basename or f'{admin_code}_{sheet_id}'
