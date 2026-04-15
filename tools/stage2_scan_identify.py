@@ -55,11 +55,11 @@ def _imwrite(path, img, params=None):
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
+    from ._legacy.common import parse_jgw, extract_map_region
+except ImportError:
     from gis_scan_tools.tools._legacy.common import (
         parse_jgw, extract_map_region,
     )
-except ImportError:
-    from .common import parse_jgw, extract_map_region
 
 SHEET_PATTERN = re.compile(r'^(\d{8})_(\d+)-(\d+)\.pdf$', re.IGNORECASE)
 

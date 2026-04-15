@@ -18,9 +18,9 @@ import time
 # 기존 georef 그대로 사용
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from gis_scan_tools.tools._legacy.shp_georeferencer import SHPGeoreferencer
+    from ._legacy.shp_georeferencer import SHPGeoreferencer
 except ImportError:
-    from .shp_georeferencer import SHPGeoreferencer
+    from gis_scan_tools.tools._legacy.shp_georeferencer import SHPGeoreferencer
 
 
 def main():

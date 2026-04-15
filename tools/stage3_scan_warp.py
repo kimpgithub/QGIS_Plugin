@@ -47,11 +47,11 @@ def _imwrite(path, img, params=None):
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from gis_scan_tools.tools._legacy.common import (
+    from ._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179, extract_map_region,
     )
 except ImportError:
-    from .common import (
+    from gis_scan_tools.tools._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179, extract_map_region,
     )
 
