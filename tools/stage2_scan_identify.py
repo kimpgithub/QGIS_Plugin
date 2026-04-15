@@ -333,7 +333,8 @@ class SheetCache:
     """분할 PDF 렌더 + SIFT keypoint + 메인 정합 bbox 캐시."""
 
     def __init__(self, pdf_input_dir, pdf_main_dir,
-                 sheet_match_scale=0.25, cache_dir=None):
+                 sheet_match_scale=0.25, cache_dir=None,
+                 bbox_cache_path=None):
         self.pdf_input_dir = pdf_input_dir
         self.pdf_main_dir = pdf_main_dir
         self.scale = sheet_match_scale
@@ -341,8 +342,23 @@ class SheetCache:
         os.makedirs(self.cache_dir, exist_ok=True)
         self._sheet_meta = {}      # admin_code → {sheet_id: pdf_path}
         self._main_sift = {}       # admin_code → (g_main_map, kp, des, main_bbox, main_jgw)
-        self._sheet_world_bbox = {}  # admin_code → {sheet_id: (minx,miny,maxx,maxy)}
+        self._sheet_world_bbox = {}
         self._scan_index_pdfs()
+
+        # 기존 sheet_bboxes.json 로드 — SIFT 재계산 회피
+        if bbox_cache_path and os.path.exists(bbox_cache_path):
+            try:
+                import json as _json
+                with open(bbox_cache_path, 'r') as f:
+                    cached = _json.load(f)
+                for code, sheets in cached.items():
+                    for sid, bbox in sheets.items():
+                        if bbox and len(bbox) == 4:
+                            self._sheet_world_bbox.setdefault(code, {})[sid] = tuple(bbox)
+                n = sum(len(v) for v in self._sheet_world_bbox.values())
+                print(f'  [bbox 캐시 로드] {n}개 (admin×sheet)')
+            except Exception as e:
+                print(f'  [bbox 캐시 로드 실패] {e}')
 
     def _scan_index_pdfs(self):
         for f in sorted(os.listdir(self.pdf_input_dir)):
@@ -381,18 +397,47 @@ class SheetCache:
         return cv2.GaussianBlur(g, (0, 0), 0.8)
 
     def get_main_sift_for_sheet_align(self, admin_code):
-        """메인 PDF의 지도영역 SIFT (분할 PDF↔메인 정합용, 풀해상도)."""
+        """메인 PDF의 지도영역 SIFT (분할 PDF↔메인 정합용) + 디스크 pickle 캐시."""
+        import pickle
         if admin_code in self._main_sift:
             return self._main_sift[admin_code]
         main_jpg = os.path.join(self.pdf_main_dir, f'{admin_code}.jpg')
         main_jgw = parse_jgw(os.path.join(self.pdf_main_dir,
                                           f'{admin_code}.jgw'))
+        cache_pkl = os.path.join(
+            self.cache_dir, f'main_sift_{admin_code}.pkl')
+
+        if os.path.exists(cache_pkl):
+            try:
+                with open(cache_pkl, 'rb') as f:
+                    data = pickle.load(f)
+                # OpenCV KeyPoint 복원
+                kp = [cv2.KeyPoint(x=p[0], y=p[1], size=p[2], angle=p[3])
+                      for p in data['kp']]
+                # g_main은 크기만 필요해서 재생성
+                main_img = _imread(main_jpg)
+                main_map, main_bbox = extract_map_region(main_img)
+                g = self._preprocess(main_map, scale=self.scale)
+                self._main_sift[admin_code] = (
+                    g, kp, data['des'], main_bbox, main_jgw)
+                return self._main_sift[admin_code]
+            except Exception:
+                pass
+
         main_img = _imread(main_jpg)
         main_map, main_bbox = extract_map_region(main_img)
         g = self._preprocess(main_map, scale=self.scale)
         sift = cv2.SIFT_create(nfeatures=20000, contrastThreshold=0.03)
         kp, des = sift.detectAndCompute(g, None)
         self._main_sift[admin_code] = (g, kp, des, main_bbox, main_jgw)
+        try:
+            with open(cache_pkl, 'wb') as f:
+                pickle.dump({
+                    'kp': [(k.pt[0], k.pt[1], k.size, k.angle) for k in kp],
+                    'des': des,
+                }, f)
+        except Exception:
+            pass
         return self._main_sift[admin_code]
 
     def _bbox_from_grid(self, admin_code, sheet_id):
@@ -573,8 +618,10 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     print(f'[Stage 2] 시트 캐시 초기화')
+    bbox_path = os.path.join(args.out_dir, 'sheet_bboxes.json')
     cache = SheetCache(args.pdf_input, args.pdf_main,
-                       cache_dir=os.path.join(args.out_dir, '_sheet_cache'))
+                       cache_dir=os.path.join(args.out_dir, '_sheet_cache'),
+                       bbox_cache_path=bbox_path)
     valid_codes = set(cache.admins_with_sheets())
     print(f'  → {len(valid_codes)}개 admin 코드 (분할 PDF 보유)')
     if not valid_codes:
