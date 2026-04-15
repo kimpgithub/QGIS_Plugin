@@ -49,8 +49,9 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     _configure_pytesseract()
 
+    # 새 구조(시도/시군구 중첩) + 구 구조(루트) 모두 스캔
     targets = sorted(glob.glob(os.path.join(
-        args.merged, '*_scan_merged.jpg')))
+        args.merged, '**/*_scan_merged.jpg'), recursive=True))
     print(f'[Stage 5] 검수 대상 {len(targets)}장')
 
     csv_path = os.path.join(args.out_dir, '_status.csv')

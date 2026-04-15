@@ -679,7 +679,7 @@ def main():
             renamed = ''
             if r['status'] == 'OK':
                 n_ok += 1
-                # 중복 감지: 같은 (admin, sheet)가 두 번 나오면 WARN
+                # 중복 감지
                 key = (r['admin_code'], r['sheet_id'])
                 if key in seen_admin_sheet:
                     r['status'] = 'WARN'
@@ -689,11 +689,13 @@ def main():
                 else:
                     seen_admin_sheet[key] = os.path.basename(scan)
                 if not args.no_rename:
-                    os.makedirs(identified_dir, exist_ok=True)
+                    # 시도/시군구 폴더 구조: code[:2]/code[:5]/
+                    code = r['admin_code']
+                    sub_dir = os.path.join(identified_dir, code[:2], code[:5])
+                    os.makedirs(sub_dir, exist_ok=True)
                     ext = os.path.splitext(scan)[1]
                     renamed = os.path.join(
-                        identified_dir,
-                        f"{r['admin_code']}_{r['sheet_id']}{ext}")
+                        sub_dir, f"{code}_{r['sheet_id']}{ext}")
                     # 충돌 시 번호 붙여서
                     if os.path.exists(renamed):
                         base = os.path.splitext(renamed)[0]

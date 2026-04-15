@@ -516,10 +516,10 @@ def main():
                 n_fail += 1
                 continue
 
-            # 출력 디렉토리: out/{code}/{code}_{sheet_id}/
+            # 출력 디렉토리: out/{시도}/{시군구}/{code}_{sheet_id}/
             sub_name = f'{code}_{sheet_id}' if sheet_id else \
                 os.path.splitext(os.path.basename(scan))[0]
-            sub_out = os.path.join(args.out_dir, code, sub_name)
+            sub_out = os.path.join(args.out_dir, code[:2], code[:5], sub_name)
 
             try:
                 r = match_and_warp(

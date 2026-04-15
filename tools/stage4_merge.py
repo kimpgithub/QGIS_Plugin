@@ -107,8 +107,14 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
     # (구버전 warped_scan.jpg도 폴백으로 지원)
     sheets = []
     skipped = []
-    code_dir = os.path.join(warped_dir, admin_code)
-    if os.path.isdir(code_dir):
+    # 새 구조: warped_dir/{시도}/{시군구}/{admin}_{sheet}/
+    # 구버전 호환: warped_dir/{admin}/{admin}_{sheet}/ 도 지원
+    code_dir_candidates = [
+        os.path.join(warped_dir, admin_code[:2], admin_code[:5]),
+        os.path.join(warped_dir, admin_code),
+    ]
+    code_dir = next((d for d in code_dir_candidates if os.path.isdir(d)), None)
+    if code_dir:
         for folder in sorted(os.listdir(code_dir)):
             if not folder.startswith(f'{admin_code}_'):
                 continue
@@ -164,10 +170,12 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
             'sheet': sid, 'status': 'OK',
             'world_bbox': list(wb), 'crop_size': [pw, ph]})
 
-    os.makedirs(out_dir, exist_ok=True)
-    out_jpg = os.path.join(out_dir, f'{admin_code}_scan_merged.jpg')
-    out_jgw = os.path.join(out_dir, f'{admin_code}_scan_merged.jgw')
-    out_prj = os.path.join(out_dir, f'{admin_code}_scan_merged.prj')
+    # 출력: {out}/{시도}/{시군구}/{code}_scan_merged.{jpg,jgw,prj}
+    sub_out = os.path.join(out_dir, admin_code[:2], admin_code[:5])
+    os.makedirs(sub_out, exist_ok=True)
+    out_jpg = os.path.join(sub_out, f'{admin_code}_scan_merged.jpg')
+    out_jgw = os.path.join(sub_out, f'{admin_code}_scan_merged.jgw')
+    out_prj = os.path.join(sub_out, f'{admin_code}_scan_merged.prj')
     _imwrite(out_jpg, canvas, [cv2.IMWRITE_JPEG_QUALITY, 92])
     write_jgw(out_jgw, JGWParams(
         pixel_size_x=target_ps, rotation_x=0, rotation_y=0,
@@ -193,11 +201,21 @@ def main():
     with open(args.sheet_bboxes) as f:
         sheet_bboxes = json.load(f)
 
-    admin_codes = sorted([
-        d for d in os.listdir(args.warped)
-        if os.path.isdir(os.path.join(args.warped, d))
-        and len(d) == 8 and d.isdigit()
-    ])
+    # 새 구조: warped/{시도}/{시군구}/{admin}_{sheet}/
+    # 구조 탐색: 어느 레벨이든 8자리 숫자 폴더를 찾으면 그게 admin_code
+    admin_codes = set()
+    for root, dirs, files in os.walk(args.warped):
+        for d in dirs:
+            # admin_{sheet} 형식
+            parts = d.split('_')
+            if len(parts) == 2 and len(parts[0]) == 8 and parts[0].isdigit():
+                admin_codes.add(parts[0])
+    # 호환: 구버전 루트 admin 폴더도 포함
+    for d in os.listdir(args.warped):
+        if (os.path.isdir(os.path.join(args.warped, d))
+                and len(d) == 8 and d.isdigit()):
+            admin_codes.add(d)
+    admin_codes = sorted(admin_codes)
     print(f'[Stage 4] 행정코드 {len(admin_codes)}개 병합 시작')
 
     csv_path = os.path.join(args.out_dir, '_status.csv')
