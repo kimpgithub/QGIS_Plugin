@@ -260,10 +260,31 @@ def ocr_sheet_id(scan_img):
 
 
 def _extract_admin_codes(text, valid_codes=None):
-    """텍스트에서 8자리 행정코드 추출. OCR 잡음(공백/괄호) 보정."""
+    """텍스트에서 8자리 행정코드 추출. 우선순위:
+
+    1. 괄호 안 8자리 `(21510110)` — 헤더의 공식 코드 형식
+       · 지도 본체 라벨(`21510330 (철마면)`)은 괄호 안 한글이라 자연스럽게 제외
+    2. (실패 시) 공백 포함 8자리 `2252031 7` — OCR 간격 오류 보정
+    3. (실패 시) 어디든 있는 8자리 `\d{8}`
+
+    valid_codes 주어지면 필터링.
+    """
+    # Tier 1: 괄호 안 8자리 (공백 있어도 허용)
+    paren_candidates = []
+    for m in re.finditer(r'\(\s*([\d\s]+?)\s*\)', text):
+        digits = re.sub(r'\s', '', m.group(1))
+        if len(digits) == 8 and digits.isdigit():
+            paren_candidates.append(digits)
+
+    if valid_codes is not None:
+        paren_valid = [c for c in paren_candidates if c in valid_codes]
+        if paren_valid:
+            return paren_valid  # 괄호 안 매칭이 있으면 그것만 사용
+    elif paren_candidates:
+        return paren_candidates
+
+    # Tier 2+3: 폴백 — 기존 로직 (모든 8자리 + 공백 복원)
     candidates = set(re.findall(r'\d{8}', text))
-    # OCR이 8자리 사이에 공백을 끼워넣는 케이스 ("2252031 7" → "22520317")
-    # 괄호 안 또는 인접한 디지트 토큰들을 합쳐 8자리 형성 시도
     digit_runs = re.findall(r'\d+', text)
     for i in range(len(digit_runs)):
         merged = ''
@@ -641,6 +662,7 @@ def main():
     csv_path = os.path.join(args.out_dir, '_identification.csv')
     unmatched_dir = os.path.join(args.out_dir, '_unmatched')
     identified_dir = os.path.join(args.out_dir, 'identified')
+    seen_admin_sheet = {}  # (admin, sheet) → scan_path (중복 감지용)
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
@@ -657,6 +679,15 @@ def main():
             renamed = ''
             if r['status'] == 'OK':
                 n_ok += 1
+                # 중복 감지: 같은 (admin, sheet)가 두 번 나오면 WARN
+                key = (r['admin_code'], r['sheet_id'])
+                if key in seen_admin_sheet:
+                    r['status'] = 'WARN'
+                    r['message'] = (f'중복: {seen_admin_sheet[key]}과 같은 '
+                                    f'(admin, sheet) 조합 — 식별 재검토 필요')
+                    print(f'  ⚠ {r["message"]}')
+                else:
+                    seen_admin_sheet[key] = os.path.basename(scan)
                 if not args.no_rename:
                     os.makedirs(identified_dir, exist_ok=True)
                     ext = os.path.splitext(scan)[1]
