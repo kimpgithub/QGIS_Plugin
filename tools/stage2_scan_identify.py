@@ -612,7 +612,10 @@ def main():
     ap.add_argument('--out', dest='out_dir', required=True)
     ap.add_argument('--thorough', action='store_true',
                     help='OCR 4-variant 다수결 (기본: fast 1-variant)')
-    ap.add_argument('--copy-unmatched', action='store_true')
+    ap.add_argument('--no-rename', action='store_true',
+                    help='성공 스캔을 표준명으로 복사 안 함 (기본: identified/에 복사)')
+    ap.add_argument('--no-unmatched', action='store_true',
+                    help='실패 스캔을 _unmatched/에 복사 안 함 (기본: 복사)')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -637,11 +640,13 @@ def main():
 
     csv_path = os.path.join(args.out_dir, '_identification.csv')
     unmatched_dir = os.path.join(args.out_dir, '_unmatched')
+    identified_dir = os.path.join(args.out_dir, 'identified')
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(['scan_path', 'status', 'admin_code', 'sheet_id',
-                    'confidence', 'method', 'message', 'elapsed_s'])
+                    'confidence', 'method', 'message',
+                    'renamed_path', 'elapsed_s'])
         n_ok = n_fail = n_err = 0
         t0 = time.time()
         for i, scan in enumerate(scans, 1):
@@ -649,20 +654,35 @@ def main():
             r = identify_scan(scan, cache, valid_codes,
                               fast_ocr=not args.thorough)
             dt = time.time() - ti
-            w.writerow([scan, r['status'], r.get('admin_code') or '',
-                        r.get('sheet_id') or '',
-                        f"{r.get('confidence', 0):.3f}",
-                        r['method'], r['message'], f'{dt:.2f}'])
+            renamed = ''
             if r['status'] == 'OK':
                 n_ok += 1
+                if not args.no_rename:
+                    os.makedirs(identified_dir, exist_ok=True)
+                    ext = os.path.splitext(scan)[1]
+                    renamed = os.path.join(
+                        identified_dir,
+                        f"{r['admin_code']}_{r['sheet_id']}{ext}")
+                    # 충돌 시 번호 붙여서
+                    if os.path.exists(renamed):
+                        base = os.path.splitext(renamed)[0]
+                        k = 2
+                        while os.path.exists(f'{base}_{k}{ext}'):
+                            k += 1
+                        renamed = f'{base}_{k}{ext}'
+                    shutil.copy2(scan, renamed)
             elif r['status'] == 'FAIL':
                 n_fail += 1
-                if args.copy_unmatched:
+                if not args.no_unmatched:
                     os.makedirs(unmatched_dir, exist_ok=True)
                     shutil.copy2(scan, os.path.join(
                         unmatched_dir, os.path.basename(scan)))
             else:
                 n_err += 1
+            w.writerow([scan, r['status'], r.get('admin_code') or '',
+                        r.get('sheet_id') or '',
+                        f"{r.get('confidence', 0):.3f}",
+                        r['method'], r['message'], renamed, f'{dt:.2f}'])
             if i % 5 == 0 or i == len(scans):
                 print(f'  [{i}/{len(scans)}] OK={n_ok} FAIL={n_fail} '
                       f'ERR={n_err} ({(time.time()-t0)/i:.1f}s/장)')

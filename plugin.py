@@ -399,9 +399,13 @@ class Stage2Tab(StageTab):
 
     def build_options(self):
         self.thorough = QCheckBox('OCR thorough 모드 (4-variant, 느림/정밀)')
-        self.copy_unmatched = QCheckBox('짝 못찾은 스캔을 _unmatched/에 복사')
+        self.no_rename = QCheckBox('성공 스캔 표준명 복사 안 함 '
+                                   '(기본: identified/에 {admin}_{sheet} 이름으로 복사)')
+        self.no_unmatched = QCheckBox('실패 스캔 격리 안 함 '
+                                      '(기본: _unmatched/에 복사)')
         self.opt_layout.addRow(self.thorough)
-        self.opt_layout.addRow(self.copy_unmatched)
+        self.opt_layout.addRow(self.no_rename)
+        self.opt_layout.addRow(self.no_unmatched)
 
     def io_summary(self):
         return ([('스캔', self.common.scan_input.text()),
@@ -426,8 +430,10 @@ class Stage2Tab(StageTab):
                 '--out', self.get_out_dir()]
         if self.thorough.isChecked():
             argv.append('--thorough')
-        if self.copy_unmatched.isChecked():
-            argv.append('--copy-unmatched')
+        if self.no_rename.isChecked():
+            argv.append('--no-rename')
+        if self.no_unmatched.isChecked():
+            argv.append('--no-unmatched')
         return argv
 
 
