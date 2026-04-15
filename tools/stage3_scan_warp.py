@@ -350,24 +350,18 @@ def match_and_warp(scan_jpg, admin_code, pdf_jpg, pdf_jgw_path,
     Tout = np.array([[1.0, 0, mbx], [0, 1.0, mby], [0, 0, 1]], np.float64)
     H_full = Tout @ H @ Tin
 
-    # 잔차 평가 (이게 진짜 품질 지표)
+    # GCP 좌표 준비
     scan_full = src[inl] / scan_scale
     main_full = dst[inl] + np.array([mbx, mby])
-    proj = cv2.perspectiveTransform(
-        scan_full.reshape(-1, 1, 2), H_full).reshape(-1, 2)
-    resid = np.linalg.norm(proj - main_full, axis=1)
     main_ps = abs(main_jgw.pixel_size_x)
-    med_px = float(np.median(resid))
-    max_px = float(resid.max())
-    result['residual_main_px'] = {'median': med_px, 'max': max_px}
-    result['residual_world_m'] = {
-        'median': med_px * main_ps, 'max': max_px * main_ps}
-    print(f'  잔차(main_px): med={med_px:.2f}, max={max_px:.2f}')
 
-    # 잔차 기준 품질 게이트 (실제 정확도 지표)
-    if med_px > 10.0:
+    # 인라이어 비율 기반 품질 게이트
+    inlier_pct = n_inl / len(good)
+    result['inlier_pct'] = inlier_pct
+    print(f'  매칭 품질: inliers={n_inl}/{len(good)} ({100*inlier_pct:.1f}%)')
+    if inlier_pct < 0.05:  # 5% 미만이면 호모그래피 신뢰도 낮음
         result.update(status='FAIL',
-                      message=f'잔차 과다: median={med_px:.1f}px > 10')
+                      message=f'inlier 비율 과소: {100*inlier_pct:.1f}%')
         return result
 
     # 4b) inlier 시각화 (잔차 통과 후)
@@ -501,7 +495,7 @@ def main():
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(['scan_path', 'admin_code', 'status',
-                    'n_inliers', 'residual_med_m', 'residual_max_m',
+                    'n_inliers', 'n_good', 'inlier_pct',
                     'output_w', 'output_h', 'message', 'elapsed_s'])
 
         n_ok = n_fail = 0
@@ -529,12 +523,13 @@ def main():
                     output_basename=sub_name,
                     warp_mode=args.warp,
                     strip_red=not args.keep_red)
-                resw = r.get('residual_world_m', {})
                 osz = r.get('output_size', [0, 0])
+                inl_pct = r.get('inlier_pct', 0)
                 w.writerow([
-                    scan, code, r['status'], r.get('n_inliers', ''),
-                    f'{resw.get("median", 0):.2f}',
-                    f'{resw.get("max", 0):.2f}',
+                    scan, code, r['status'],
+                    r.get('n_inliers', ''),
+                    r.get('n_good', ''),
+                    f'{100*inl_pct:.1f}%',
                     osz[0], osz[1], r.get('message', ''),
                     f'{r.get("elapsed", 0):.1f}',
                 ])
