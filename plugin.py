@@ -19,7 +19,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QPushButton, QLabel, QLineEdit, QFileDialog,
     QTextEdit, QFormLayout, QMessageBox, QApplication,
     QTableWidget, QTableWidgetItem, QCheckBox, QDoubleSpinBox,
-    QGroupBox,
+    QGroupBox, QComboBox,
 )
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
@@ -450,8 +450,15 @@ class Stage3Tab(StageTab):
         super().__init__(common)
 
     def build_options(self):
+        self.warp = QComboBox()
+        self.warp.addItems(['homography (빠름, 전역 평면)',
+                            'mesh (중간, Delaunay piecewise)',
+                            'tps (정밀, 비선형)'])
         self.no_intermediates = QCheckBox('중간산출 저장 안 함 (속도)')
+        self.keep_red = QCheckBox('빨강 마커 유지 (기본: SIFT 전 흰색 처리)')
+        self.opt_layout.addRow('워핑 방식:', self.warp)
         self.opt_layout.addRow(self.no_intermediates)
+        self.opt_layout.addRow(self.keep_red)
 
     def io_summary(self):
         proj = self.common.project_dir.text()
@@ -472,9 +479,12 @@ class Stage3Tab(StageTab):
                 os.path.join(self.common.sub(SUB_SCAN_ID),
                              '_identification.csv'),
                 '--pdf-main', self.common.sub(SUB_PDF_GEO),
-                '--out', self.get_out_dir()]
+                '--out', self.get_out_dir(),
+                '--warp', self.warp.currentText().split()[0]]
         if self.no_intermediates.isChecked():
             argv.append('--no-intermediates')
+        if self.keep_red.isChecked():
+            argv.append('--keep-red')
         return argv
 
 
