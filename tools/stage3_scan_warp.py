@@ -175,45 +175,46 @@ def match_and_warp(scan_jpg, admin_code, pdf_jpg, pdf_jgw_path,
         return result
     inl = mask.ravel().astype(bool)
     n_inl = int(inl.sum())
-    cond = float(np.linalg.cond(H))
     result['n_inliers'] = n_inl
-    result['cond_H'] = cond
-    print(f'  MAGSAC inliers: {n_inl}/{len(good)} ({100*n_inl/len(good):.1f}%) cond={cond:.1e}')
-    if n_inl < 30 or cond > 1e10:
+    print(f'  MAGSAC inliers: {n_inl}/{len(good)} '
+          f'({100*n_inl/len(good):.1f}%)')
+    if n_inl < 30:
         result.update(status='FAIL',
-                      message=f'정합 불안정: inliers={n_inl}, cond(H)={cond:.1e}')
+                      message=f'inliers 부족: {n_inl}')
         return result
-
-    # 4b) inlier 시각화
-    if save_intermediates:
-        good_inl = [m for m, ok in zip(good, inl) if ok]
-        vis = cv2.drawMatches(g_scan, kp1, g_main, kp_main, good_inl[:300], None,
-                              flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-        save_thumb(os.path.join(out_dir, '04_matches_inliers.jpg'), vis,
-                   max_dim=2400)
 
     # 5) H를 원본 해상도(scan_full → main_full)로 변환
     Tin = np.diag([scan_scale, scan_scale, 1.0])
     Tout = np.array([[1.0, 0, mbx], [0, 1.0, mby], [0, 0, 1]], np.float64)
     H_full = Tout @ H @ Tin
 
-    # 잔차 평가
+    # 잔차 평가 (이게 진짜 품질 지표)
     scan_full = src[inl] / scan_scale
     main_full = dst[inl] + np.array([mbx, mby])
     proj = cv2.perspectiveTransform(
         scan_full.reshape(-1, 1, 2), H_full).reshape(-1, 2)
     resid = np.linalg.norm(proj - main_full, axis=1)
     main_ps = abs(main_jgw.pixel_size_x)
-    result['residual_main_px'] = {
-        'median': float(np.median(resid)),
-        'max': float(resid.max()),
-    }
+    med_px = float(np.median(resid))
+    max_px = float(resid.max())
+    result['residual_main_px'] = {'median': med_px, 'max': max_px}
     result['residual_world_m'] = {
-        'median': float(np.median(resid)) * main_ps,
-        'max': float(resid.max()) * main_ps,
-    }
-    print(f'  잔차: med={result["residual_world_m"]["median"]:.2f}m, '
-          f'max={result["residual_world_m"]["max"]:.2f}m')
+        'median': med_px * main_ps, 'max': max_px * main_ps}
+    print(f'  잔차(main_px): med={med_px:.2f}, max={max_px:.2f}')
+
+    # 잔차 기준 품질 게이트 (실제 정확도 지표)
+    if med_px > 10.0:
+        result.update(status='FAIL',
+                      message=f'잔차 과다: median={med_px:.1f}px > 10')
+        return result
+
+    # 4b) inlier 시각화 (잔차 통과 후)
+    if save_intermediates:
+        good_inl = [m for m, ok in zip(good, inl) if ok]
+        vis = cv2.drawMatches(g_scan, kp1, g_main, kp_main, good_inl[:300], None,
+                              flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+        save_thumb(os.path.join(out_dir, '04_matches_inliers.jpg'), vis,
+                   max_dim=2400)
 
     # 6) 출력 raster bbox 계산 (scan 4 corners → main → world)
     corners_scan = np.float32([[0, 0], [sw, 0], [sw, sh], [0, sh]]).reshape(-1, 1, 2)
