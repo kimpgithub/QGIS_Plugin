@@ -382,14 +382,16 @@ class SheetCache:
                 print(f'  [bbox 캐시 로드 실패] {e}')
 
     def _scan_index_pdfs(self):
-        for f in sorted(os.listdir(self.pdf_input_dir)):
-            m = SHEET_PATTERN.match(f)
-            if not m:
-                continue
-            admin = m.group(1)
-            sid = f'{m.group(2)}-{m.group(3)}'
-            self._sheet_meta.setdefault(admin, {})[sid] = os.path.join(
-                self.pdf_input_dir, f)
+        # 재귀 탐색 — pdf/21/21510/22510110_4-1.pdf 같은 중첩 구조 지원
+        for root, _, files in os.walk(self.pdf_input_dir):
+            for f in sorted(files):
+                m = SHEET_PATTERN.match(f)
+                if not m:
+                    continue
+                admin = m.group(1)
+                sid = f'{m.group(2)}-{m.group(3)}'
+                self._sheet_meta.setdefault(admin, {})[sid] = os.path.join(
+                    root, f)
 
     def admins_with_sheets(self):
         return list(self._sheet_meta.keys())
