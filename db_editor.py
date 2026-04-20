@@ -15,7 +15,8 @@ import os
 from qgis.PyQt.QtWidgets import (
     QAction, QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QFormLayout, QComboBox, QSpinBox,
-    QTextEdit, QMessageBox, QGroupBox, QApplication,
+    QTextEdit, QMessageBox, QGroupBox, QApplication, QFileDialog,
+    QTableWidget, QTableWidgetItem,
 )
 from qgis.PyQt.QtCore import Qt
 
@@ -23,6 +24,7 @@ from .db_tools.pg_connection import (
     PGProfile, save_profile, load_profile, list_profiles, delete_profile,
     test_connection, SETTINGS_PREFIX,
 )
+from .db_tools import excel_loader
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
@@ -176,7 +178,159 @@ class PGConnectionTab(QWidget):
 
 
 # ============================================================
-# Tab: 플레이스홀더 — Phase 3~6에서 채워짐
+# Tab: 엑셀 → PostGIS 탑재 (행정리현황)
+# ============================================================
+
+class ExcelLoadTab(QWidget):
+    """행정리현황 엑셀 업로드 → ri_status 테이블에 업서트.
+
+    화면정의서 S12 요구사항. image5 스키마 기준.
+    """
+
+    def __init__(self, parent_dialog):
+        super().__init__()
+        self.parent_dialog = parent_dialog
+        self._excel_path = None
+        self._cached_rows = None
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+
+        help_label = QLabel(
+            '<i>행정리현황 엑셀 파일을 선택하면 컬럼이 자동 인식됩니다.'
+            '<br>필수 컬럼: <b>ADM_CD, ADM_NM, RI_CD, RI_NM</b> '
+            '(한글명·공백·대소문자 관용).'
+            '<br>대상 테이블이 없으면 자동 생성, 있으면 (adm_cd, ri_cd) 기준 '
+            '업서트됩니다.</i>')
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet(
+            'QLabel { padding: 6px; background: #f0f0f0; border-radius: 3px; }')
+        layout.addWidget(help_label)
+
+        # 1) 파일 선택
+        path_box = QHBoxLayout()
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText('행정리현황 엑셀 파일 선택 (.xlsx)')
+        self.btn_browse = QPushButton('파일 선택')
+        self.btn_browse.clicked.connect(self._on_browse)
+        path_box.addWidget(QLabel('엑셀:'))
+        path_box.addWidget(self.path_edit, 1)
+        path_box.addWidget(self.btn_browse)
+        layout.addLayout(path_box)
+
+        # 2) 대상 테이블 설정
+        form = QFormLayout()
+        self.schema_edit = QLineEdit('public')
+        self.table_edit = QLineEdit('ri_status')
+        form.addRow('Schema:', self.schema_edit)
+        form.addRow('Table:', self.table_edit)
+        layout.addLayout(form)
+
+        # 3) 미리보기
+        preview_box = QGroupBox('미리보기 (첫 10행)')
+        pv_layout = QVBoxLayout(preview_box)
+        self.preview = QTableWidget()
+        self.preview.setMinimumHeight(200)
+        pv_layout.addWidget(self.preview)
+        self.column_info = QLabel('파일 미선택')
+        self.column_info.setWordWrap(True)
+        pv_layout.addWidget(self.column_info)
+        layout.addWidget(preview_box)
+
+        # 4) 실행
+        btn_row = QHBoxLayout()
+        self.btn_load = QPushButton('PostGIS에 탑재')
+        self.btn_load.clicked.connect(self._on_load)
+        self.btn_load.setEnabled(False)
+        btn_row.addWidget(self.btn_load)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # 로그
+        self.log = QTextEdit(); self.log.setReadOnly(True)
+        self.log.setMinimumHeight(100)
+        self.log.setStyleSheet('QTextEdit { font-family: monospace; }')
+        layout.addWidget(self.log)
+
+    def _on_browse(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, '행정리현황 엑셀 선택', '',
+            '엑셀 (*.xlsx *.xlsm);;모든 파일 (*)')
+        if not p:
+            return
+        self.path_edit.setText(p)
+        self._load_preview(p)
+
+    def _load_preview(self, path):
+        try:
+            headers, rows, mapping, missing = excel_loader.read_excel(
+                path, limit=500)
+        except Exception as e:
+            self.log.append(f'[오류] 엑셀 읽기 실패: {e}')
+            return
+
+        self._excel_path = path
+        self._cached_rows = rows
+
+        # 컬럼 매핑 상태
+        mapped = [f'{orig}→{canon}' for orig, canon in mapping.items()]
+        info = f'<b>총 유효행:</b> {len(rows)}건 (첫 500행까지 스캔)<br>'
+        info += f'<b>매핑된 컬럼:</b> {", ".join(mapped) or "없음"}<br>'
+        if missing:
+            info += f'<b style="color:red">누락 필수 컬럼:</b> {", ".join(missing)}'
+            self.btn_load.setEnabled(False)
+        else:
+            info += '<b style="color:green">✓ 모든 필수 컬럼 OK</b>'
+            self.btn_load.setEnabled(True)
+        self.column_info.setText(info)
+
+        # 미리보기 테이블
+        cols = ['sido_cd', 'sido_nm', 'sigungu_cd', 'sigungu_nm',
+                'adm_cd', 'adm_nm', 'li_nm', 'ri_nm', 'ri_cd', 'remark']
+        self.preview.setColumnCount(len(cols))
+        self.preview.setHorizontalHeaderLabels(cols)
+        show = rows[:10]
+        self.preview.setRowCount(len(show))
+        for i, r in enumerate(show):
+            for j, c in enumerate(cols):
+                self.preview.setItem(i, j, QTableWidgetItem(r.get(c, '')))
+        self.preview.resizeColumnsToContents()
+
+    def _on_load(self):
+        profile = self.parent_dialog.active_profile
+        if profile is None or not profile.database:
+            # 프로파일 탭에서 현재 폼 값을 사용
+            # (사용자가 테스트 누르지 않고 바로 탑재 시도 케이스)
+            tab_pg = self.parent_dialog.tabs.widget(0)
+            profile = tab_pg._current_profile()
+            if not profile.database:
+                QMessageBox.warning(self, '경고',
+                                    '먼저 [1. PG 연결] 탭에서 연결 설정 필요')
+                return
+        if not self._cached_rows:
+            QMessageBox.warning(self, '경고', '엑셀 파일을 먼저 선택하세요')
+            return
+        schema = self.schema_edit.text().strip() or 'public'
+        table = self.table_edit.text().strip() or 'ri_status'
+        self.log.append(f'[탑재 시작] {len(self._cached_rows)}행 → '
+                        f'{profile.host}:{profile.port}/{profile.database} '
+                        f'{schema}.{table}')
+        QApplication.processEvents()
+        try:
+            result = excel_loader.upsert(
+                profile, self._cached_rows,
+                schema=schema, table=table)
+            self.log.append(f'  ✅ 완료: affected={result["affected"]}행')
+            if result.get('errors'):
+                for e in result['errors']:
+                    self.log.append(f'  ⚠ {e}')
+        except Exception as e:
+            self.log.append(f'  ❌ 실패: {e}')
+
+
+# ============================================================
+# Tab: 플레이스홀더 — Phase 4~6에서 채워짐
 # ============================================================
 
 class PlaceholderTab(QWidget):
@@ -208,10 +362,7 @@ class DBEditorDialog(QDialog):
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         self.tabs.addTab(PGConnectionTab(self), '1. PG 연결')
-        self.tabs.addTab(PlaceholderTab(
-            '엑셀 → PostGIS 탑재 (Phase 3)',
-            '행정리현황 엑셀을 PostGIS에 업서트합니다. 구현 예정.'),
-            '2. 엑셀 탑재')
+        self.tabs.addTab(ExcelLoadTab(self), '2. 엑셀 탑재')
         self.tabs.addTab(PlaceholderTab(
             '행정리 작업 (Phase 4~6)',
             '읍면동 리스트 + 지도 연동 + 행정리 경계 편집. 구현 예정.'),
