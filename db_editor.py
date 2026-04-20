@@ -24,7 +24,7 @@ from .db_tools.pg_connection import (
     PGProfile, save_profile, load_profile, list_profiles, delete_profile,
     test_connection, SETTINGS_PREFIX,
 )
-from .db_tools import excel_loader
+from .db_tools import excel_loader, admin_list, layer_control
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
@@ -330,7 +330,217 @@ class ExcelLoadTab(QWidget):
 
 
 # ============================================================
-# Tab: 플레이스홀더 — Phase 4~6에서 채워짐
+# Tab: 행정리 작업 (읍면동 리스트 + 더블클릭 줌 + 작업 시작/종료)
+# ============================================================
+
+class WorkListTab(QWidget):
+    """화면정의서 S11-S13 대응 — 읍면동 작업리스트 + 지도 이동 + 레이어 제어.
+
+    - bnd_adm_pg에서 읍면동 리스트 로드 (PG 쿼리)
+    - 검색 + 더블클릭 = 맵 캔버스 줌
+    - [작업 시작]: bnd_job_pg만 편집 가능, 나머지 readOnly
+    - [작업 종료]: 편집 내역 저장 + 잠금 해제
+    - (옵션) 워프 스캔 자동 로드 — admin 선택 시 해당 시트 레이어 추가
+    """
+
+    def __init__(self, parent_dialog):
+        super().__init__()
+        self.parent_dialog = parent_dialog
+        self.iface = parent_dialog.iface
+        self._bboxes = {}      # adm_cd → (xmin, ymin, xmax, ymax)
+        self._current_admin = None
+        self._work_snapshot = None  # 작업 시작 시 저장, 종료 시 복원
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+
+        help_label = QLabel(
+            '<i>읍면동 리스트 로드 후 <b>더블클릭</b>하면 맵이 해당 영역으로 이동합니다. '
+            '<b>[작업 시작]</b>을 누르면 bnd_job_pg만 편집 가능, 나머지 레이어는 '
+            '자동 잠금. <b>[작업 종료]</b>로 변경사항 저장+잠금 해제.</i>')
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet(
+            'QLabel { padding: 6px; background: #f0f0f0; border-radius: 3px; }')
+        layout.addWidget(help_label)
+
+        # 소스 테이블 + 워프 폴더
+        src_box = QGroupBox('데이터 소스')
+        src_form = QFormLayout(src_box)
+        self.src_schema = QLineEdit('census_23p')
+        self.src_table = QLineEdit('bnd_adm_pg')
+        self.warped_dir = QLineEdit('')
+        self.warped_dir.setPlaceholderText(
+            '(선택) 워프 스캔 루트 폴더. admin 선택 시 시트 레이어 자동 로드')
+        btn_browse = QPushButton('찾기')
+        btn_browse.clicked.connect(self._browse_warped)
+
+        src_form.addRow('bnd_adm_pg 스키마:', self.src_schema)
+        src_form.addRow('bnd_adm_pg 테이블:', self.src_table)
+        wrow = QHBoxLayout()
+        wrow.addWidget(self.warped_dir, 1); wrow.addWidget(btn_browse)
+        warp_w = QWidget(); warp_w.setLayout(wrow)
+        src_form.addRow('워프 폴더:', warp_w)
+
+        btn_refresh = QPushButton('리스트 로드')
+        btn_refresh.clicked.connect(self._refresh)
+        src_form.addRow(btn_refresh)
+        layout.addWidget(src_box)
+
+        # 검색 + 리스트
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel('검색:'))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('읍면동 코드/명칭/시군구 (예: 21510110 / 기장읍)')
+        self.search.textChanged.connect(self._on_search)
+        search_row.addWidget(self.search)
+        layout.addLayout(search_row)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ['읍면동 코드', '읍면동명', '시군구', '시도'])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.doubleClicked.connect(self._on_double_click)
+        self.table.currentCellChanged.connect(
+            lambda r, *_: self._on_row_selected(r))
+        self.table.setMinimumHeight(250)
+        layout.addWidget(self.table, 1)
+
+        # 작업 시작/종료
+        btn_row = QHBoxLayout()
+        self.btn_start = QPushButton(
+            '작업 시작 (bnd_job_pg 편집 활성, 기타 잠금)')
+        self.btn_start.clicked.connect(self._on_start)
+        self.btn_end = QPushButton('작업 종료 (저장 + 잠금 해제)')
+        self.btn_end.clicked.connect(self._on_end)
+        self.btn_end.setEnabled(False)
+        btn_row.addWidget(self.btn_start); btn_row.addWidget(self.btn_end)
+        layout.addLayout(btn_row)
+
+        self.status = QLabel('리스트 미로드')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+    # --- 데이터 로드 ---
+
+    def _get_profile(self):
+        tab_pg = self.parent_dialog.tabs.widget(0)
+        p = tab_pg._current_profile()
+        return p if p.database else None
+
+    def _browse_warped(self):
+        d = QFileDialog.getExistingDirectory(
+            self, '워프 스캔 루트 폴더 선택', self.warped_dir.text())
+        if d:
+            self.warped_dir.setText(d)
+
+    def _refresh(self):
+        profile = self._get_profile()
+        if profile is None:
+            QMessageBox.warning(self, '경고',
+                                '[1. PG 연결] 탭에서 연결 설정 필요')
+            return
+        schema = self.src_schema.text().strip() or 'census_23p'
+        table = self.src_table.text().strip() or 'bnd_adm_pg'
+        try:
+            admins = admin_list.load_admin_list(profile, schema, table)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'리스트 로드 실패: {e}')
+            return
+        self._bboxes = {}
+        self.table.setRowCount(len(admins))
+        for i, a in enumerate(admins):
+            self.table.setItem(i, 0, QTableWidgetItem(a['adm_cd']))
+            self.table.setItem(i, 1, QTableWidgetItem(a['adm_nm']))
+            self.table.setItem(i, 2, QTableWidgetItem(a['sigungu_nm']))
+            self.table.setItem(i, 3, QTableWidgetItem(a['sido_nm']))
+            self._bboxes[a['adm_cd']] = (
+                a['xmin'], a['ymin'], a['xmax'], a['ymax'])
+        self.table.resizeColumnsToContents()
+        self.status.setText(f'로드: {len(admins)}개 읍면동')
+
+    # --- 검색 ---
+
+    def _on_search(self, text):
+        text = text.strip().lower()
+        for r in range(self.table.rowCount()):
+            if not text:
+                self.table.setRowHidden(r, False); continue
+            vals = ' '.join(
+                self.table.item(r, c).text().lower() for c in range(4))
+            self.table.setRowHidden(r, text not in vals)
+
+    # --- 선택/맵 이동 ---
+
+    def _on_row_selected(self, row):
+        """싱글클릭 — 행 하이라이트만 (맵 이동 안 함)."""
+        if row < 0:
+            return
+        item = self.table.item(row, 0)
+        if item:
+            self._current_admin = item.text()
+
+    def _on_double_click(self, index):
+        """더블클릭 — 맵 캔버스 줌 + (옵션) 워프 스캔 자동 로드."""
+        row = index.row()
+        cd = self.table.item(row, 0).text()
+        bbox = self._bboxes.get(cd)
+        if not bbox:
+            return
+        try:
+            from qgis.core import QgsRectangle
+            rect = QgsRectangle(bbox[0], bbox[1], bbox[2], bbox[3])
+            canvas = self.iface.mapCanvas()
+            canvas.setExtent(rect)
+            canvas.refresh()
+            self._current_admin = cd
+            msg = f'맵 이동: {cd} ({self.table.item(row,1).text()})'
+            # 워프 스캔 로드
+            warp_root = self.warped_dir.text().strip()
+            if warp_root:
+                try:
+                    layer_control.clear_warped_scans(
+                        self.iface, exclude_admin=cd)
+                    added = layer_control.load_warped_scans(
+                        self.iface, cd, warp_root)
+                    if added:
+                        msg += f' | 워프 스캔 {len(added)}개 로드'
+                except Exception as e:
+                    msg += f' | 스캔 로드 오류: {e}'
+            self.status.setText(msg)
+        except Exception as e:
+            self.status.setText(f'맵 이동 실패: {e}')
+
+    # --- 작업 시작/종료 ---
+
+    def _on_start(self):
+        try:
+            self._work_snapshot = layer_control.start_work_mode(self.iface)
+            self.btn_start.setEnabled(False)
+            self.btn_end.setEnabled(True)
+            self.status.setText(
+                '작업 시작 — bnd_job_pg 편집 가능, 나머지 readOnly')
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'작업 시작 실패: {e}')
+
+    def _on_end(self):
+        try:
+            saved, errors = layer_control.end_work_mode(
+                self.iface, self._work_snapshot)
+            self._work_snapshot = None
+            self.btn_start.setEnabled(True)
+            self.btn_end.setEnabled(False)
+            msg = f'작업 종료 — {saved}개 레이어 저장'
+            if errors:
+                msg += f' | 오류: {len(errors)}건'
+            self.status.setText(msg)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'작업 종료 실패: {e}')
+
+
+# ============================================================
+# Tab: 플레이스홀더 — Phase 6에서 채워짐
 # ============================================================
 
 class PlaceholderTab(QWidget):
@@ -363,10 +573,7 @@ class DBEditorDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(PGConnectionTab(self), '1. PG 연결')
         self.tabs.addTab(ExcelLoadTab(self), '2. 엑셀 탑재')
-        self.tabs.addTab(PlaceholderTab(
-            '행정리 작업 (Phase 4~6)',
-            '읍면동 리스트 + 지도 연동 + 행정리 경계 편집. 구현 예정.'),
-            '3. 행정리 작업')
+        self.tabs.addTab(WorkListTab(self), '3. 행정리 작업')
         self.tabs.addTab(PlaceholderTab(
             '데이터 경량화 (Phase 6)',
             'QGIS simplify 래퍼. 구현 예정.'),
