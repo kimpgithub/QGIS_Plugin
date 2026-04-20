@@ -960,24 +960,35 @@ class GISScanToolsDialog(QDialog):
 class GISScanToolsPlugin:
     def __init__(self, iface):
         self.iface = iface
-        self.action = None
+        self.action = None        # 파이프라인 다이얼로그
+        self.action_db = None     # DB 작업 다이얼로그
         self.dialog = None
+        self.db_dialog = None
 
     def initGui(self):
         icon_path = os.path.join(PLUGIN_DIR, 'resources', 'icon_georef.svg')
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-        self.action = QAction(icon, 'GIS Scan Tools (5-stage)',
+        # 1. 파이프라인
+        self.action = QAction(icon, 'GIS Scan Tools — 파이프라인',
                               self.iface.mainWindow())
         self.action.triggered.connect(self.show_dialog)
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu('&GIS Scan Tools', self.action)
+        # 2. DB 작업 (행정리 경계 편집 등)
+        self.action_db = QAction(icon, 'GIS Scan Tools — DB 작업',
+                                 self.iface.mainWindow())
+        self.action_db.triggered.connect(self.show_db_dialog)
+        self.iface.addToolBarIcon(self.action_db)
+        self.iface.addPluginToMenu('&GIS Scan Tools', self.action_db)
 
     def unload(self):
-        if self.action:
-            self.iface.removePluginMenu('&GIS Scan Tools', self.action)
-            self.iface.removeToolBarIcon(self.action)
-        if self.dialog:
-            self.dialog.close()
+        for a in (self.action, self.action_db):
+            if a:
+                self.iface.removePluginMenu('&GIS Scan Tools', a)
+                self.iface.removeToolBarIcon(a)
+        for d in (self.dialog, self.db_dialog):
+            if d:
+                d.close()
 
     def show_dialog(self):
         if self.dialog is None:
@@ -986,3 +997,12 @@ class GISScanToolsPlugin:
         self.dialog.show()
         self.dialog.raise_()
         self.dialog.activateWindow()
+
+    def show_db_dialog(self):
+        if self.db_dialog is None:
+            from .db_editor import DBEditorDialog
+            self.db_dialog = DBEditorDialog(self.iface,
+                                            self.iface.mainWindow())
+        self.db_dialog.show()
+        self.db_dialog.raise_()
+        self.db_dialog.activateWindow()
