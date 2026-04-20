@@ -8,7 +8,7 @@
 
 | 단계 | 역할 | 출력 |
 |---|---|---|
-| **Stage 1** | 메인 PDF를 SHP와 정합 → 좌표 부여 | `pdf_main_geo/{code}.{jpg,jgw,prj}` |
+| **Stage 1** | 메인 PDF 좌표 부여 — PDF 텍스트 메타(축척+그리드)+SHP admin bbox 즉시 정합 (≤4m), 메타 추출 실패 시 SIFT/Powell 폴백 | `pdf_main_geo/{code}.{jpg,jgw,prj}` |
 | **Stage 2** | 스캔 식별 — 헤더 OCR(SHP 한글명/fuzzy 회수)로 admin_code, ROI OCR(PDF 후보 매칭)로 sheet_id, 메인 PDF 라벨 좌표로 sheet bbox(±15m, SIFT 우회) | `_identification.csv`, `sheet_bboxes.json` |
 | **Stage 3** | 스캔 ↔ 메인 PDF SIFT + 호모그래피 워핑 | `warped/{code}/{code}_{sheet}/{code}_{sheet}.jpg` |
 | **Stage 4** | 사분면 크롭 + 모자이크 병합 | `merged/{code}_scan_merged.jpg` |
@@ -139,7 +139,8 @@ merged/
 
 ## 트러블슈팅
 
-- **Stage 1 cost > 2px**: 메인 PDF 정합 정확도 낮음. SHP 좌표계/버전 확인
+- **Stage 1 cost > 2px**: PDF 메타 정합 실패 → SIFT 폴백도 실패. PDF 텍스트(축척/분할도 라벨) 확인 또는 `--no-pdf-meta`로 SIFT만 강제
+- **Stage 1 다도해/특이 형상 admin (예: 추자면)**: PDF 메타 자동 처리. SIFT만으로는 종종 실패하지만 메타 기반은 안정
 - **Stage 2 OCR 실패**: `--shp` 옵션 권장 (전국 행정명/코드 사전으로 자동 회수). 그래도 실패한 파일은 `_unmatched/`에 격리
 - **Stage 2 sheet bbox 부정확**: 메인 PDF가 텍스트 임베드된 경우 PDF 라벨 자동 사용 (즉시, ±15m). 이미지 PDF면 SIFT 폴백
 - **Stage 3 inliers < 30**: 스캔 품질 또는 PDF 스케일 차이 큰 경우. 잔차 확인
