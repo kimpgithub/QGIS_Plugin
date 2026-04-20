@@ -19,10 +19,11 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QPushButton, QLabel, QLineEdit, QFileDialog,
     QTextEdit, QFormLayout, QMessageBox, QApplication,
     QTableWidget, QTableWidgetItem, QCheckBox, QDoubleSpinBox,
-    QGroupBox, QComboBox,
+    QGroupBox, QComboBox, QListWidget, QListWidgetItem,
+    QCompleter, QSpinBox,
 )
-from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
+from qgis.PyQt.QtGui import QIcon, QPixmap
+from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QSize
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
@@ -369,6 +370,77 @@ class Stage1Tab(StageTab):
         self.cost_th.setSingleStep(0.5)
         self.opt_layout.addRow('cost 임계(px):', self.cost_th)
 
+        # 수동 JGW 가져오기 — Stage 1 실패 admin 수작업 복구
+        self.btn_import_jgw = QPushButton(
+            '외부 JGW 가져오기 (자동 정합 실패 admin 복구용)')
+        self.btn_import_jgw.clicked.connect(self._import_jgw)
+        self.opt_layout.addRow(self.btn_import_jgw)
+
+    def _import_jgw(self):
+        """사용자가 외부(QGIS Georeferencer 등)에서 만든 JGW를 가져옴.
+
+        파일명에서 admin_code 추출({8자리}.jgw) →
+        같은 이름의 .jpg, .prj 도 함께 가져와 1_pdf_geo/에 복사.
+        """
+        if not self.common.project_dir.text():
+            QMessageBox.warning(self, '경고', '프로젝트 폴더 지정 필요')
+            return
+        jgw_path, _ = QFileDialog.getOpenFileName(
+            self, '외부 JGW 파일 선택', '',
+            'JGW (*.jgw *.jgW *.JGW);;모든 파일 (*)')
+        if not jgw_path:
+            return
+        import re as _re
+        base = os.path.splitext(os.path.basename(jgw_path))[0]
+        m = _re.match(r'^(\d{8})$', base)
+        if not m:
+            QMessageBox.warning(
+                self, '파일명 오류',
+                f'파일명이 8자리 행정코드 형식이어야 합니다: {base}.jgw\n'
+                f'예: 39010320.jgw')
+            return
+        code = m.group(1)
+        out_dir = self.get_out_dir()
+        os.makedirs(out_dir, exist_ok=True)
+
+        import shutil as _sh
+        src_base = os.path.splitext(jgw_path)[0]
+        copied = []
+        errors = []
+        # jgw 복사
+        try:
+            _sh.copy2(jgw_path, os.path.join(out_dir, f'{code}.jgw'))
+            copied.append(f'{code}.jgw')
+        except Exception as e:
+            errors.append(f'jgw: {e}')
+        # 옆에 있는 prj, jpg 복사 (있으면)
+        for ext in ('.prj', '.jpg', '.jpeg', '.tif', '.tiff'):
+            for e in (ext, ext.upper()):
+                src = src_base + e
+                if os.path.exists(src):
+                    try:
+                        _sh.copy2(src, os.path.join(
+                            out_dir, f'{code}{ext.lower()}'))
+                        copied.append(f'{code}{ext.lower()}')
+                    except Exception as ex:
+                        errors.append(f'{e}: {ex}')
+                    break
+        # prj 없으면 기본 EPSG:5179 생성
+        prj_out = os.path.join(out_dir, f'{code}.prj')
+        if not os.path.exists(prj_out):
+            try:
+                from .tools._legacy.common import PRJ_5179
+                with open(prj_out, 'w') as f:
+                    f.write(PRJ_5179)
+                copied.append(f'{code}.prj (기본 EPSG:5179)')
+            except Exception as e:
+                errors.append(f'prj 기본 작성: {e}')
+
+        msg = f'복사 완료:\n' + '\n'.join(f'  {c}' for c in copied)
+        if errors:
+            msg += '\n\n오류:\n' + '\n'.join(f'  {e}' for e in errors)
+        QMessageBox.information(self, '외부 JGW 가져오기', msg)
+
     def io_summary(self):
         return ([('PDF 폴더', self.common.pdf_input.text()),
                  ('SHP', self.common.shp.text())],
@@ -442,6 +514,253 @@ class Stage2Tab(StageTab):
 
 
 # ============================================================
+# 미식별 보강 (Stage 2 FAIL 수동 복구)
+# ============================================================
+
+class RecoveryTab(QWidget):
+    """_unmatched/ 파일에 admin_code + sheet_id를 수동 지정 → identified/로 이동.
+
+    CSV 편집 없이 드롭다운 UI로 간단 처리.
+    """
+
+    def __init__(self, common):
+        super().__init__()
+        self.common = common
+        self._shp_cache = None   # (codes_list, code→name 맵)
+        self._pdf_cache = None   # {admin_code: [sheet_id list]}
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        help_label = QLabel(
+            '<i>Stage 2 OCR이 실패한 파일을 수동 지정합니다. '
+            '왼쪽 리스트에서 파일 선택 → 행정코드·시트번호 지정 → '
+            '[저장]. 표준명으로 identified/ 폴더에 복사되어 다음 stage가 '
+            '자동 인식합니다.</i>')
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet(
+            'QLabel { padding: 4px; background: #f0f0f0; border-radius: 3px; }')
+        layout.addWidget(help_label)
+
+        # 새로고침 + 출력경로
+        top = QHBoxLayout()
+        self.btn_refresh = QPushButton('리스트 새로고침')
+        self.btn_refresh.clicked.connect(self.refresh_list)
+        top.addWidget(self.btn_refresh)
+        top.addStretch()
+        self.count_label = QLabel('미식별: 0건')
+        top.addWidget(self.count_label)
+        layout.addLayout(top)
+
+        # 좌(파일 리스트) + 우(편집 폼)
+        body = QHBoxLayout()
+        self.file_list = QListWidget()
+        self.file_list.setMinimumWidth(300)
+        self.file_list.currentItemChanged.connect(self._on_file_selected)
+        body.addWidget(self.file_list, 2)
+
+        right = QVBoxLayout()
+        self.thumb = QLabel('파일 선택')
+        self.thumb.setMinimumSize(400, 300)
+        self.thumb.setStyleSheet(
+            'QLabel { background: #ddd; border: 1px solid #888; }')
+        self.thumb.setAlignment(Qt.AlignCenter)
+        right.addWidget(self.thumb)
+
+        form = QFormLayout()
+        self.admin_cb = QComboBox()
+        self.admin_cb.setEditable(True)  # 검색 가능
+        self.admin_cb.setInsertPolicy(QComboBox.NoInsert)
+        self.admin_cb.currentIndexChanged.connect(self._on_admin_changed)
+        form.addRow('행정코드:', self.admin_cb)
+
+        self.sheet_cb = QComboBox()
+        form.addRow('시트번호:', self.sheet_cb)
+        right.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        self.btn_save = QPushButton('저장 (identified/로 복사)')
+        self.btn_save.clicked.connect(self._on_save)
+        self.btn_skip = QPushButton('건너뜀')
+        self.btn_skip.clicked.connect(self._on_skip)
+        btn_row.addWidget(self.btn_save)
+        btn_row.addWidget(self.btn_skip)
+        right.addLayout(btn_row)
+
+        self.status_label = QLabel('')
+        self.status_label.setWordWrap(True)
+        right.addWidget(self.status_label)
+        right.addStretch()
+
+        body.addLayout(right, 3)
+        layout.addLayout(body)
+
+    # --- 데이터 로드 ---
+
+    def _load_shp_codes(self):
+        if self._shp_cache is not None:
+            return self._shp_cache
+        shp_path = self.common.shp.text()
+        if not shp_path or not os.path.exists(shp_path):
+            return None, None
+        try:
+            import geopandas as gpd
+            try:
+                gdf = gpd.read_file(shp_path, encoding='cp949')
+            except Exception:
+                gdf = gpd.read_file(shp_path)
+            items = []  # (display_text, admin_code)
+            nm_map = {}
+            for _, r in gdf.iterrows():
+                cd = str(r.get('adm_cd', '')).strip()
+                nm = str(r.get('adm_nm', '')).strip()
+                if not cd.isdigit() or len(cd) != 8:
+                    continue
+                items.append((f'{cd}  {nm}', cd))
+                nm_map[cd] = nm
+            items.sort(key=lambda x: x[1])
+            self._shp_cache = (items, nm_map)
+            return items, nm_map
+        except Exception as e:
+            self.status_label.setText(f'SHP 로드 실패: {e}')
+            return None, None
+
+    def _load_pdf_sheets(self):
+        """{admin_code: [sheet_id list]} — PDF 폴더에서 분할 PDF 스캔."""
+        if self._pdf_cache is not None:
+            return self._pdf_cache
+        pdf_dir = self.common.pdf_input.text()
+        if not pdf_dir or not os.path.exists(pdf_dir):
+            return {}
+        import re as _re
+        pat = _re.compile(r'^(\d{8})_(\d+)-(\d+)\.pdf$')
+        result = {}
+        for root, _, files in os.walk(pdf_dir):
+            for f in files:
+                m = pat.match(f)
+                if not m:
+                    continue
+                admin = m.group(1)
+                sid = f'{m.group(2)}-{m.group(3)}'
+                result.setdefault(admin, set()).add(sid)
+        # set → sorted list
+        self._pdf_cache = {k: sorted(v, key=lambda s: (
+            int(s.split('-')[0]), int(s.split('-')[1]))) for k, v in result.items()}
+        return self._pdf_cache
+
+    def _unmatched_dir(self):
+        p = self.common.project_dir.text()
+        return os.path.join(p, SUB_SCAN_ID, '_unmatched') if p else ''
+
+    def _identified_dir(self):
+        p = self.common.project_dir.text()
+        return os.path.join(p, SUB_SCAN_ID, 'identified') if p else ''
+
+    # --- UI 이벤트 ---
+
+    def refresh_list(self):
+        self.file_list.clear()
+        self.thumb.setText('파일 선택')
+        self.status_label.setText('')
+        self._shp_cache = None  # SHP 경로 바뀌었을 수 있음
+        self._pdf_cache = None
+
+        # admin 드롭다운 채우기
+        self.admin_cb.clear()
+        shp_items, _ = self._load_shp_codes()
+        if shp_items:
+            for disp, cd in shp_items:
+                self.admin_cb.addItem(disp, cd)
+            # 자동완성
+            completer = QCompleter([x[0] for x in shp_items], self.admin_cb)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            self.admin_cb.setCompleter(completer)
+        else:
+            self.status_label.setText(
+                'SHP 미설정 또는 로드 실패 — 상단 공통설정에서 SHP 지정 필요')
+
+        # 미식별 파일 리스트
+        d = self._unmatched_dir()
+        if not d or not os.path.isdir(d):
+            self.count_label.setText('미식별 폴더 없음 (Stage 2 먼저 실행)')
+            return
+        files = sorted(
+            f for f in os.listdir(d)
+            if f.lower().endswith(('.jpg', '.jpeg', '.png')))
+        for f in files:
+            item = QListWidgetItem(f)
+            item.setData(Qt.UserRole, os.path.join(d, f))
+            self.file_list.addItem(item)
+        self.count_label.setText(f'미식별: {len(files)}건')
+
+    def _on_file_selected(self, item, _prev=None):
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        # 썸네일 (다운샘플 로드)
+        pm = QPixmap(path)
+        if not pm.isNull():
+            self.thumb.setPixmap(pm.scaled(
+                self.thumb.size(), Qt.KeepAspectRatio,
+                Qt.SmoothTransformation))
+        else:
+            self.thumb.setText(f'이미지 로드 실패: {os.path.basename(path)}')
+        self.status_label.setText(f'선택: {os.path.basename(path)}')
+
+    def _on_admin_changed(self, _idx):
+        self.sheet_cb.clear()
+        code = self.admin_cb.currentData()
+        if not code:
+            return
+        sheets_map = self._load_pdf_sheets()
+        sheets = sheets_map.get(code, [])
+        if sheets:
+            self.sheet_cb.addItems(sheets)
+        else:
+            self.sheet_cb.addItem('(분할 PDF 없음)')
+
+    def _on_save(self):
+        item = self.file_list.currentItem()
+        if not item:
+            self.status_label.setText('파일을 선택하세요')
+            return
+        src = item.data(Qt.UserRole)
+        code = self.admin_cb.currentData()
+        sid = self.sheet_cb.currentText()
+        if not code or not sid or '-' not in sid:
+            self.status_label.setText('행정코드·시트번호를 올바르게 선택하세요')
+            return
+        ext = os.path.splitext(src)[1] or '.jpg'
+        sub_dir = os.path.join(self._identified_dir(), code[:2], code[:5])
+        os.makedirs(sub_dir, exist_ok=True)
+        dst = os.path.join(sub_dir, f'{code}_{sid}{ext}')
+        # 중복 방지
+        k = 2
+        while os.path.exists(dst):
+            dst = os.path.join(sub_dir, f'{code}_{sid}_{k}{ext}')
+            k += 1
+        import shutil as _sh
+        try:
+            _sh.copy2(src, dst)
+            self.status_label.setText(
+                f'저장 완료: {dst} — 다음 Stage 실행 시 자동 처리됩니다.')
+            # 리스트에서 현재 항목 제거
+            row = self.file_list.currentRow()
+            self.file_list.takeItem(row)
+            self.count_label.setText(f'미식별: {self.file_list.count()}건')
+        except Exception as e:
+            self.status_label.setText(f'저장 실패: {e}')
+
+    def _on_skip(self):
+        row = self.file_list.currentRow()
+        if row >= 0:
+            next_row = min(row + 1, self.file_list.count() - 1)
+            self.file_list.setCurrentRow(next_row)
+
+
+# ============================================================
 # 지도영역 추출 (화면정의서 S7) — Stage 2와 Stage 3 사이의 독립 탭
 # ============================================================
 
@@ -492,9 +811,9 @@ class Stage3Tab(StageTab):
 
     def io_summary(self):
         proj = self.common.project_dir.text()
-        return ([('Stage 2 CSV', os.path.join(
+        return ([('Stage 2 identified/', os.path.join(
                     self.common.sub(SUB_SCAN_ID),
-                    '_identification.csv') if proj else ''),
+                    'identified') if proj else ''),
                  ('Stage 2 sheets_geo', os.path.join(
                     self.common.sub(SUB_SCAN_ID),
                     'sheets_geo') if proj else '')],
@@ -505,10 +824,10 @@ class Stage3Tab(StageTab):
         return os.path.join(p, SUB_WARPED) if p else ''
 
     def get_argv(self):
+        # 입력: identified/ 폴더 (수동 보강 파일도 자동 포함)
         self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
-        argv = ['--identification',
-                os.path.join(self.common.sub(SUB_SCAN_ID),
-                             '_identification.csv'),
+        argv = ['--identified',
+                os.path.join(self.common.sub(SUB_SCAN_ID), 'identified'),
                 '--sheets-geo', os.path.join(
                     self.common.sub(SUB_SCAN_ID), 'sheets_geo'),
                 '--out', self.get_out_dir()]
@@ -626,6 +945,7 @@ class GISScanToolsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(Stage1Tab(self.common), '1. PDF 좌표생성')
         self.tabs.addTab(Stage2Tab(self.common), '2. 스캔 식별')
+        self.tabs.addTab(RecoveryTab(self.common), '2a. 미식별 보강')
         self.tabs.addTab(ExtractMapTab(self.common), '2b. 지도영역 추출')
         self.tabs.addTab(Stage3Tab(self.common), '3. 매칭+워핑')
         self.tabs.addTab(Stage4Tab(self.common), '4. 사분면 병합')

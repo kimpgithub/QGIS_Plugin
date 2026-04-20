@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 
@@ -376,11 +377,37 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
 # CLI
 # ============================================================
 
+def _discover_identified(identified_dir):
+    """identified/{시도}/{시군구}/{admin}_{sheet}[.suffix].{ext} 재귀 스캔.
+
+    파일명 패턴: {8자리}_{N-i}[.optional_suffix].{jpg|jpeg|png}
+    _2, _3 같은 중복 방지 suffix가 붙어있어도 허용 (Stage 2 자동 rename).
+
+    사용자 수동 보강: 실패 스캔을 표준명으로 rename해서 이 폴더에 두면 자동 픽업.
+    """
+    pat = re.compile(
+        r'^(\d{8})_(\d+-\d+)(?:_\d+)?\.(jpg|jpeg|png|JPG|JPEG|PNG)$')
+    targets = []
+    for root, _, files in os.walk(identified_dir):
+        for f in sorted(files):
+            m = pat.match(f)
+            if not m:
+                continue
+            admin, sid = m.group(1), m.group(2)
+            targets.append((os.path.join(root, f), admin, sid))
+    return targets
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description='Stage 3: 스캔 ↔ 분할 PDF 매칭 + 호모그래피 워핑')
-    ap.add_argument('--identification', required=True,
-                    help='Stage 2 산출 _identification.csv')
+        description='Stage 3: 스캔 ↔ 분할 PDF 매칭 + TPS 워핑')
+    ap.add_argument('--identified', default=None,
+                    help='Stage 2 산출 identified/ 폴더 '
+                         '({시도}/{시군구}/{admin}_{sheet}.jpg 패턴). '
+                         '폴더 기반 입력 발견 — 사용자 수동 보강 파일도 자동 인식')
+    ap.add_argument('--identification', default=None,
+                    help='(레거시) Stage 2 _identification.csv — '
+                         '--identified 미지정 시 폴백')
     ap.add_argument('--sheets-geo', required=True,
                     help='Stage 2 산출 sheets_geo 폴더 (분할 PDF + JGW)')
     ap.add_argument('--out', dest='out_dir', required=True)
@@ -392,14 +419,27 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # 식별 결과 로드
+    # 입력 발견: identified/ 폴더 우선, 없으면 CSV 폴백
     targets = []
-    with open(args.identification, encoding='utf-8') as f:
-        for row in csv.DictReader(f):
-            if row['status'] == 'OK' and row['admin_code'] and row.get('sheet_id'):
-                targets.append((row['scan_path'], row['admin_code'],
-                                row['sheet_id']))
-    print(f'[Stage 3] 처리 대상 {len(targets)}장')
+    if args.identified and os.path.isdir(args.identified):
+        targets = _discover_identified(args.identified)
+        print(f'[Stage 3] identified/ 폴더 스캔: {len(targets)}장 '
+              f'({args.identified})')
+    elif args.identification and os.path.exists(args.identification):
+        with open(args.identification, encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                if row['status'] == 'OK' and row['admin_code'] and row.get('sheet_id'):
+                    targets.append((row['scan_path'], row['admin_code'],
+                                    row['sheet_id']))
+        print(f'[Stage 3] CSV 폴백: {len(targets)}장 '
+              f'({args.identification})')
+    else:
+        print('ERROR: --identified 또는 --identification 지정 필요')
+        sys.exit(1)
+
+    if not targets:
+        print('ERROR: 처리 대상 0장')
+        sys.exit(1)
 
     cache = SheetSiftCache(
         args.sheets_geo,
