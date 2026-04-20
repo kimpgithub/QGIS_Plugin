@@ -9,7 +9,7 @@
 | 단계 | 역할 | 출력 |
 |---|---|---|
 | **Stage 1** | 메인 PDF를 SHP와 정합 → 좌표 부여 | `pdf_main_geo/{code}.{jpg,jgw,prj}` |
-| **Stage 2** | 스캔 식별 — 헤더 OCR로 admin_code, 분할 PDF SIFT로 sheet_id | `_identification.csv`, `sheet_bboxes.json` |
+| **Stage 2** | 스캔 식별 — 헤더 OCR(SHP 한글명/fuzzy 회수)로 admin_code, ROI OCR(PDF 후보 매칭)로 sheet_id, 메인 PDF 라벨 좌표로 sheet bbox(±15m, SIFT 우회) | `_identification.csv`, `sheet_bboxes.json` |
 | **Stage 3** | 스캔 ↔ 메인 PDF SIFT + 호모그래피 워핑 | `warped/{code}/{code}_{sheet}/{code}_{sheet}.jpg` |
 | **Stage 4** | 사분면 크롭 + 모자이크 병합 | `merged/{code}_scan_merged.jpg` |
 | **Stage 5** | 경계 검수 (오렌지 마스크 vs SHP) | `validation/{code}_report` |
@@ -78,10 +78,11 @@ cd /path/to/parent_of_gis_scan_tools
 python -m gis_scan_tools.tools.stage1_pdf_georef \
     --in pdf_input/ --shp bnd.shp --out pdf_main_geo/
 
-# Stage 2
+# Stage 2 (--shp 권장: 전국 행정명/코드 사전으로 OCR 회수율 ↑)
 python -m gis_scan_tools.tools.stage2_scan_identify \
     --in scan/ --pdf-input pdf_input/ \
-    --pdf-main pdf_main_geo/ --out scan_identified/
+    --pdf-main pdf_main_geo/ --shp bnd_adm_pg.shp \
+    --out scan_identified/
 
 # Stage 3
 python -m gis_scan_tools.tools.stage3_scan_warp \
@@ -102,7 +103,7 @@ python -m gis_scan_tools.tools.stage5_validate \
 ## 처리 시간 (참고)
 
 - Stage 1: 메인 PDF당 ~30초
-- Stage 2: 스캔당 1~10초 (OCR variant 수에 따라)
+- Stage 2: 스캔당 ~5초 (OCR + admin/sheet 식별, sheet bbox PDF 라벨 즉시)
 - Stage 3: 메인 SIFT 1회 ~30초 + 시트당 ~15초
 - Stage 4: 행정코드당 수초
 - 4시트 1세트 전체: 약 2-3분 (단일 스레드)
@@ -139,7 +140,8 @@ merged/
 ## 트러블슈팅
 
 - **Stage 1 cost > 2px**: 메인 PDF 정합 정확도 낮음. SHP 좌표계/버전 확인
-- **Stage 2 OCR 실패**: `--copy-unmatched`로 격리 후 수동 검토
+- **Stage 2 OCR 실패**: `--shp` 옵션 권장 (전국 행정명/코드 사전으로 자동 회수). 그래도 실패한 파일은 `_unmatched/`에 격리
+- **Stage 2 sheet bbox 부정확**: 메인 PDF가 텍스트 임베드된 경우 PDF 라벨 자동 사용 (즉시, ±15m). 이미지 PDF면 SIFT 폴백
 - **Stage 3 inliers < 30**: 스캔 품질 또는 PDF 스케일 차이 큰 경우. 잔차 확인
 - **Stage 4 누락 시트**: 상태 JSON의 `skipped` 필드 확인
 

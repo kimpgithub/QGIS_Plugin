@@ -423,11 +423,14 @@ class Stage2Tab(StageTab):
             if self.get_out_dir() else ''
 
     def get_argv(self):
+        # SHP는 옵션 — 지정 시 OCR 회수율 향상 (자릿수 fuzzy + 한글명 lookup)
         self.common.validate(need_pdf=True, need_scan=True, need_shp=False)
         argv = ['--in', self.common.scan_input.text(),
                 '--pdf-input', self.common.pdf_input.text(),
                 '--pdf-main', self.common.sub(SUB_PDF_GEO),
                 '--out', self.get_out_dir()]
+        if self.common.shp.text():
+            argv += ['--shp', self.common.shp.text()]
         if self.thorough.isChecked():
             argv.append('--thorough')
         if self.no_rename.isChecked():
