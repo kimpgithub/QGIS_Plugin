@@ -24,7 +24,9 @@ from .db_tools.pg_connection import (
     PGProfile, save_profile, load_profile, list_profiles, delete_profile,
     test_connection, SETTINGS_PREFIX,
 )
-from .db_tools import excel_loader, admin_list, layer_control, job_table
+from .db_tools import (
+    excel_loader, admin_list, layer_control, job_table, ri_list,
+)
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
@@ -440,6 +442,27 @@ class WorkListTab(QWidget):
         btn_row.addWidget(self.btn_start); btn_row.addWidget(self.btn_end)
         layout.addLayout(btn_row)
 
+        # RI 선택 — 선택된 admin의 ri_status 행 리스트
+        ri_box = QGroupBox('행정리 선택 (Split 시 자동 부여)')
+        ri_layout = QVBoxLayout(ri_box)
+        ri_info = QLabel(
+            '<i>맵 위에서 bnd_job_pg 폴리곤을 split하면 새 피처에 '
+            '여기서 선택한 행정리의 adm_cd/adm_nm/ri_cd/ri_nm이 '
+            '자동 기록됩니다.</i>')
+        ri_info.setWordWrap(True)
+        ri_layout.addWidget(ri_info)
+        self.ri_table = QTableWidget(0, 3)
+        self.ri_table.setHorizontalHeaderLabels(['ri_cd', 'ri_nm', 'li_nm'])
+        self.ri_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.ri_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.ri_table.setMinimumHeight(120)
+        self.ri_table.currentCellChanged.connect(
+            lambda r, *_: self._on_ri_selected(r))
+        ri_layout.addWidget(self.ri_table)
+        self.ri_status = QLabel('<i>admin 더블클릭 시 RI 리스트 로드</i>')
+        ri_layout.addWidget(self.ri_status)
+        layout.addWidget(ri_box)
+
         self.status = QLabel('리스트 미로드')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -504,9 +527,10 @@ class WorkListTab(QWidget):
             self._current_admin = item.text()
 
     def _on_double_click(self, index):
-        """더블클릭 — 맵 캔버스 줌 + (옵션) 워프 스캔 자동 로드."""
+        """더블클릭 — 맵 줌 + 워프 스캔 로드 + RI 리스트 로드."""
         row = index.row()
         cd = self.table.item(row, 0).text()
+        nm = self.table.item(row, 1).text()
         bbox = self._bboxes.get(cd)
         if not bbox:
             return
@@ -517,7 +541,10 @@ class WorkListTab(QWidget):
             canvas.setExtent(rect)
             canvas.refresh()
             self._current_admin = cd
-            msg = f'맵 이동: {cd} ({self.table.item(row,1).text()})'
+            self._current_admin_nm = nm
+            # 초기 상태: adm_cd/adm_nm만 저장 (ri 없음)
+            layer_control.set_current_ri(adm_cd=cd, adm_nm=nm)
+            msg = f'맵 이동: {cd} ({nm})'
             # 워프 스캔 로드
             warp_root = self.warped_dir.text().strip()
             if warp_root:
@@ -530,9 +557,48 @@ class WorkListTab(QWidget):
                         msg += f' | 워프 스캔 {len(added)}개 로드'
                 except Exception as e:
                     msg += f' | 스캔 로드 오류: {e}'
+            self._load_ri_list(cd)
             self.status.setText(msg)
         except Exception as e:
             self.status.setText(f'맵 이동 실패: {e}')
+
+    def _load_ri_list(self, admin_code):
+        """선택된 admin의 RI 목록을 ri_table에 채움."""
+        profile = self._get_profile()
+        if profile is None:
+            self.ri_status.setText('<i>PG 연결 필요</i>')
+            return
+        schema = 'public'     # ri_status 위치 — 엑셀 탑재 탭의 기본값과 동일
+        try:
+            rows = ri_list.load_ri_for_admin(profile, admin_code, schema)
+        except Exception as e:
+            self.ri_status.setText(f'RI 리스트 로드 실패: {e}')
+            return
+        self.ri_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            self.ri_table.setItem(i, 0, QTableWidgetItem(r['ri_cd']))
+            self.ri_table.setItem(i, 1, QTableWidgetItem(r['ri_nm']))
+            self.ri_table.setItem(i, 2, QTableWidgetItem(r['li_nm']))
+        self.ri_table.resizeColumnsToContents()
+        if rows:
+            self.ri_status.setText(
+                f'{len(rows)}개 RI 로드 — 행 선택 시 Split 자동 부여 준비')
+        else:
+            self.ri_status.setText(
+                'RI 없음. 엑셀 탑재(2번 탭)로 ri_status 채우거나 '
+                '직접 속성 입력')
+
+    def _on_ri_selected(self, row):
+        if row < 0:
+            return
+        ri_cd = self.ri_table.item(row, 0).text() if self.ri_table.item(row, 0) else ''
+        ri_nm = self.ri_table.item(row, 1).text() if self.ri_table.item(row, 1) else ''
+        layer_control.set_current_ri(
+            adm_cd=self._current_admin or '',
+            adm_nm=getattr(self, '_current_admin_nm', ''),
+            ri_cd=ri_cd, ri_nm=ri_nm)
+        self.ri_status.setText(
+            f'<b>활성 RI:</b> {ri_cd} {ri_nm} — Split 후 새 피처에 자동 기록')
 
     # --- bnd_job_pg 관리 ---
 

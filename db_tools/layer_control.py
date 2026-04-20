@@ -17,6 +17,8 @@ def start_work_mode(iface, edit_layer_names=EDIT_LAYER_NAMES):
     """작업 모드 진입. Returns snapshot dict (원복용).
 
     snapshot = {layer_id: readOnly_prev_state}
+
+    편집 대상 레이어에는 featureAdded 자동 속성 부여 콜백을 설치.
     """
     from qgis.core import QgsProject, QgsVectorLayer
     snap = {}
@@ -29,6 +31,7 @@ def start_work_mode(iface, edit_layer_names=EDIT_LAYER_NAMES):
             layer.setReadOnly(False)
             if not layer.isEditable():
                 layer.startEditing()
+            attach_autofill(layer, edit_layer_names)
         else:
             if layer.isEditable():
                 layer.commitChanges(stopEditing=True)
@@ -37,11 +40,12 @@ def start_work_mode(iface, edit_layer_names=EDIT_LAYER_NAMES):
 
 
 def end_work_mode(iface, snapshot):
-    """작업 모드 해제 + 편집 내역 저장.
+    """작업 모드 해제 + 편집 내역 저장. 자동 속성 콜백도 해제.
 
     Returns (saved_count, errors[]).
     """
     from qgis.core import QgsProject, QgsVectorLayer
+    detach_autofill()   # 전체 해제
     saved = 0
     errors = []
     for lid, layer in QgsProject.instance().mapLayers().items():
@@ -93,6 +97,89 @@ def load_warped_scans(iface, admin_code, warped_root):
             QgsProject.instance().addMapLayer(rlayer)
             added.append(layer_name)
     return added
+
+
+# ----- 프로젝트 변수 (현재 선택된 ri_cd/ri_nm) -----
+# Split UX C: WorkListTab에서 RI 선택 → 이 변수에 저장 →
+# bnd_job_pg에 새 피처 추가(split 포함) 시 자동 속성 부여
+
+PROJ_VAR_RI_CD = 'gst_ri_cd_current'
+PROJ_VAR_RI_NM = 'gst_ri_nm_current'
+PROJ_VAR_ADM_CD = 'gst_adm_cd_current'
+PROJ_VAR_ADM_NM = 'gst_adm_nm_current'
+
+
+def set_current_ri(adm_cd='', adm_nm='', ri_cd='', ri_nm=''):
+    from qgis.core import QgsProject, QgsExpressionContextUtils
+    p = QgsProject.instance()
+    QgsExpressionContextUtils.setProjectVariable(p, PROJ_VAR_ADM_CD, adm_cd)
+    QgsExpressionContextUtils.setProjectVariable(p, PROJ_VAR_ADM_NM, adm_nm)
+    QgsExpressionContextUtils.setProjectVariable(p, PROJ_VAR_RI_CD, ri_cd)
+    QgsExpressionContextUtils.setProjectVariable(p, PROJ_VAR_RI_NM, ri_nm)
+
+
+def get_current_ri():
+    from qgis.core import QgsProject, QgsExpressionContextUtils
+    ctx = QgsExpressionContextUtils.projectScope(QgsProject.instance())
+    return dict(
+        adm_cd=ctx.variable(PROJ_VAR_ADM_CD) or '',
+        adm_nm=ctx.variable(PROJ_VAR_ADM_NM) or '',
+        ri_cd=ctx.variable(PROJ_VAR_RI_CD) or '',
+        ri_nm=ctx.variable(PROJ_VAR_RI_NM) or '',
+    )
+
+
+# ----- 자동 속성 부여 (featureAdded 훅) -----
+
+# 활성화된 콜백 슬롯 저장 (unload 시 disconnect 용)
+_active_callbacks = {}   # layer_id → (slot, owner_name)
+
+
+def attach_autofill(layer, target_layer_names=('bnd_job_pg',)):
+    """layer.featureAdded 시그널에 자동 속성 부여 콜백 연결.
+
+    현재 selected RI (QgsProject 변수)의 adm_cd/adm_nm/ri_cd/ri_nm을
+    새 피처에 기록.
+    """
+    nm = layer.name().lower()
+    if not any(t in nm for t in target_layer_names):
+        return False
+    lid = layer.id()
+    if lid in _active_callbacks:
+        return False   # 이미 연결됨
+
+    def _on_added(fid, _layer=layer):
+        cur = get_current_ri()
+        if not cur['ri_cd']:
+            return
+        fields = _layer.fields()
+        for col, val in (('adm_cd', cur['adm_cd']),
+                         ('adm_nm', cur['adm_nm']),
+                         ('ri_cd', cur['ri_cd']),
+                         ('ri_nm', cur['ri_nm'])):
+            idx = fields.indexOf(col)
+            if idx >= 0 and val:
+                _layer.changeAttributeValue(fid, idx, val)
+
+    layer.featureAdded.connect(_on_added)
+    _active_callbacks[lid] = _on_added
+    return True
+
+
+def detach_autofill(layer=None):
+    """featureAdded 콜백 해제. layer=None이면 전체 해제."""
+    from qgis.core import QgsProject
+    targets = [layer.id()] if layer else list(_active_callbacks.keys())
+    for lid in targets:
+        if lid not in _active_callbacks:
+            continue
+        lyr = QgsProject.instance().mapLayer(lid)
+        slot = _active_callbacks.pop(lid)
+        if lyr is not None:
+            try:
+                lyr.featureAdded.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
 
 
 def add_postgis_layer(profile, schema, table, layer_name=None,

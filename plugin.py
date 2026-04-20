@@ -964,6 +964,9 @@ class GISScanToolsPlugin:
         self.action_db = None     # DB 작업 다이얼로그
         self.dialog = None
         self.db_dialog = None
+        # 편집 툴바 (행정리 작업용)
+        self.edit_toolbar = None
+        self.act_simplify = None
 
     def initGui(self):
         icon_path = os.path.join(PLUGIN_DIR, 'resources', 'icon_georef.svg')
@@ -981,11 +984,58 @@ class GISScanToolsPlugin:
         self.iface.addToolBarIcon(self.action_db)
         self.iface.addPluginToMenu('&GIS Scan Tools', self.action_db)
 
+        # 3. 행정리 편집 툴바 — QGIS 내장 액션 재사용 (화면정의서 S11, S14)
+        self._build_edit_toolbar()
+
+    def _build_edit_toolbar(self):
+        """행정리 편집 전용 툴바. QGIS 내장 편집 액션을 모아 노출."""
+        self.edit_toolbar = self.iface.addToolBar('행정리 편집')
+        self.edit_toolbar.setObjectName('GISScanRiEditToolbar')
+        # QGIS 내장 액션 — 3.40 기준
+        try:
+            self.edit_toolbar.addAction(self.iface.actionToggleEditing())
+            self.edit_toolbar.addAction(self.iface.actionSaveActiveLayerEdits())
+            self.edit_toolbar.addSeparator()
+            self.edit_toolbar.addAction(self.iface.actionSplitFeatures())
+        except AttributeError:
+            # 일부 QGIS 버전에서 이름 다를 때를 위한 가드
+            pass
+        # Simplify 커스텀 액션 — Processing 다이얼로그 직접 실행
+        self.act_simplify = QAction('Simplify (단순화)',
+                                    self.iface.mainWindow())
+        self.act_simplify.triggered.connect(self._run_simplify)
+        self.edit_toolbar.addSeparator()
+        self.edit_toolbar.addAction(self.act_simplify)
+
+    def _run_simplify(self):
+        """Processing 'native:simplifygeometries' 다이얼로그 실행.
+
+        화면정의서 S14 "Q-gis 기능인 단순화(simplify)를 아이콘으로 넣기".
+        활성 레이어를 INPUT으로 사전 지정.
+        """
+        try:
+            from qgis import processing
+        except Exception as e:
+            QMessageBox.warning(self.iface.mainWindow(), '오류',
+                                f'Processing 불러오기 실패: {e}')
+            return
+        active = self.iface.activeLayer()
+        initial = {'INPUT': active} if active else {}
+        try:
+            processing.execAlgorithmDialog('native:simplifygeometries', initial)
+        except Exception as e:
+            QMessageBox.warning(self.iface.mainWindow(), 'Simplify 오류', str(e))
+
     def unload(self):
         for a in (self.action, self.action_db):
             if a:
                 self.iface.removePluginMenu('&GIS Scan Tools', a)
                 self.iface.removeToolBarIcon(a)
+        # 편집 툴바 정리 (내장 액션은 이미 iface 소유라 삭제 X, 툴바만 제거)
+        if self.edit_toolbar:
+            self.edit_toolbar.deleteLater()
+            self.edit_toolbar = None
+        self.act_simplify = None
         for d in (self.dialog, self.db_dialog):
             if d:
                 d.close()
