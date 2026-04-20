@@ -24,7 +24,7 @@ from .db_tools.pg_connection import (
     PGProfile, save_profile, load_profile, list_profiles, delete_profile,
     test_connection, SETTINGS_PREFIX,
 )
-from .db_tools import excel_loader, admin_list, layer_control
+from .db_tools import excel_loader, admin_list, layer_control, job_table
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
@@ -387,6 +387,28 @@ class WorkListTab(QWidget):
         src_form.addRow(btn_refresh)
         layout.addWidget(src_box)
 
+        # bnd_job_pg 설정
+        job_box = QGroupBox('작업 테이블 (bnd_job_pg)')
+        job_form = QFormLayout(job_box)
+        self.job_schema = QLineEdit('public')
+        self.job_table = QLineEdit('bnd_job_pg')
+        job_form.addRow('Schema:', self.job_schema)
+        job_form.addRow('Table:', self.job_table)
+        jrow = QHBoxLayout()
+        self.btn_ensure = QPushButton('테이블 생성/확인')
+        self.btn_ensure.clicked.connect(self._on_ensure_job_table)
+        self.btn_load_layer = QPushButton('QGIS 레이어로 추가')
+        self.btn_load_layer.clicked.connect(self._on_load_job_layer)
+        jrow.addWidget(self.btn_ensure)
+        jrow.addWidget(self.btn_load_layer)
+        jrow.addStretch()
+        job_w = QWidget(); job_w.setLayout(jrow)
+        job_form.addRow(job_w)
+        self.job_info = QLabel('<i>아직 확인 안 함</i>')
+        self.job_info.setWordWrap(True)
+        job_form.addRow(self.job_info)
+        layout.addWidget(job_box)
+
         # 검색 + 리스트
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel('검색:'))
@@ -511,6 +533,59 @@ class WorkListTab(QWidget):
             self.status.setText(msg)
         except Exception as e:
             self.status.setText(f'맵 이동 실패: {e}')
+
+    # --- bnd_job_pg 관리 ---
+
+    def _on_ensure_job_table(self):
+        profile = self._get_profile()
+        if profile is None:
+            QMessageBox.warning(self, '경고',
+                                '[1. PG 연결] 탭에서 연결 설정 필요')
+            return
+        schema = self.job_schema.text().strip() or 'public'
+        table = self.job_table.text().strip() or 'bnd_job_pg'
+        try:
+            existed_before = job_table.table_exists(profile, schema, table)
+            cols, n = job_table.ensure_table(profile, schema, table)
+            state = '확인' if existed_before else '신규 생성'
+            col_list = ', '.join(c[0] for c in cols)
+            self.job_info.setText(
+                f'<b style="color:green">✓ {state}</b>  '
+                f'{schema}.{table} (행 {n}개)<br>'
+                f'<small>컬럼: {col_list}</small>')
+        except Exception as e:
+            self.job_info.setText(
+                f'<b style="color:red">✗ 오류:</b> {e}')
+
+    def _on_load_job_layer(self):
+        profile = self._get_profile()
+        if profile is None:
+            QMessageBox.warning(self, '경고',
+                                '[1. PG 연결] 탭에서 연결 설정 필요')
+            return
+        schema = self.job_schema.text().strip() or 'public'
+        table = self.job_table.text().strip() or 'bnd_job_pg'
+        try:
+            # 존재 확인 먼저
+            if not job_table.table_exists(profile, schema, table):
+                QMessageBox.warning(
+                    self, '경고',
+                    f'{schema}.{table} 테이블이 없습니다. '
+                    f'먼저 [테이블 생성/확인]을 눌러주세요.')
+                return
+            layer = layer_control.add_postgis_layer(
+                profile, schema, table, layer_name=table)
+            if layer is None:
+                self.job_info.setText(
+                    '<b style="color:red">✗ QGIS 레이어 로드 실패</b> '
+                    '(연결 설정 확인)')
+            else:
+                self.job_info.setText(
+                    f'<b style="color:green">✓ QGIS 레이어 추가:</b> '
+                    f'{layer.name()} ({layer.featureCount()}개 피처)')
+        except Exception as e:
+            self.job_info.setText(
+                f'<b style="color:red">✗ 오류:</b> {e}')
 
     # --- 작업 시작/종료 ---
 

@@ -95,6 +95,29 @@ def load_warped_scans(iface, admin_code, warped_root):
     return added
 
 
+def add_postgis_layer(profile, schema, table, layer_name=None,
+                      geom_column='geom', primary_key='gid'):
+    """PostGIS 테이블을 QGIS 레이어로 추가.
+
+    Returns QgsVectorLayer or None (로드 실패).
+    """
+    from qgis.core import QgsVectorLayer, QgsDataSourceUri, QgsProject
+    uri = QgsDataSourceUri()
+    uri.setConnection(profile.host, str(profile.port), profile.database,
+                      profile.username, profile.password or '')
+    uri.setDataSource(schema, table, geom_column, '', primary_key)
+    name = layer_name or f'{schema}.{table}'
+    layer = QgsVectorLayer(uri.uri(False), name, 'postgres')
+    if not layer.isValid():
+        return None
+    # 중복 이름 제거 (새로 추가하면서 기존 것 정리)
+    for lid, lyr in list(QgsProject.instance().mapLayers().items()):
+        if lyr.name() == name:
+            QgsProject.instance().removeMapLayer(lid)
+    QgsProject.instance().addMapLayer(layer)
+    return layer
+
+
 def clear_warped_scans(iface, exclude_admin=None):
     """기존 워프 스캔 레이어 제거 — {8자리}_{N-i} 패턴 이름.
 
