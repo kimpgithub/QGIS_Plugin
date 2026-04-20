@@ -11,3 +11,4 @@ pytesseract
 psycopg2-binary
 PyMuPDF
 scikit-image
+openpyxl

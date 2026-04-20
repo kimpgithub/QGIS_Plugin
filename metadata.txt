@@ -1,24 +1,36 @@
 [general]
 name=GIS Scan Tools
-qgisMinimumVersion=3.0
-description=스캔 이미지 처리 및 검수 도구 모음
-version=1.0.0
+qgisMinimumVersion=3.22
+description=스캔 지도 → 좌표 부여 + PostGIS 행정리 경계 편집 도구
+version=2.0.0
 author=GIS Team
 email=gis@example.com
-about=스캔된 지도 이미지의 좌표 변환, 병합, 경계 검수 등을 수행하는 도구입니다.
+about=스캔된 종이 지도에 좌표를 부여해 GIS 데이터로 변환하고,
+    PostGIS에 행정리 경계를 편집/저장하는 종합 플러그인.
 
-    주요 기능:
-    - 메인이미지 좌표생성: SHP 경계 매칭으로 JGW 자동 생성 (OCR 기반)
-    - 분할도 좌표 변환: 메인 이미지 기준 자동 좌표 부여
-    - 분할도 병합: 분할도들을 하나로 합치기
-    - 경계 검수: 스캔 이미지와 SHP 경계 비교
-    - 이미지 속성 검증: 해상도, 크기, 파일명 검사
+    파이프라인 (자동화):
+    - Stage 1: 메인 PDF 좌표 자동 생성 (PDF 메타 기반, SIFT 폴백)
+    - Stage 2: 스캔 OCR 식별 + SHP 회수 + PDF 라벨 sheet bbox
+    - Stage 3: 분할 PDF 매칭 + TPS 워핑
+    - Stage 4: 시트 모자이크 병합
+    - Stage 5: 경계 검수
+    - 미식별 보강 UI + 외부 JGW 가져오기 (수동 복구 지원)
 
-tracker=https://github.com/example/gis-scan-tools/issues
-repository=https://github.com/example/gis-scan-tools
+    DB 작업 (PostGIS):
+    - PG 연결 프로파일 관리
+    - 행정리현황 엑셀 → ri_status 업서트
+    - 전국 읍면동 리스트 + 더블클릭 맵 줌 + 워프 스캔 자동 로드
+    - bnd_job_pg 자동 생성 + 편집 모드 제어
+    - Split 시 새 피처에 adm_cd/ri_cd/ri_nm 자동 부여
+
+    편집 툴바 (QGIS 3.40 호환):
+    - Toggle Editing / Save / Split Features / Simplify
+
+tracker=https://github.com/kimpgithub/QGIS_Plugin/issues
+repository=https://github.com/kimpgithub/QGIS_Plugin
 hasProcessingProvider=no
-tags=scan, georeferencing, merge, validation, korean
-homepage=https://github.com/example/gis-scan-tools
+tags=scan, georeferencing, ocr, postgis, korean, administrative-boundary
+homepage=https://github.com/kimpgithub/QGIS_Plugin
 category=Raster
 icon=resources/icon.png
 experimental=False
