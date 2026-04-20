@@ -30,6 +30,7 @@ PLUGIN_DIR = os.path.dirname(__file__)
 # 자동 서브폴더 이름
 SUB_PDF_GEO = '1_pdf_geo'
 SUB_SCAN_ID = '2_scan_id'
+SUB_MAP_ONLY = '2b_map_only'   # S7: 지도영역만 추출
 SUB_WARPED = '3_warped'
 SUB_MERGED = '4_merged'
 SUB_VALIDATION = '5_validation'
@@ -441,6 +442,39 @@ class Stage2Tab(StageTab):
 
 
 # ============================================================
+# 지도영역 추출 (화면정의서 S7) — Stage 2와 Stage 3 사이의 독립 탭
+# ============================================================
+
+class ExtractMapTab(StageTab):
+    stage_name = '[2b] 지도영역 추출'
+
+    def __init__(self, common):
+        from .tools import stage_extract_map
+        self.stage_module = stage_extract_map
+        super().__init__(common)
+
+    def build_options(self):
+        from qgis.PyQt.QtWidgets import QSpinBox
+        self.margin = QSpinBox()
+        self.margin.setRange(0, 50); self.margin.setValue(3)
+        self.opt_layout.addRow('프레임 안쪽 여유(px):', self.margin)
+
+    def io_summary(self):
+        return ([('스캔 폴더', self.common.scan_input.text())],
+                self.get_out_dir())
+
+    def get_out_dir(self):
+        p = self.common.project_dir.text()
+        return os.path.join(p, SUB_MAP_ONLY) if p else ''
+
+    def get_argv(self):
+        self.common.validate(need_pdf=False, need_scan=True, need_shp=False)
+        return ['--in', self.common.scan_input.text(),
+                '--out', self.get_out_dir(),
+                '--margin', str(self.margin.value())]
+
+
+# ============================================================
 # Stage 3
 # ============================================================
 
@@ -495,6 +529,13 @@ class Stage4Tab(StageTab):
         self.stage_module = stage4_merge
         super().__init__(common)
 
+    def build_options(self):
+        from qgis.PyQt.QtWidgets import QSpinBox
+        self.inner_margin = QSpinBox()
+        self.inner_margin.setRange(0, 200); self.inner_margin.setValue(0)
+        self.opt_layout.addRow(
+            '시트 안쪽 여유(px) — 경계 부정확 영역 제거:', self.inner_margin)
+
     def io_summary(self):
         proj = self.common.project_dir.text()
         return ([('Stage 3 출력', self.common.sub(SUB_WARPED)
@@ -512,12 +553,15 @@ class Stage4Tab(StageTab):
 
     def get_argv(self):
         self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
-        return ['--warped', self.common.sub(SUB_WARPED),
+        argv = ['--warped', self.common.sub(SUB_WARPED),
                 '--sheet-bboxes', os.path.join(
                     self.common.sub(SUB_SCAN_ID),
                     'sheet_bboxes.json'),
                 '--pdf-main', self.common.sub(SUB_PDF_GEO),
                 '--out', self.get_out_dir()]
+        if self.inner_margin.value() > 0:
+            argv += ['--inner-margin', str(self.inner_margin.value())]
+        return argv
 
 
 # ============================================================
@@ -582,6 +626,7 @@ class GISScanToolsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(Stage1Tab(self.common), '1. PDF 좌표생성')
         self.tabs.addTab(Stage2Tab(self.common), '2. 스캔 식별')
+        self.tabs.addTab(ExtractMapTab(self.common), '2b. 지도영역 추출')
         self.tabs.addTab(Stage3Tab(self.common), '3. 매칭+워핑')
         self.tabs.addTab(Stage4Tab(self.common), '4. 사분면 병합')
         self.tabs.addTab(Stage5Tab(self.common), '5. 경계 검수')

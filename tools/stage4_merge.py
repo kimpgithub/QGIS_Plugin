@@ -60,13 +60,17 @@ def main_map_world_bbox(pdf_jpg, pdf_jgw_path):
     return minx, miny, maxx, maxy
 
 
-def crop_to_world_bbox(img, jgw, world_bbox):
-    """warped scan을 world bbox로 크롭 + 새 JGW."""
+def crop_to_world_bbox(img, jgw, world_bbox, inner_margin_px=0):
+    """warped scan을 world bbox로 크롭 + 새 JGW.
+
+    inner_margin_px > 0 이면 bbox 모든 변에서 안쪽으로 그만큼 더 잘라냄.
+    화면정의서 S9 — 시트 간 경계 부정확/중복 영역 회피용.
+    """
     qx0, qy0, qx1, qy1 = world_bbox
-    px0 = (qx0 - jgw.top_left_x) / jgw.pixel_size_x
-    py0 = (qy1 - jgw.top_left_y) / jgw.pixel_size_y
-    px1 = (qx1 - jgw.top_left_x) / jgw.pixel_size_x
-    py1 = (qy0 - jgw.top_left_y) / jgw.pixel_size_y
+    px0 = (qx0 - jgw.top_left_x) / jgw.pixel_size_x + inner_margin_px
+    py0 = (qy1 - jgw.top_left_y) / jgw.pixel_size_y + inner_margin_px
+    px1 = (qx1 - jgw.top_left_x) / jgw.pixel_size_x - inner_margin_px
+    py1 = (qy0 - jgw.top_left_y) / jgw.pixel_size_y - inner_margin_px
     h, w = img.shape[:2]
     px0i = max(0, int(np.floor(px0)))
     py0i = max(0, int(np.floor(py0)))
@@ -84,7 +88,7 @@ def crop_to_world_bbox(img, jgw, world_bbox):
 
 
 def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
-                out_dir):
+                out_dir, inner_margin_px=0):
     """단일 행정코드 병합 — 시트별 world bbox로 크롭 후 모자이크."""
     result = {'admin_code': admin_code, 'status': 'OK',
               'message': '', 'sheets': []}
@@ -154,7 +158,8 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
         img = _imread(sj)
         jgw = parse_jgw(jgw_path)
         wb = bboxes[sid]
-        crop, cj = crop_to_world_bbox(img, jgw, wb)
+        crop, cj = crop_to_world_bbox(img, jgw, wb,
+                                       inner_margin_px=inner_margin_px)
         if crop is None:
             result['sheets'].append({'sheet': sid, 'status': 'EMPTY_CROP'})
             continue
@@ -194,6 +199,8 @@ def main():
                     help='Stage 2 산출 sheet_bboxes.json')
     ap.add_argument('--pdf-main', required=True)
     ap.add_argument('--out', dest='out_dir', required=True)
+    ap.add_argument('--inner-margin', type=int, default=0,
+                    help='시트 안쪽 여유 (px). 시트 경계 부정확 영역 제거. 기본 0')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -229,7 +236,8 @@ def main():
             print(f'\n[{i}/{len(admin_codes)}] {code}')
             try:
                 r = merge_admin(code, args.warped, args.pdf_main,
-                                sheet_bboxes, args.out_dir)
+                                sheet_bboxes, args.out_dir,
+                                inner_margin_px=args.inner_margin)
                 cs = r.get('canvas_size', [0, 0])
                 w.writerow([code, r['status'],
                             sum(1 for s in r.get('sheets', [])
