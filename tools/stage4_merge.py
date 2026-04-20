@@ -42,10 +42,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from ._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179, extract_map_region,
+        find_main_image,
     )
 except ImportError:
     from gis_scan_tools.tools._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179, extract_map_region,
+        find_main_image,
     )
 
 
@@ -93,10 +95,11 @@ def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
     result = {'admin_code': admin_code, 'status': 'OK',
               'message': '', 'sheets': []}
 
-    pdf_jpg = os.path.join(pdf_main_dir, f'{admin_code}.jpg')
+    pdf_jpg = find_main_image(pdf_main_dir, admin_code)
     pdf_jgw_path = os.path.join(pdf_main_dir, f'{admin_code}.jgw')
-    if not os.path.exists(pdf_jpg):
-        result.update(status='ERROR', message='PDF 메인 없음')
+    if pdf_jpg is None:
+        result.update(status='ERROR',
+                      message=f'PDF 메인 없음: {admin_code}.{{tif,jpg}}')
         return result
 
     map_bbox = main_map_world_bbox(pdf_jpg, pdf_jgw_path)

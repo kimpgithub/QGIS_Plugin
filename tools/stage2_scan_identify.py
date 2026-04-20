@@ -55,10 +55,11 @@ def _imwrite(path, img, params=None):
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from ._legacy.common import parse_jgw, extract_map_region
+    from ._legacy.common import (
+        parse_jgw, extract_map_region, find_main_image)
 except ImportError:
     from gis_scan_tools.tools._legacy.common import (
-        parse_jgw, extract_map_region,
+        parse_jgw, extract_map_region, find_main_image,
     )
 
 SHEET_PATTERN = re.compile(r'^(\d{8})_(\d+)-(\d+)\.pdf$', re.IGNORECASE)
@@ -623,7 +624,10 @@ class SheetCache:
         import pickle
         if admin_code in self._main_sift:
             return self._main_sift[admin_code]
-        main_jpg = os.path.join(self.pdf_main_dir, f'{admin_code}.jpg')
+        main_jpg = find_main_image(self.pdf_main_dir, admin_code)
+        if main_jpg is None:
+            raise FileNotFoundError(
+                f'메인 이미지 없음: {self.pdf_main_dir}/{admin_code}.{{tif,jpg}}')
         main_jgw = parse_jgw(os.path.join(self.pdf_main_dir,
                                           f'{admin_code}.jgw'))
         cache_pkl = os.path.join(
@@ -722,8 +726,8 @@ class SheetCache:
         if not main_pdf or not os.path.exists(main_pdf):
             return None
         main_jgw_p = os.path.join(self.pdf_main_dir, f'{admin_code}.jgw')
-        main_jpg = os.path.join(self.pdf_main_dir, f'{admin_code}.jpg')
-        if not os.path.exists(main_jgw_p) or not os.path.exists(main_jpg):
+        main_jpg = find_main_image(self.pdf_main_dir, admin_code)
+        if not os.path.exists(main_jgw_p) or main_jpg is None:
             return None
         try:
             main_jgw = parse_jgw(main_jgw_p)

@@ -969,16 +969,20 @@ class GISScanToolsPlugin:
         self.act_simplify = None
 
     def initGui(self):
-        icon_path = os.path.join(PLUGIN_DIR, 'resources', 'icon_georef.svg')
-        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-        # 1. 파이프라인
-        self.action = QAction(icon, 'GIS Scan Tools — 파이프라인',
+        def _icon(name):
+            p = os.path.join(PLUGIN_DIR, 'resources', name)
+            return QIcon(p) if os.path.exists(p) else QIcon()
+
+        # 1. 파이프라인 — 좌표 부여 아이콘
+        self.action = QAction(_icon('icon_georef.svg'),
+                              'GIS Scan Tools — 파이프라인',
                               self.iface.mainWindow())
         self.action.triggered.connect(self.show_dialog)
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu('&GIS Scan Tools', self.action)
-        # 2. DB 작업 (행정리 경계 편집 등)
-        self.action_db = QAction(icon, 'GIS Scan Tools — DB 작업',
+        # 2. DB 작업 — 행정경계 아이콘 (파이프라인과 구분)
+        self.action_db = QAction(_icon('icon_adminbnd.svg'),
+                                 'GIS Scan Tools — DB 작업',
                                  self.iface.mainWindow())
         self.action_db.triggered.connect(self.show_db_dialog)
         self.iface.addToolBarIcon(self.action_db)
@@ -1001,7 +1005,11 @@ class GISScanToolsPlugin:
             # 일부 QGIS 버전에서 이름 다를 때를 위한 가드
             pass
         # Simplify 커스텀 액션 — Processing 다이얼로그 직접 실행
-        self.act_simplify = QAction('Simplify (단순화)',
+        simplify_icon_path = os.path.join(
+            PLUGIN_DIR, 'resources', 'icon_tracing.svg')
+        simplify_icon = (QIcon(simplify_icon_path)
+                         if os.path.exists(simplify_icon_path) else QIcon())
+        self.act_simplify = QAction(simplify_icon, 'Simplify (단순화)',
                                     self.iface.mainWindow())
         self.act_simplify.triggered.connect(self._run_simplify)
         self.edit_toolbar.addSeparator()

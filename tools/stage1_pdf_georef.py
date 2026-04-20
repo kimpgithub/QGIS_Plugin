@@ -9,12 +9,16 @@ PDF 메타 정합:
   · 10개 OK admin: SIFT 결과와 0~4m 일치
   · 2개 실패 admin (39010320 추자면, 39020110): SIFT 정합 실패 → PDF 메타로 자동 회수
 
+출력 포맷: GeoTIFF (LZW 압축 + 타일 + EPSG:5179 + affine 내장)
+  → QGIS에서 환경변수 없이 바로 열림 (libjpeg 524MB 제약 우회)
+  → .jgw 사이드카도 함께 작성 (downstream 호환)
+
 CLI:
   python -m gis_scan_tools.tools.stage1_pdf_georef \\
       --in pdf_main/ --shp bnd_adm_pg.shp --out pdf_main_geo/
 
-산출: pdf_main_geo/{code}.{jpg,jgw,prj} + _status.csv
-폴백 시 _gcp.vrt, _tps.vrt 추가 (SIFT/Powell 경로)
+산출: pdf_main_geo/{code}.{tif,jgw,prj} + _status.csv
+폴백 시 _gcp.vrt, _tps.vrt 추가 (SIFT/Powell 경로, .jpg 출력)
 """
 import argparse
 import csv
@@ -39,7 +43,10 @@ except ImportError:
 # Stage 2와 동일 — PDF 라벨 좌상단이 셀 좌상단보다 안쪽으로 들어간 양 (PDF pt)
 LABEL_OFFSET_X_PT = -13.82
 LABEL_OFFSET_Y_PT = -2.76
-RENDER_DPI = 300
+# 200 DPI (기본) — 62 Mpx로 libjpeg 500MB 제약(JPG) 우회.
+# Stage 3 SIFT 매칭엔 충분 (분할 PDF와 동일 DPI 사용 시 정합 OK).
+# --render-dpi로 300 등으로 조정 가능.
+RENDER_DPI = 200
 
 
 def _extract_pdf_meta(pdf_path):
@@ -106,15 +113,42 @@ def _extract_pdf_meta(pdf_path):
     }
 
 
-def _render_pdf_to_jpg(pdf_path, out_jpg, dpi=RENDER_DPI):
+def _render_pdf_to_geotiff(pdf_path, out_tif, tl_x, tl_y, ps,
+                            dpi=RENDER_DPI, crs='EPSG:5179'):
+    """PDF 1페이지 → GeoTIFF (LZW 압축 + 타일 + affine 내장).
+
+    QGIS/GDAL 네이티브 라스터 포맷. libjpeg 500MB 디코드 제약 없음.
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.transform import Affine
+
     doc = fitz.open(pdf_path)
     pix = doc[0].get_pixmap(dpi=dpi)
-    pix.save(out_jpg)
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+        pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        arr = arr[:, :, :3]   # alpha 제거
+    elif pix.n == 1:
+        arr = np.repeat(arr, 3, axis=2)   # gray → RGB
+    w, h = pix.width, pix.height
     doc.close()
-    return pix.width, pix.height
+
+    transform = Affine(ps, 0, tl_x, 0, -ps, tl_y)
+    with rasterio.open(
+        out_tif, 'w', driver='GTiff',
+        height=h, width=w, count=3, dtype='uint8',
+        crs=crs, transform=transform,
+        compress='LZW', tiled=True, blockxsize=256, blockysize=256,
+        photometric='RGB', predictor=2,
+        bigtiff='IF_SAFER',
+    ) as dst:
+        dst.write(np.moveaxis(arr, -1, 0))   # H,W,3 → 3,H,W
+    return w, h
 
 
-def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None):
+def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
+                          dpi=RENDER_DPI):
     """PDF 메타(축척+그리드) + SHP admin bbox로 즉시 JGW 생성.
 
     Returns:
@@ -133,21 +167,22 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None):
     swx0, swy0, swx1, swy1 = geom.bounds
     bcx, bcy = (swx0 + swx1) / 2, (swy0 + swy1) / 2
 
-    ps = 0.0254 * meta['scale'] / RENDER_DPI
-
-    # PDF → JPG 렌더링 (후속 stage 입력용)
-    base = base_name or code
-    out_jpg = os.path.join(out_dir, f'{base}.jpg')
-    img_w, _ = _render_pdf_to_jpg(pdf_path, out_jpg, dpi=RENDER_DPI)
+    ps = 0.0254 * meta['scale'] / dpi
 
     # TL: 그리드 center 픽셀이 admin bbox center world에 align
-    px_per_pt = RENDER_DPI / 72.0
+    px_per_pt = dpi / 72.0
     gcx_px = meta['grid_cx_pt'] * px_per_pt
     gcy_px = meta['grid_cy_pt'] * px_per_pt
     tl_x = bcx - gcx_px * ps
     tl_y = bcy + gcy_px * ps
 
-    # JGW + PRJ
+    # PDF → GeoTIFF 렌더링 (affine 내장, QGIS 네이티브)
+    base = base_name or code
+    out_tif = os.path.join(out_dir, f'{base}.tif')
+    img_w, _ = _render_pdf_to_geotiff(
+        pdf_path, out_tif, tl_x, tl_y, ps, dpi=dpi)
+
+    # .jgw + .prj 사이드카 — downstream 코드와 구버전 호환
     out_jgw = os.path.join(out_dir, f'{base}.jgw')
     out_prj = os.path.join(out_dir, f'{base}.prj')
     write_jgw(out_jgw, JGWParams(
@@ -176,6 +211,9 @@ def main():
                     help='실패 판정 cost 임계값(px). PDF 메타는 항상 cost=0.')
     ap.add_argument('--no-pdf-meta', action='store_true',
                     help='PDF 메타 기반 정합 비활성화 (SIFT/Powell만 사용)')
+    ap.add_argument('--render-dpi', type=int, default=RENDER_DPI,
+                    help=f'PDF 렌더링 DPI (기본 {RENDER_DPI}). '
+                         f'200: QGIS JPG 호환, 300: 고해상도')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -227,7 +265,8 @@ def main():
             # 1순위: PDF 메타 (PDF 입력만)
             if gdf is not None and src.lower().endswith('.pdf'):
                 try:
-                    r = georef_from_pdf_meta(src, gdf, args.out_dir)
+                    r = georef_from_pdf_meta(src, gdf, args.out_dir,
+                                              dpi=args.render_dpi)
                     if r:
                         method = 'pdf_meta'
                         n_meta += 1

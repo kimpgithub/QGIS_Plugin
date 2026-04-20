@@ -136,6 +136,20 @@ def write_jgw(jgw_path: str, params: JGWParams, write_prj: bool = True):
                 write_aux_xml(aux_path)
 
 
+def find_main_image(dir_path: str, admin_code: str) -> Optional[str]:
+    """Stage 1 출력 메인 이미지 경로. TIFF 우선, JPG 폴백.
+
+    Stage 1 기본 출력은 .tif (GeoTIFF). SIFT/Powell 폴백 경로나 구버전
+    출력은 .jpg. 둘 다 지원.
+    """
+    for ext in ('.tif', '.tiff', '.TIF', '.TIFF',
+                '.jpg', '.jpeg', '.JPG', '.JPEG'):
+        p = os.path.join(dir_path, f'{admin_code}{ext}')
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def write_aux_xml(aux_path: str, epsg: int = 5179):
     """QGIS가 인식하는 래스터 좌표계 aux.xml 파일 생성"""
     aux_content = f'''<PAMDataset>
