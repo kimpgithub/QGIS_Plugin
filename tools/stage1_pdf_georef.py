@@ -204,6 +204,93 @@ def _sample_shp_aoi_points(gdf, admin_code, buffer_ratio=0.3, n_points=3000):
     return np.array(pts, dtype=np.float64) if pts else None
 
 
+def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt, init_tl_x, init_tl_y,
+                   max_iter=20, conv_threshold=0.01,
+                   max_shift_m=None):
+    """Vector ICP — PDF 주황 점 ↔ SHP 경계 점 매칭으로 scale + TL 추정.
+
+    회전 0 가정 (지도 종이는 N-up). 자유도: (ps_mpt, tl_x, tl_y) = 3.
+    각 iter:
+      1. 현 affine으로 PDF→world 변환
+      2. 각 PDF→world 점에 대해 SHP에서 nearest 찾기 (cKDTree)
+      3. MAD 기반 outlier 거부 (median + 3*MAD)
+      4. inlier 쌍으로 best (scale, tl) 재추정
+      5. 수렴까지 반복 (cost 변화 < threshold)
+
+    부분 일치(추자면 등): outlier 거부로 자동 처리.
+
+    Returns:
+        (ps_mpt, tl_x, tl_y, cost, niter, inlier_ratio, accepted)
+    """
+    import numpy as np
+    from scipy.spatial import cKDTree
+    Q_tree = cKDTree(shp_pts_world)
+    P = pdf_pts_pt.astype(np.float64)
+
+    ps, tx, ty = init_ps_mpt, init_tl_x, init_tl_y
+    prev_cost = float('inf')
+    niter = 0
+    inlier_ratio = 1.0
+
+    for it in range(max_iter):
+        niter = it + 1
+        # 현 affine 적용 — PDF pt → world (회전 0, y 부호 반전)
+        wx = tx + P[:, 0] * ps
+        wy = ty - P[:, 1] * ps
+        P_world = np.column_stack([wx, wy])
+
+        # nearest neighbor in SHP
+        dists, indices = Q_tree.query(P_world, k=1)
+
+        # outlier 거부 (median + 3*MAD)
+        med = np.median(dists)
+        mad = np.median(np.abs(dists - med))
+        thresh = med + 3 * mad
+        mask = dists < thresh
+        inlier_ratio = float(mask.sum()) / len(P)
+        if inlier_ratio < 0.3:
+            break
+
+        # inlier 쌍으로 (ps, tx, ty) 재추정
+        # P_in (PDF pt, y 반전) ↔ Q_in (world)
+        P_in = np.column_stack([P[mask, 0], -P[mask, 1]])  # y 부호 반전
+        Q_in = shp_pts_world[indices[mask]]
+        # isotropic scale + translation:
+        # Q = ps × P_in + (tx, ty)
+        P_mean = P_in.mean(axis=0); Q_mean = Q_in.mean(axis=0)
+        Pc = P_in - P_mean; Qc = Q_in - Q_mean
+        # scale: minimize ||Q - ps*P||² → ps = sum(P·Q) / sum(P·P)
+        num = float(np.sum(Pc * Qc))
+        den = float(np.sum(Pc * Pc))
+        if den <= 0:
+            break
+        new_ps = num / den
+        new_tx = Q_mean[0] - new_ps * P_mean[0]
+        new_ty = Q_mean[1] - new_ps * P_mean[1]
+
+        ps, tx, ty = new_ps, new_tx, new_ty
+        cost = float(np.median(dists[mask]))
+        if abs(prev_cost - cost) < conv_threshold:
+            break
+        prev_cost = cost
+
+    final_cost = prev_cost if prev_cost != float('inf') else cost
+    moved = ((tx - init_tl_x) ** 2 + (ty - init_tl_y) ** 2) ** 0.5
+    ps_change_pct = abs(ps - init_ps_mpt) / max(init_ps_mpt, 1e-9) * 100
+
+    accepted = True
+    # safety: ps 변화가 5% 초과면 거부 (PDF 축척 텍스트 매우 정확)
+    if ps_change_pct > 5.0:
+        accepted = False
+    if max_shift_m is not None and moved > max_shift_m:
+        accepted = False
+    if inlier_ratio < 0.3:
+        accepted = False
+
+    return (ps, tx, ty, final_cost, niter, inlier_ratio, accepted,
+            ps_change_pct, moved)
+
+
 def _powell_refine_tl(pdf_pts_pt, shp_pts_world, init_tl_x, init_tl_y, ps_mpt,
                       max_shift_m=80.0):
     """Powell minimize — PDF 주황 vector ↔ SHP 경계 chamfer distance 최소화.
@@ -321,27 +408,31 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
     tl_x = bcx - gcx_px * ps
     tl_y = bcy + gcy_px * ps
 
-    # Powell refinement — PDF 주황 vector ↔ SHP 경계 chamfer 최소화
+    # Vector ICP refinement — PDF 주황 점 ↔ SHP 경계 점 정합
+    # scale + TL 동시 추정, MAD outlier 거부 → 부분 일치(다도해) 강건
     refine_info = {}
     if refine:
         pdf_pts = _extract_orange_vector_points(pdf_path, meta['n_split'])
         shp_pts = _sample_shp_aoi_points(gdf, code)
         if pdf_pts is not None and shp_pts is not None \
                 and len(pdf_pts) >= 100 and len(shp_pts) >= 100:
-            ps_mpt = ps * px_per_pt   # PDF pt → world 미터
-            # 다도해류는 초기값 오차가 클 수 있어 max_shift 확장
-            max_shift = max(80.0, (swx1 - swx0) * 0.05)
-            new_tl_x, new_tl_y, cost, niter, accepted = _powell_refine_tl(
-                pdf_pts, shp_pts, tl_x, tl_y, ps_mpt,
-                max_shift_m=max_shift)
-            moved = ((new_tl_x - tl_x) ** 2 + (new_tl_y - tl_y) ** 2) ** 0.5
-            refine_info = dict(cost=round(cost, 2), niter=niter,
-                                moved_m=round(moved, 2),
-                                accepted=accepted,
-                                n_pdf_pts=len(pdf_pts),
-                                n_shp_pts=len(shp_pts))
+            ps_mpt = ps * px_per_pt   # PDF pt → world 미터 (초기값)
+            max_shift = max(500.0, (swx1 - swx0) * 0.1)  # admin의 10% 까지
+            (new_ps_mpt, new_tl_x, new_tl_y, cost, niter,
+             inlier_ratio, accepted, ps_change_pct, moved) = _icp_scale_tl(
+                pdf_pts, shp_pts, ps_mpt, tl_x, tl_y,
+                max_iter=20, max_shift_m=max_shift)
+            refine_info = dict(
+                cost=round(cost, 2), niter=niter, moved_m=round(moved, 2),
+                inlier_ratio=round(inlier_ratio, 3),
+                ps_change_pct=round(ps_change_pct, 3),
+                accepted=accepted,
+                n_pdf_pts=len(pdf_pts), n_shp_pts=len(shp_pts))
             if accepted:
                 tl_x, tl_y = new_tl_x, new_tl_y
+                # ps 보정 — ps_mpt = ps * (DPI/72) 라 역산
+                new_ps = new_ps_mpt / px_per_pt
+                ps = new_ps
 
     # PDF → GeoTIFF 렌더링 (affine 내장, QGIS 네이티브)
     base = base_name or code
@@ -364,7 +455,7 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
         'pixel_size': ps,
         'gcp_count': 0,
         'scale': meta['scale'],
-        'method': 'pdf_meta+powell' if refine_info.get('accepted') else 'pdf_meta',
+        'method': 'pdf_meta+icp' if refine_info.get('accepted') else 'pdf_meta',
         'refine': refine_info,
     }
 
@@ -447,8 +538,9 @@ def main():
                                f'({(time.time()-t0)*1000:.0f}ms)')
                         rinfo = r.get('refine', {})
                         if rinfo:
-                            msg += (f' | refine cost={rinfo["cost"]:.2f}m '
+                            msg += (f' | ICP cost={rinfo["cost"]:.2f}m '
                                     f'moved={rinfo["moved_m"]:.1f}m '
+                                    f'inlier={rinfo["inlier_ratio"]*100:.0f}% '
                                     f'iter={rinfo["niter"]}')
                             if not rinfo.get('accepted'):
                                 msg += ' [REJECTED→초기값]'
