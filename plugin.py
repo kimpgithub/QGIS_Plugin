@@ -699,8 +699,12 @@ class RecoveryTab(QWidget):
         if not item:
             return
         path = item.data(Qt.UserRole)
-        # 썸네일 (다운샘플 로드)
-        pm = QPixmap(path)
+        # 썸네일 — OCR에 쓰는 헤더 영역만 (admin_code + sheet_id 모두 포함).
+        # y: 0~22%, x: 0~55% (admin crop_header 18%/40% + sheet ROI 20%/18% 합집합 + 여유)
+        pm = self._load_header_thumbnail(path)
+        if pm is None or pm.isNull():
+            # 폴백: 전체 이미지
+            pm = QPixmap(path)
         if not pm.isNull():
             self.thumb.setPixmap(pm.scaled(
                 self.thumb.size(), Qt.KeepAspectRatio,
@@ -708,6 +712,28 @@ class RecoveryTab(QWidget):
         else:
             self.thumb.setText(f'이미지 로드 실패: {os.path.basename(path)}')
         self.status_label.setText(f'선택: {os.path.basename(path)}')
+
+    def _load_header_thumbnail(self, path):
+        """스캔에서 헤더 영역만 크롭해 QPixmap 반환 (OCR ROI와 동일 영역)."""
+        try:
+            import cv2
+            import numpy as np
+            data = np.fromfile(path, dtype=np.uint8)
+            if data.size == 0:
+                return None
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            if img is None:
+                return None
+            h, w = img.shape[:2]
+            crop = img[:int(h * 0.22), :int(w * 0.55)]
+            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            ch, cw = rgb.shape[:2]
+            from qgis.PyQt.QtGui import QImage
+            qimg = QImage(bytes(rgb.data), cw, ch, 3 * cw,
+                          QImage.Format_RGB888)
+            return QPixmap.fromImage(qimg)
+        except Exception:
+            return None
 
     def _on_admin_changed(self, _idx):
         self.sheet_cb.clear()

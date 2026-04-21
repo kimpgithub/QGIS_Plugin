@@ -1065,32 +1065,41 @@ def main():
             dt = time.time() - ti
             renamed = ''
             if r['status'] == 'OK':
-                n_ok += 1
-                # 중복 감지
+                # 중복 감지 — OCR이 다른 sheet를 같은 값으로 오인식한 경우.
+                # 자동 해결 불가 (어느 게 정답인지 모름) → CONFLICT로 격리,
+                # 사용자가 2a 탭에서 각각 재지정.
                 key = (r['admin_code'], r['sheet_id'])
                 if key in seen_admin_sheet:
-                    r['status'] = 'WARN'
-                    r['message'] = (f'중복: {seen_admin_sheet[key]}과 같은 '
-                                    f'(admin, sheet) 조합 — 식별 재검토 필요')
+                    prev = seen_admin_sheet[key]
+                    r['status'] = 'CONFLICT'
+                    r['message'] = (f'중복 sheet_id: "{prev}"과 같은 '
+                                    f'({r["admin_code"]}_{r["sheet_id"]}) '
+                                    f'— OCR 오인식 가능. 2a 탭에서 재지정 필요')
                     print(f'  ⚠ {r["message"]}')
+                    n_fail += 1
+                    # _unmatched/로 격리 (identified/에는 복사 안 함)
+                    if not args.no_unmatched:
+                        os.makedirs(unmatched_dir, exist_ok=True)
+                        shutil.copy2(scan, os.path.join(
+                            unmatched_dir, os.path.basename(scan)))
                 else:
+                    n_ok += 1
                     seen_admin_sheet[key] = os.path.basename(scan)
-                if not args.no_rename:
-                    # 시도/시군구 폴더 구조: code[:2]/code[:5]/
-                    code = r['admin_code']
-                    sub_dir = os.path.join(identified_dir, code[:2], code[:5])
-                    os.makedirs(sub_dir, exist_ok=True)
-                    ext = os.path.splitext(scan)[1]
-                    renamed = os.path.join(
-                        sub_dir, f"{code}_{r['sheet_id']}{ext}")
-                    # 충돌 시 번호 붙여서
-                    if os.path.exists(renamed):
-                        base = os.path.splitext(renamed)[0]
-                        k = 2
-                        while os.path.exists(f'{base}_{k}{ext}'):
-                            k += 1
-                        renamed = f'{base}_{k}{ext}'
-                    shutil.copy2(scan, renamed)
+                    if not args.no_rename:
+                        code = r['admin_code']
+                        sub_dir = os.path.join(
+                            identified_dir, code[:2], code[:5])
+                        os.makedirs(sub_dir, exist_ok=True)
+                        ext = os.path.splitext(scan)[1]
+                        renamed = os.path.join(
+                            sub_dir, f"{code}_{r['sheet_id']}{ext}")
+                        if os.path.exists(renamed):
+                            base = os.path.splitext(renamed)[0]
+                            k = 2
+                            while os.path.exists(f'{base}_{k}{ext}'):
+                                k += 1
+                            renamed = f'{base}_{k}{ext}'
+                        shutil.copy2(scan, renamed)
             elif r['status'] == 'FAIL':
                 n_fail += 1
                 if not args.no_unmatched:
