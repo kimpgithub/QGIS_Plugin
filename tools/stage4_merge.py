@@ -19,35 +19,18 @@ import cv2
 import numpy as np
 
 
-def _imread(path):
-    try:
-        data = np.fromfile(path, dtype=np.uint8)
-        if data.size == 0:
-            return None
-        return cv2.imdecode(data, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
-
-
-def _imwrite(path, img, params=None):
-    ext = os.path.splitext(path)[1] or '.jpg'
-    ok, buf = cv2.imencode(ext, img, params or [])
-    if not ok:
-        return False
-    buf.tofile(path)
-    return True
-
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from ._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179, extract_map_region,
         find_main_image,
+        imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 except ImportError:
     from gis_scan_tools.tools._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179, extract_map_region,
         find_main_image,
+        imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 
 

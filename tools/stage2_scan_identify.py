@@ -34,32 +34,18 @@ import fitz
 import numpy as np
 
 
-def _imread(path):
-    """Unicode 경로 안전 imread (한글 경로 대응)."""
-    try:
-        data = np.fromfile(path, dtype=np.uint8)
-        if data.size == 0:
-            return None
-        return cv2.imdecode(data, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
-
-
-def _imwrite(path, img, params=None):
-    ext = os.path.splitext(path)[1] or '.jpg'
-    ok, buf = cv2.imencode(ext, img, params or [])
-    if not ok:
-        return False
-    buf.tofile(path)
-    return True
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from ._legacy.common import (
-        parse_jgw, extract_map_region, find_main_image)
+        parse_jgw, extract_map_region, find_main_image,
+        imread_unicode as _imread, imwrite_unicode as _imwrite,
+        LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
+    )
 except ImportError:
     from gis_scan_tools.tools._legacy.common import (
         parse_jgw, extract_map_region, find_main_image,
+        imread_unicode as _imread, imwrite_unicode as _imwrite,
+        LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
     )
 
 SHEET_PATTERN = re.compile(r'^(\d{8})_(\d+)-(\d+)\.pdf$', re.IGNORECASE)
@@ -500,48 +486,28 @@ def ocr_admin_code(scan_img, valid_codes=None, shp_index=None, fast=False):
         variants.append(('upscale', bw3, '--psm 6', 'kor+eng'))
 
     all_codes = []
+    variants_used = 0
     for _, im, cfg, lang in variants:
         text = _tesseract(im, cfg, lang)
         codes = _extract_admin_codes(text, valid_codes, shp_index=shp_index)
         all_codes.extend(codes)
+        variants_used += 1
+        # Opt #2: 조기 종료 — 단일 valid 코드가 높은 확률로 식별됐으면 중단.
+        # 같은 코드가 동일하게 여러 번 추출된 경우 추가 variant 무의미.
+        if (valid_codes is not None and codes
+                and len(set(codes)) == 1 and codes[0] in valid_codes):
+            break
 
     if not all_codes:
         return None, 0.0
     most, votes = Counter(all_codes).most_common(1)[0]
-    return most, votes / max(1, len(variants))
-
-
-# ============================================================
-# pHash 폴백
-# ============================================================
-
-def compute_phash(img, hash_size=16):
-    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-    g = cv2.resize(g, (hash_size * 4, hash_size * 4),
-                   interpolation=cv2.INTER_AREA).astype(np.float32)
-    dct = cv2.dct(g)
-    bits = (dct[:hash_size, :hash_size] >
-            np.median(dct[:hash_size, :hash_size].flatten()[1:])).flatten()
-    return np.packbits(bits.astype(np.uint8))
-
-
-def hamming(a, b):
-    return int(np.unpackbits(a ^ b).sum())
+    return most, votes / max(1, variants_used)
 
 
 # ============================================================
 # 시트 PDF 캐시 + sheet bbox 계산
 # ============================================================
-
-# PDF 텍스트 라벨 → 셀 좌상단 보정 (검증: 5 admin × 15 시트, stdev ±0.32 pt)
-# 라벨 텍스트의 글자 padding 때문에 라벨 좌상단이 셀 좌상단보다 안쪽에 있음.
-# 모든 PDF가 동일 도구(Qt 4.8.5)로 생성되어 일정.
-# 부호: PDF pt 좌표계 (좌상단 origin, y는 아래로 증가)에서 셀 좌상단으로
-# 이동하기 위해 라벨에 더할 값.
-LABEL_OFFSET_X_PT = -13.82  # 라벨이 셀 좌측 모서리에서 안쪽으로 들어가 있음
-LABEL_OFFSET_Y_PT = -2.11   # 라벨이 셀 상단 모서리에서 안쪽(아래로) 들어가 있음
-# Y는 사용자 수동 georef 3 케이스 누적 분석으로 -2.76 → -2.11 보정
-# (stdev 0.09 pt, 평균 5m 북쪽 편향 제거). Stage 1과 동기화.
+# LABEL_OFFSET_X/Y_PT: _legacy/common.py에서 import (Stage 1과 공유)
 
 
 class SheetCache:

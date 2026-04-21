@@ -22,6 +22,39 @@ DEFAULT_DPI = 300
 # EPSG:5179 (Korea 2000 / Korea Unified CS) PRJ 정의
 PRJ_5179 = 'PROJCS["Korea_2000_Korea_Unified_Coordinate_System",GEOGCS["GCS_Korea_2000",DATUM["D_Korea_2000",SPHEROID["GRS_1980",6378137.0,298.257222101]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",1000000.0],PARAMETER["False_Northing",2000000.0],PARAMETER["Central_Meridian",127.5],PARAMETER["Scale_Factor",0.9996],PARAMETER["Latitude_Of_Origin",38.0],UNIT["Meter",1.0]]'
 
+# PDF 텍스트 라벨 좌상단 → 셀 좌상단 보정 (PDF pt 단위)
+# Stage 1 (메인 georef) / Stage 2 (sheet bbox) 공통 상수.
+# 사용자 수동 georef 3 케이스 누적 분석 (39010110_4-1, 39010130_4-4, 39010120_4-2)
+# Y: -2.76 → -2.11 (stdev 0.09 pt, 평균 5m 편향 제거)
+# X: 노이즈 범위 유지 (-13.82)
+LABEL_OFFSET_X_PT = -13.82
+LABEL_OFFSET_Y_PT = -2.11
+
+
+# ============================================================
+# Unicode-safe 이미지 I/O (한글 경로 OS에서 cv2 imread/imwrite 우회)
+# ============================================================
+
+def imread_unicode(path):
+    """np.fromfile + cv2.imdecode — 한글 경로에서도 동작. 실패 시 None."""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def imwrite_unicode(path, img, params=None):
+    """cv2.imencode + tofile — 한글 경로에서도 동작. 실패 시 False."""
+    ext = os.path.splitext(path)[1] or '.jpg'
+    ok, buf = cv2.imencode(ext, img, params or [])
+    if not ok:
+        return False
+    buf.tofile(path)
+    return True
+
 
 # ============================================================
 # 데이터 클래스

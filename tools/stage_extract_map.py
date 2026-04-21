@@ -23,26 +23,19 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from ._legacy.common import extract_map_region
+    from ._legacy.common import (
+        extract_map_region,
+        imread_unicode as _imread, imwrite_unicode,
+    )
 except ImportError:
-    from gis_scan_tools.tools._legacy.common import extract_map_region
-
-
-def _imread(path):
-    try:
-        d = np.fromfile(path, dtype=np.uint8)
-        return cv2.imdecode(d, cv2.IMREAD_COLOR) if d.size else None
-    except Exception:
-        return None
+    from gis_scan_tools.tools._legacy.common import (
+        extract_map_region,
+        imread_unicode as _imread, imwrite_unicode,
+    )
 
 
 def _imwrite(path, img, q=92):
-    ext = os.path.splitext(path)[1] or '.jpg'
-    ok, buf = cv2.imencode(ext, img, [cv2.IMWRITE_JPEG_QUALITY, q])
-    if not ok:
-        return False
-    buf.tofile(path)
-    return True
+    return imwrite_unicode(path, img, [cv2.IMWRITE_JPEG_QUALITY, q])
 
 
 def main():

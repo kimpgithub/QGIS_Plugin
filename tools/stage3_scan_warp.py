@@ -28,33 +28,16 @@ import cv2
 import numpy as np
 
 
-def _imread(path):
-    try:
-        data = np.fromfile(path, dtype=np.uint8)
-        if data.size == 0:
-            return None
-        return cv2.imdecode(data, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
-
-
-def _imwrite(path, img, params=None):
-    ext = os.path.splitext(path)[1] or '.jpg'
-    ok, buf = cv2.imencode(ext, img, params or [])
-    if not ok:
-        return False
-    buf.tofile(path)
-    return True
-
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from ._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179,
+        imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 except ImportError:
     from gis_scan_tools.tools._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179,
+        imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 
 
@@ -102,7 +85,7 @@ class SheetSiftCache:
     """Stage 2 산출 sheets_geo/ 폴더의 분할 PDF 이미지 SIFT 캐시."""
 
     def __init__(self, sheets_geo_dir, scan_scale=0.5,
-                 nfeatures=50000, contrast=0.025, edge=20,
+                 nfeatures=30000, contrast=0.025, edge=20,
                  disk_cache_dir=None):
         self.sheets_geo_dir = sheets_geo_dir
         self.scan_scale = scan_scale
@@ -200,7 +183,7 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         _imwrite(os.path.join(out_dir, '03_scan_prep.jpg'), g_scan,
                  [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-    sift = cv2.SIFT_create(nfeatures=50000, contrastThreshold=0.025,
+    sift = cv2.SIFT_create(nfeatures=30000, contrastThreshold=0.025,
                            edgeThreshold=20, sigma=1.6)
     t = time.time()
     kp_s, des_s = sift.detectAndCompute(g_scan, None)
@@ -314,16 +297,13 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     result['n_gcps_tps'] = len(keep)
 
     # 9) TPS 워핑 — 희소 격자 평가 + 조밀 보간 (gdalwarp의 1/10 속도)
+    # Opt #1: RBFInterpolator는 d-value 입력(N,2)을 한 번에 처리 — 커널 분해 1회로 단축
     t = time.time()
     from scipy.interpolate import RBFInterpolator
-    cw = np.array([w for _, w in keep], dtype=np.float64)  # world (N,2)
-    cs = np.array([s for s, _ in keep], dtype=np.float64)  # scan_px (N,2)
+    cw = np.array([w for _, w in keep], dtype=np.float64)   # world (N,2)
+    cs = np.array([s for s, _ in keep], dtype=np.float64)   # scan_px (N,2)
 
-    # RBF(TPS) — world → scan pixel (x, y 별도)
-    rbf_x = RBFInterpolator(cw, cs[:, 0], kernel='thin_plate_spline',
-                             smoothing=0.0)
-    rbf_y = RBFInterpolator(cw, cs[:, 1], kernel='thin_plate_spline',
-                             smoothing=0.0)
+    rbf = RBFInterpolator(cw, cs, kernel='thin_plate_spline', smoothing=0.0)
 
     # 희소 격자에서 평가 (16픽셀 간격)
     STEP = 16
@@ -333,8 +313,9 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     world_xs = (out_minx + GX * target_ps).ravel()
     world_ys = (out_maxy - GY * target_ps).ravel()
     coords_wp = np.column_stack([world_xs, world_ys])
-    sx_grid = rbf_x(coords_wp).reshape(GX.shape).astype(np.float32)
-    sy_grid = rbf_y(coords_wp).reshape(GY.shape).astype(np.float32)
+    mapped = rbf(coords_wp)   # (M, 2) — x,y 동시 평가
+    sx_grid = mapped[:, 0].reshape(GX.shape).astype(np.float32)
+    sy_grid = mapped[:, 1].reshape(GY.shape).astype(np.float32)
 
     # 격자 → 전체 크기 업샘플
     map_x = cv2.resize(sx_grid, (out_w, out_h),
