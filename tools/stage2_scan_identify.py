@@ -539,7 +539,9 @@ def hamming(a, b):
 # 부호: PDF pt 좌표계 (좌상단 origin, y는 아래로 증가)에서 셀 좌상단으로
 # 이동하기 위해 라벨에 더할 값.
 LABEL_OFFSET_X_PT = -13.82  # 라벨이 셀 좌측 모서리에서 안쪽으로 들어가 있음
-LABEL_OFFSET_Y_PT = -2.76   # 라벨이 셀 상단 모서리에서 안쪽(아래로) 들어가 있음
+LABEL_OFFSET_Y_PT = -2.11   # 라벨이 셀 상단 모서리에서 안쪽(아래로) 들어가 있음
+# Y는 사용자 수동 georef 3 케이스 누적 분석으로 -2.76 → -2.11 보정
+# (stdev 0.09 pt, 평균 5m 북쪽 편향 제거). Stage 1과 동기화.
 
 
 class SheetCache:

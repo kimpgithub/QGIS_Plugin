@@ -41,8 +41,11 @@ except ImportError:
 
 
 # Stage 2와 동일 — PDF 라벨 좌상단이 셀 좌상단보다 안쪽으로 들어간 양 (PDF pt)
+# Y는 사용자 수동 georef 3 케이스(39010110_4-1, 39010130_4-4, 39010120_4-2)
+# 누적 분석으로 -2.76 → -2.11 보정 (stdev 0.09 pt, 평균 5m 편향 제거).
+# X는 노이즈 범위 내로 유지.
 LABEL_OFFSET_X_PT = -13.82
-LABEL_OFFSET_Y_PT = -2.76
+LABEL_OFFSET_Y_PT = -2.11
 # 200 DPI (기본) — 62 Mpx로 libjpeg 500MB 제약(JPG) 우회.
 # Stage 3 SIFT 매칭엔 충분 (분할 PDF와 동일 DPI 사용 시 정합 OK).
 # --render-dpi로 300 등으로 조정 가능.
