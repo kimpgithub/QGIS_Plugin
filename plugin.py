@@ -576,6 +576,8 @@ class RecoveryTab(QWidget):
         form.addRow('행정코드:', self.admin_cb)
 
         self.sheet_cb = QComboBox()
+        # PDF 후보 외 임의값 입력 허용 (N 무관, PDF 없는 admin 대응)
+        self.sheet_cb.setEditable(True)
         form.addRow('시트번호:', self.sheet_cb)
         right.addLayout(form)
 
@@ -745,7 +747,23 @@ class RecoveryTab(QWidget):
         if sheets:
             self.sheet_cb.addItems(sheets)
         else:
-            self.sheet_cb.addItem('(분할 PDF 없음)')
+            # PDF 없는 admin — 일반 후보 + 자유 입력 안내
+            self.sheet_cb.addItem('')
+            self.sheet_cb.lineEdit().setPlaceholderText(
+                '예: 4-1, 7-5 — 직접 입력 가능')
+        # 현재 선택된 파일명에서 sheet 힌트 추출 — 우선 선택
+        item = self.file_list.currentItem()
+        if item:
+            import re as _re
+            m = _re.search(r'(\d+-\d+)', os.path.basename(
+                item.data(Qt.UserRole)))
+            if m:
+                hint = m.group(1)
+                idx = self.sheet_cb.findText(hint)
+                if idx >= 0:
+                    self.sheet_cb.setCurrentIndex(idx)
+                else:
+                    self.sheet_cb.setEditText(hint)
 
     def _on_save(self):
         item = self.file_list.currentItem()
