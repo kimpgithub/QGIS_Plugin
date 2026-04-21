@@ -298,7 +298,19 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
         return None
     geom = g.iloc[0].geometry
     swx0, swy0, swx1, swy1 = geom.bounds
-    bcx, bcy = (swx0 + swx1) / 2, (swy0 + swy1) / 2
+
+    # 종이 중앙에 align할 기준점 선택:
+    # 일반 admin(단일 컴팩트 폴리곤) → bbox center (종이 중앙 ≈ bbox 중앙)
+    # 다도해/복잡 형상(예: 추자면) → centroid
+    #   · fill_ratio = geometry 면적 / bbox 면적
+    #   · 다도해는 섬 몇 개가 흩어져 있어 ratio 매우 낮음 (보통 <5%)
+    #   · 지도 제작자는 중심 섬 부근만 그리므로 종이 중앙 ≈ centroid
+    bbox_area = (swx1 - swx0) * (swy1 - swy0)
+    fill_ratio = geom.area / bbox_area if bbox_area > 0 else 1.0
+    if fill_ratio < 0.3:
+        bcx, bcy = geom.centroid.x, geom.centroid.y
+    else:
+        bcx, bcy = (swx0 + swx1) / 2, (swy0 + swy1) / 2
 
     ps = 0.0254 * meta['scale'] / dpi
 
@@ -317,8 +329,11 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
         if pdf_pts is not None and shp_pts is not None \
                 and len(pdf_pts) >= 100 and len(shp_pts) >= 100:
             ps_mpt = ps * px_per_pt   # PDF pt → world 미터
+            # 다도해류는 초기값 오차가 클 수 있어 max_shift 확장
+            max_shift = max(80.0, (swx1 - swx0) * 0.05)
             new_tl_x, new_tl_y, cost, niter, accepted = _powell_refine_tl(
-                pdf_pts, shp_pts, tl_x, tl_y, ps_mpt)
+                pdf_pts, shp_pts, tl_x, tl_y, ps_mpt,
+                max_shift_m=max_shift)
             moved = ((new_tl_x - tl_x) ** 2 + (new_tl_y - tl_y) ** 2) ** 0.5
             refine_info = dict(cost=round(cost, 2), niter=niter,
                                 moved_m=round(moved, 2),
