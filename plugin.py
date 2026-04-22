@@ -31,10 +31,10 @@ PLUGIN_DIR = os.path.dirname(__file__)
 # 자동 서브폴더 이름
 SUB_PDF_GEO = '1_pdf_geo'
 SUB_SCAN_ID = '2_scan_id'
-SUB_MAP_ONLY = '2b_map_only'   # S7: 지도영역만 추출
-SUB_WARPED = '3_warped'
-SUB_MERGED = '4_merged'
-SUB_VALIDATION = '5_validation'
+SUB_MAP_EXTRACTED = '3_map_extracted'   # 참조 템플릿 매칭 기반 지도영역 추출
+SUB_WARPED = '4_warped'
+SUB_MERGED = '5_merged'
+SUB_VALIDATION = '6_validation'
 
 
 # ============================================================
@@ -805,7 +805,7 @@ class RecoveryTab(QWidget):
 # ============================================================
 
 class ExtractMapTab(StageTab):
-    stage_name = '[2b] 지도영역 추출'
+    stage_name = '[3] 지도영역 추출'
 
     def __init__(self, common):
         from .tools import stage_extract_map
@@ -813,24 +813,29 @@ class ExtractMapTab(StageTab):
         super().__init__(common)
 
     def build_options(self):
-        from qgis.PyQt.QtWidgets import QSpinBox
-        self.margin = QSpinBox()
-        self.margin.setRange(0, 50); self.margin.setValue(3)
-        self.opt_layout.addRow('프레임 안쪽 여유(px):', self.margin)
+        pass  # 파라미터 없음 (SIFT+MAGSAC++ 자동)
 
     def io_summary(self):
-        return ([('스캔 폴더', self.common.scan_input.text())],
+        proj = self.common.project_dir.text()
+        return ([('Stage 2 identified/', os.path.join(
+                    self.common.sub(SUB_SCAN_ID),
+                    'identified') if proj else ''),
+                 ('Stage 2 sheets_geo/', os.path.join(
+                    self.common.sub(SUB_SCAN_ID),
+                    'sheets_geo') if proj else '')],
                 self.get_out_dir())
 
     def get_out_dir(self):
         p = self.common.project_dir.text()
-        return os.path.join(p, SUB_MAP_ONLY) if p else ''
+        return os.path.join(p, SUB_MAP_EXTRACTED) if p else ''
 
     def get_argv(self):
-        self.common.validate(need_pdf=False, need_scan=True, need_shp=False)
-        return ['--in', self.common.scan_input.text(),
-                '--out', self.get_out_dir(),
-                '--margin', str(self.margin.value())]
+        self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
+        return ['--identified',
+                os.path.join(self.common.sub(SUB_SCAN_ID), 'identified'),
+                '--sheets-geo',
+                os.path.join(self.common.sub(SUB_SCAN_ID), 'sheets_geo'),
+                '--out', self.get_out_dir()]
 
 
 # ============================================================
@@ -838,7 +843,7 @@ class ExtractMapTab(StageTab):
 # ============================================================
 
 class Stage3Tab(StageTab):
-    stage_name = '[3] 매칭+워핑'
+    stage_name = '[4] 매칭정합'
 
     def __init__(self, common):
         from .tools import stage3_scan_warp
@@ -851,9 +856,8 @@ class Stage3Tab(StageTab):
 
     def io_summary(self):
         proj = self.common.project_dir.text()
-        return ([('Stage 2 identified/', os.path.join(
-                    self.common.sub(SUB_SCAN_ID),
-                    'identified') if proj else ''),
+        return ([('Stage 3 map_extracted/', self.common.sub(SUB_MAP_EXTRACTED)
+                  if proj else ''),
                  ('Stage 2 sheets_geo', os.path.join(
                     self.common.sub(SUB_SCAN_ID),
                     'sheets_geo') if proj else '')],
@@ -864,10 +868,9 @@ class Stage3Tab(StageTab):
         return os.path.join(p, SUB_WARPED) if p else ''
 
     def get_argv(self):
-        # 입력: identified/ 폴더 (수동 보강 파일도 자동 포함)
+        # 입력: Stage 3 map_extracted/ 폴더 (프레임 제거된 스캔)
         self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
-        argv = ['--identified',
-                os.path.join(self.common.sub(SUB_SCAN_ID), 'identified'),
+        argv = ['--identified', self.common.sub(SUB_MAP_EXTRACTED),
                 '--sheets-geo', os.path.join(
                     self.common.sub(SUB_SCAN_ID), 'sheets_geo'),
                 '--out', self.get_out_dir()]
@@ -881,7 +884,7 @@ class Stage3Tab(StageTab):
 # ============================================================
 
 class Stage4Tab(StageTab):
-    stage_name = '[4] 사분면 병합'
+    stage_name = '[5] 사분면 병합'
 
     def __init__(self, common):
         from .tools import stage4_merge
@@ -928,7 +931,7 @@ class Stage4Tab(StageTab):
 # ============================================================
 
 class Stage5Tab(StageTab):
-    stage_name = '[5] 경계 검수'
+    stage_name = '[6] 경계 검수'
 
     def __init__(self, common):
         from .tools import stage5_validate

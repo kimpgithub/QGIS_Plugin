@@ -39,16 +39,19 @@ try:
     from ._legacy.common import (
         parse_jgw, extract_map_region, find_main_image,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
-        LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
     )
 except ImportError:
     from gis_scan_tools.tools._legacy.common import (
         parse_jgw, extract_map_region, find_main_image,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
-        LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
     )
 
 SHEET_PATTERN = re.compile(r'^(\d{8})_(\d+)-(\d+)\.pdf$', re.IGNORECASE)
+
+# Sheet bbox skeleton ICP 파라미터
+ICP_MIN_COMPONENT_PX = 200   # skeleton component 최소 길이 (격자 tick 제거)
+ICP_MAX_SHIFT_M = 50.0       # ICP translation safety gate — 초과 시 rollback
+ICP_SHP_BUFFER_M = 500       # 주변 admin SHP 샘플 범위
 
 
 # ============================================================
@@ -538,19 +541,23 @@ class SheetCache:
 
     def __init__(self, pdf_input_dir, pdf_main_dir,
                  sheet_match_scale=0.25, cache_dir=None,
-                 bbox_cache_path=None):
+                 bbox_cache_path=None, shp_path=None,
+                 render_dpi=300):
         self.pdf_input_dir = pdf_input_dir
         self.pdf_main_dir = pdf_main_dir
         self.scale = sheet_match_scale
         self.cache_dir = cache_dir or '/tmp/_sheet_cache'
+        self.shp_path = shp_path            # skeleton ICP용 SHP
+        self.render_dpi = render_dpi        # split PDF 렌더 DPI (기본 300)
         os.makedirs(self.cache_dir, exist_ok=True)
         self._sheet_meta = {}      # admin_code → {sheet_id: pdf_path}
         self._main_pdfs = {}       # admin_code → main pdf path (PDF 라벨 추출용)
         self._main_sift = {}       # admin_code → (g_main_map, kp, des, main_bbox, main_jgw)
         self._sheet_sift = {}      # (admin, sheet) → (kp, des)  scan 매칭용
         self._sheet_world_bbox = {}
-        self._label_bboxes = {}    # admin_code → {sheet_id: bbox} PDF 라벨 캐시
+        self._label_bboxes = {}    # admin_code → {sheet_id: bbox} 계산 캐시
         self._label_logged = set() # 로그 1회/admin
+        self._shp_gdf = None       # SHP lazy load
         self._scan_index_pdfs()
 
         # 기존 sheet_bboxes.json 로드 — SIFT 재계산 회피
@@ -737,14 +744,172 @@ class SheetCache:
         qy0 = maxy - (row + 1) * cell_h
         return (qx0, qy0, qx1, qy1)
 
-    def _bbox_from_pdf_labels(self, admin_code):
-        """메인 PDF 텍스트 라벨('N-i') 위치 + 고정 오프셋으로 모든 sheet bbox 계산.
+    _body_cache = None
+    def _split_body(self, pdf_path):
+        """split PDF 지도영역 crop + bbox (margin=0 캐시)."""
+        if self._body_cache is None:
+            self._body_cache = {}
+        if pdf_path in self._body_cache:
+            return self._body_cache[pdf_path]
+        try:
+            img = self._render_pdf(pdf_path)
+            sheet_map, body_bbox = extract_map_region(img, margin=0)
+        except Exception:
+            self._body_cache[pdf_path] = (None, None)
+            return None, None
+        self._body_cache[pdf_path] = (sheet_map, body_bbox)
+        return sheet_map, body_bbox
 
-        SIFT 매칭 우회 — PDF 텍스트만 파싱 (수십 ms). 정확도 ±2m
-        (검증: 5 admin × 15 시트, vs SIFT 산출 비교 stdev ±0.32 pt).
+    def _shp(self):
+        """SHP GeoDataFrame + spatial index lazy load."""
+        if self._shp_gdf is not None or self.shp_path is None:
+            return self._shp_gdf
+        try:
+            import geopandas as gpd
+            self._shp_gdf = gpd.read_file(self.shp_path)
+            _ = self._shp_gdf.sindex  # spatial index 구축 (첫 호출 1회)
+        except Exception:
+            self._shp_gdf = None
+        return self._shp_gdf
+
+    _scale_cache = None
+    def _parse_split_scale(self, pdf_path):
+        """split PDF 텍스트에서 '1:N' 축척 파싱 (결과 캐시)."""
+        if self._scale_cache is None:
+            self._scale_cache = {}
+        if pdf_path in self._scale_cache:
+            return self._scale_cache[pdf_path]
+        scale = None
+        try:
+            doc = fitz.open(pdf_path)
+            t = doc[0].get_text()
+            doc.close()
+            for m in re.finditer(r'1\s*:\s*([\d,]+)', t):
+                try:
+                    scale = int(m.group(1).replace(',', ''))
+                    break
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+        self._scale_cache[pdf_path] = scale
+        return scale
+
+    def _extract_orange_skeleton(self, img_bgr):
+        """이미지에서 주황 중심선 skeleton (짧은 컴포넌트 제거).
 
         Returns:
-            {sheet_id: (minx, miny, maxx, maxy)} 또는 None (라벨 추출 실패)
+            (N, 2) pixel coords (x, y) 또는 None
+        """
+        try:
+            from skimage.morphology import skeletonize
+            from skimage.measure import label as sklabel, regionprops
+        except ImportError:
+            return None
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (5, 100, 100), (25, 255, 255))
+        if mask.sum() == 0:
+            return None
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_c = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+        skel = skeletonize(mask_c > 0)
+        lbl = sklabel(skel, connectivity=2)
+        keep = np.zeros_like(skel, dtype=bool)
+        for p in regionprops(lbl):
+            if p.area >= ICP_MIN_COMPONENT_PX:
+                keep[lbl == p.label] = True
+        if not keep.any():
+            return None
+        ys, xs = np.where(keep)
+        return np.column_stack([xs, ys]).astype(np.float64)
+
+    def _sample_nearby_shp_boundary(self, sheet_bbox, buffer=ICP_SHP_BUFFER_M):
+        """sheet bbox 주변 admin 경계 점 샘플 (~1m 간격). spatial index 활용."""
+        gdf = self._shp()
+        if gdf is None:
+            return None
+        try:
+            from shapely.geometry import MultiPolygon, LineString, box
+        except ImportError:
+            return None
+        minx, miny, maxx, maxy = sheet_bbox
+        q = box(minx - buffer, miny - buffer, maxx + buffer, maxy + buffer)
+        # spatial index로 후보 축소 (선형 스캔 3561개 → 근방 수~수십개)
+        cand_idx = list(gdf.sindex.intersection(q.bounds))
+        if not cand_idx:
+            return None
+        near = gdf.iloc[cand_idx]
+        near = near[near.geometry.intersects(q)]
+        pts = []
+        for _, row in near.iterrows():
+            geom = row.geometry
+            try:
+                clipped = geom.intersection(q) if not geom.within(q) else geom
+            except Exception:
+                continue
+            if clipped.is_empty:
+                continue
+            subs = clipped.geoms if hasattr(clipped, 'geoms') else [clipped]
+            for s in subs:
+                if not hasattr(s, 'exterior'):
+                    continue
+                ls = LineString(list(s.exterior.coords))
+                n = max(50, int(ls.length))
+                for i in range(n + 1):
+                    p2 = ls.interpolate(i / n, normalized=True)
+                    pts.append((p2.x, p2.y))
+        return np.array(pts) if pts else None
+
+    def _icp_translation(self, skel_px, rough_bbox, sheet_pixel_size,
+                         shp_tree, max_iter=20, tol=0.01):
+        """translation-only ICP. rough_bbox 기준 (dx, dy) 반환.
+
+        MAD outlier 거부. |dx|,|dy| > MAX_SHIFT 초과 시 (0, 0, None) 반환.
+        """
+        minx0, miny0, maxx0, maxy0 = rough_bbox
+        ps_x = sheet_pixel_size
+        ps_y = -sheet_pixel_size
+        tlx0, tly0 = minx0, maxy0
+        dx, dy = 0.0, 0.0
+        cost = None
+        for _ in range(max_iter):
+            wx = (tlx0 + dx) + skel_px[:, 0] * ps_x
+            wy = (tly0 + dy) + skel_px[:, 1] * ps_y
+            world = np.column_stack([wx, wy])
+            d, idx = shp_tree.query(world)
+            med = np.median(d)
+            mad = np.median(np.abs(d - med)) * 1.4826
+            inl = d < med + 3 * mad
+            n_inl = int(inl.sum())
+            if n_inl < 10:
+                break
+            shp_p = shp_tree.data[idx[inl]]
+            offs = shp_p - world[inl]
+            ddx, ddy = float(offs[:, 0].mean()), float(offs[:, 1].mean())
+            dx += ddx
+            dy += ddy
+            cost = float(d[inl].mean())
+            if abs(ddx) < tol and abs(ddy) < tol:
+                break
+        if cost is None or abs(dx) > ICP_MAX_SHIFT_M or abs(dy) > ICP_MAX_SHIFT_M:
+            return 0.0, 0.0, None   # 발산 → rollback
+        return dx, dy, cost
+
+    def _bbox_from_body_grid(self, admin_code):
+        """분할도 메타 축척 + skeleton ICP 기반 sheet world bbox.
+
+        1. 메인 PDF 라벨 위치로 그리드 토폴로지 (row, col) 파악
+        2. Stage 1 main_jgw + extract_map_region 으로 main body 영역 → 각 cell 중심 world 좌표
+        3. split PDF 메타의 1:N 축척으로 정확한 pixel_size 산출
+           (sheet 크기 = 이미지 pixel × metadata_ps)
+        4. 이미지 주황 중심선을 skeleton으로 뽑아 주변 admin SHP 경계와 translation ICP
+           → 평행이동 미세보정 (|Δ|<50m 초과 시 rollback)
+
+        검증 (제주 14 sheet): 스케일 오차 0.03%, ICP 후 chamfer cost 0.3~0.5m
+        (이전 body-grid 방식: 0.08% 스케일, ~1m 오차)
+
+        Returns:
+            {sheet_id: (minx, miny, maxx, maxy)} 또는 None
         """
         if admin_code in self._label_bboxes:
             return self._label_bboxes[admin_code]
@@ -752,7 +917,6 @@ class SheetCache:
         sheets = self._sheet_meta.get(admin_code, {})
         if not sheets:
             return None
-        # 분할수 N
         try:
             n_split = int(next(iter(sheets)).split('-')[0])
         except (ValueError, IndexError):
@@ -770,12 +934,11 @@ class SheetCache:
         except Exception:
             return None
 
-        # 메인 PDF에서 'N-i' 라벨 추출
+        # 1) 메인 PDF 라벨 추출
         try:
             doc = fitz.open(main_pdf)
             page = doc[0]
-            page_w_pt = page.rect.width
-            target_re = re.compile(rf'^{n_split}-(\d+)$')
+            target_re = re.compile(rf'^{n_split}-\d+$')
             labels = {}
             for w in page.get_text("words"):
                 x0, y0, _, _, text = w[:5]
@@ -784,47 +947,96 @@ class SheetCache:
             doc.close()
         except Exception:
             return None
-
         if len(labels) < 2:
-            return None  # 셀 크기 추론 불가
-
-        # 셀 크기 (라벨 간 최소 간격)
-        xs = sorted({round(b[0]) for b in labels.values()})
-        ys = sorted({round(b[1]) for b in labels.values()})
-        cell_w_pt = (min(xs[i + 1] - xs[i] for i in range(len(xs) - 1))
-                     if len(xs) > 1 else None)
-        cell_h_pt = (min(ys[i + 1] - ys[i] for i in range(len(ys) - 1))
-                     if len(ys) > 1 else None)
-        if not cell_w_pt or not cell_h_pt:
             return None
 
-        # 메인 jpg 폭 (PIL로 헤더만 — 전체 디코드 회피, 수십 ms)
+        # 2) 그리드 토폴로지
+        xs_s = sorted({round(v[0] / 10) * 10 for v in labels.values()})
+        ys_s = sorted({round(v[1] / 10) * 10 for v in labels.values()})
+        cols, rows = len(xs_s), len(ys_s)
+
+        def _cell(lx, ly):
+            col = min(range(cols), key=lambda i: abs(xs_s[i] - round(lx / 10) * 10))
+            row = min(range(rows), key=lambda i: abs(ys_s[i] - round(ly / 10) * 10))
+            return row, col
+
+        # 3) 메인 body → cell 중심 world 좌표
         try:
-            from PIL import Image
-            Image.MAX_IMAGE_PIXELS = None  # 큰 스캔이미지 경고 억제
-            with Image.open(main_jpg) as im:
-                img_w = im.size[0]
+            main_img = _imread(main_jpg)
+            _, body_bbox_pix = extract_map_region(main_img, margin=0)
         except Exception:
             return None
-        px_per_pt = img_w / page_w_pt
+        bx, by, bw, bh = body_bbox_pix
+        body_minx = main_jgw.top_left_x + bx * main_jgw.pixel_size_x
+        body_maxx = main_jgw.top_left_x + (bx + bw) * main_jgw.pixel_size_x
+        body_maxy = main_jgw.top_left_y + by * main_jgw.pixel_size_y
+        body_miny = main_jgw.top_left_y + (by + bh) * main_jgw.pixel_size_y
+        if body_minx > body_maxx: body_minx, body_maxx = body_maxx, body_minx
+        if body_miny > body_maxy: body_miny, body_maxy = body_maxy, body_miny
+        cell_w_m = (body_maxx - body_minx) / cols
+        cell_h_m = (body_maxy - body_miny) / rows
 
-        # 각 라벨 → 보정 → world
         out = {}
+        icp_stats = {'ok': 0, 'rollback': 0, 'no_icp': 0}
         for sid, (lx, ly) in labels.items():
-            tx = lx + LABEL_OFFSET_X_PT  # 셀 좌상단(PDF pt)
-            ty = ly + LABEL_OFFSET_Y_PT
-            px0 = tx * px_per_pt
-            py0 = ty * px_per_pt
-            px1 = (tx + cell_w_pt) * px_per_pt
-            py1 = (ty + cell_h_pt) * px_per_pt
-            wx0 = main_jgw.top_left_x + px0 * main_jgw.pixel_size_x
-            wy0 = main_jgw.top_left_y + py0 * main_jgw.pixel_size_y
-            wx1 = main_jgw.top_left_x + px1 * main_jgw.pixel_size_x
-            wy1 = main_jgw.top_left_y + py1 * main_jgw.pixel_size_y
-            out[sid] = (min(wx0, wx1), min(wy0, wy1),
-                        max(wx0, wx1), max(wy0, wy1))
+            row, col = _cell(lx, ly)
+            cx = body_minx + (col + 0.5) * cell_w_m
+            cy = body_maxy - (row + 0.5) * cell_h_m
+
+            # split 메타 축척 → 정확한 pixel_size
+            split_pdf = sheets.get(sid)
+            scale = self._parse_split_scale(split_pdf) if split_pdf else None
+            if not scale:
+                # 메타 없으면 cell_size/N 로 폴백
+                out[sid] = (body_minx + col * cell_w_m,
+                            body_maxy - (row + 1) * cell_h_m,
+                            body_minx + (col + 1) * cell_w_m,
+                            body_maxy - row * cell_h_m)
+                icp_stats['no_icp'] += 1
+                continue
+            true_ps = (25.4 / self.render_dpi) * scale / 1000  # m/px
+
+            # split body 캐시 조회 (_render_pdf + extract_map_region 1회만)
+            sheet_map, body_bbox = self._split_body(split_pdf)
+            if sheet_map is None:
+                icp_stats['no_icp'] += 1
+                continue
+            sh_px, sw_px = sheet_map.shape[:2]
+            w_world = sw_px * true_ps
+            h_world = sh_px * true_ps
+            rough = (cx - w_world / 2, cy - h_world / 2,
+                     cx + w_world / 2, cy + h_world / 2)
+
+            # skeleton ICP (SHP 있을 때만)
+            gdf = self._shp()
+            if gdf is None:
+                out[sid] = rough
+                icp_stats['no_icp'] += 1
+                continue
+            skel = self._extract_orange_skeleton(sheet_map)
+            if skel is None or len(skel) < 100:
+                out[sid] = rough
+                icp_stats['no_icp'] += 1
+                continue
+            shp_pts = self._sample_nearby_shp_boundary(rough)
+            if shp_pts is None or len(shp_pts) < 100:
+                out[sid] = rough
+                icp_stats['no_icp'] += 1
+                continue
+            from scipy.spatial import cKDTree
+            shp_tree = cKDTree(shp_pts)
+            dx, dy, cost = self._icp_translation(skel, rough, true_ps, shp_tree)
+            if cost is None:
+                out[sid] = rough
+                icp_stats['rollback'] += 1
+                continue
+            out[sid] = (rough[0] + dx, rough[1] + dy,
+                        rough[2] + dx, rough[3] + dy)
+            icp_stats['ok'] += 1
 
         self._label_bboxes[admin_code] = out
+        if icp_stats != {'ok': 0, 'rollback': 0, 'no_icp': 0}:
+            self._label_bboxes[f'_stats_{admin_code}'] = icp_stats
         return out
 
     def compute_sheet_world_bbox(self, admin_code, sheet_id):
@@ -837,18 +1049,21 @@ class SheetCache:
         if cached:
             return cached
 
-        # === 1순위: PDF 라벨 ===
+        # === 1순위: 분할도 메타 축척 + skeleton ICP 정합 ===
         try:
-            label_bboxes = self._bbox_from_pdf_labels(admin_code)
+            label_bboxes = self._bbox_from_body_grid(admin_code)
         except Exception as e:
-            print(f'  [PDF 라벨 추출 오류→SIFT 폴백] {admin_code}: {e}')
+            print(f'  [메타+ICP 오류→SIFT 폴백] {admin_code}: {e}')
             label_bboxes = None
         if label_bboxes and sheet_id in label_bboxes:
             bbox = label_bboxes[sheet_id]
             self._sheet_world_bbox.setdefault(admin_code, {})[sheet_id] = bbox
             if admin_code not in self._label_logged:
-                print(f'  [PDF 라벨] {admin_code}: '
-                      f'{len(label_bboxes)}개 시트 bbox 추출 (SIFT 우회)')
+                stats = self._label_bboxes.get(f'_stats_{admin_code}', {})
+                s = (f'ICP={stats.get("ok",0)} rollback={stats.get("rollback",0)} '
+                     f'no-icp={stats.get("no_icp",0)}' if stats else '')
+                n = sum(1 for k in label_bboxes if not k.startswith('_'))
+                print(f'  [메타+ICP] {admin_code}: {n}개 시트 bbox 산출 {s}')
                 self._label_logged.add(admin_code)
             return bbox
 
@@ -862,7 +1077,7 @@ class SheetCache:
 
         pdf_path = self._sheet_meta[admin_code][sheet_id]
         sheet_img = self._render_pdf(pdf_path)
-        sheet_map, sheet_bbox = extract_map_region(sheet_img)
+        sheet_map, sheet_bbox = extract_map_region(sheet_img, margin=0)
 
         g_sheet = self._preprocess(sheet_map, scale=self.scale)
         sift = cv2.SIFT_create(nfeatures=10000, contrastThreshold=0.03)
@@ -932,8 +1147,10 @@ class SheetCache:
         if bbox is None:
             return None
         pdf_path = self._sheet_meta[admin_code][sheet_id]
-        sheet_img = self._render_pdf(pdf_path)
-        sheet_map, _ = extract_map_region(sheet_img)
+        # _bbox_from_body_grid 와 동일한 body crop 재사용 (margin=0 일관성)
+        sheet_map, _ = self._split_body(pdf_path)
+        if sheet_map is None:
+            return None
         sh, sw = sheet_map.shape[:2]
         minx, miny, maxx, maxy = bbox
         jpg_path = os.path.join(out_dir, f'{admin_code}_{sheet_id}.jpg')
@@ -1054,7 +1271,8 @@ def main():
     bbox_path = os.path.join(args.out_dir, 'sheet_bboxes.json')
     cache = SheetCache(args.pdf_input, args.pdf_main,
                        cache_dir=os.path.join(args.out_dir, '_sheet_cache'),
-                       bbox_cache_path=bbox_path)
+                       bbox_cache_path=bbox_path,
+                       shp_path=args.shp)
     # Stage 3 매칭 템플릿용 sheet geo 출력 경로
     cache.sheets_geo_dir = os.path.join(args.out_dir, 'sheets_geo')
     os.makedirs(cache.sheets_geo_dir, exist_ok=True)
