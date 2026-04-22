@@ -227,19 +227,16 @@ def _ocr_temp(img, psm='11', lang='eng', whitelist=''):
 
 
 def ocr_sheet_id(scan_img, candidate_sheets=None):
-    """시트번호(N-i) OCR.
+    """시트번호(N-i) OCR — 여러 variant 투표로 결정.
 
     헤더 제외 ROI(좌상단 y8~20%, x0~18%)에서 시트번호 인식.
 
-    candidate_sheets 주어지면 (예: {'7-1','7-2',...,'7-7'}) PDF 폴더가
-    알려준 N(분할수)을 활용:
-      · prefix N은 무시하고 **suffix 1..N만 인식** — 7이 '['로 OCR 오인식
-        되는 케이스 회수
-      · 숫자만 화이트리스트 → 특수문자/하이픈 노이즈 제거
-      · 여러 전처리 변형 다수결
+    candidate_sheets 주어지면 (예: {'7-1',...,'7-7'}) prefix N은 고정으로
+    보고 suffix만 투표. 단일 variant 첫 매칭을 즉시 신뢰하지 않아
+    5↔6, 3↔8 같은 인접 오독을 회수.
 
     Returns:
-        sheet_id 문자열 (예: "7-1") 또는 None
+        sheet_id 문자열 또는 None
     """
     h, w = scan_img.shape[:2]
     crop = scan_img[int(h * 0.08):int(h * 0.20), :int(w * 0.18)]
@@ -249,48 +246,66 @@ def ocr_sheet_id(scan_img, candidate_sheets=None):
     if not cmd:
         return None
 
-    # === Path 1: 기존 morphology + N-i 정규식 ===
+    # 전처리 variant 준비 (Path 1+2 공유)
     g_small = cv2.resize(g, None, fx=0.4, fy=0.4, interpolation=cv2.INTER_AREA)
-    _, bw = cv2.threshold(g_small, 100, 255, cv2.THRESH_BINARY_INV)
+    _, bw_small = cv2.threshold(g_small, 100, 255, cv2.THRESH_BINARY_INV)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
-    txt = _ocr_temp(bw, psm='11', lang='eng', whitelist='0123456789-')
-    for sid in re.findall(r'\d+-\d+', txt):
-        if not candidate_sheets or sid in candidate_sheets:
-            return sid
+    bw_small = cv2.morphologyEx(bw_small, cv2.MORPH_OPEN, kernel)
+    g_big = cv2.resize(g, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
 
-    # === Path 2: 후보 알면 — suffix만 인식 (N=prefix 무시) ===
-    if candidate_sheets:
-        prefixes = {s.split('-')[0] for s in candidate_sheets if '-' in s}
-        valid_suffixes = {int(s.split('-')[1]) for s in candidate_sheets
-                          if '-' in s and s.split('-')[1].isdigit()}
-        if not valid_suffixes:
-            return None
+    prefixes = (set() if not candidate_sheets
+                else {s.split('-')[0] for s in candidate_sheets if '-' in s})
+    valid_suffixes = (set() if not candidate_sheets
+                      else {int(s.split('-')[1]) for s in candidate_sheets
+                            if '-' in s and s.split('-')[1].isdigit()})
 
-        suffix_votes = Counter()
-        # 여러 전처리 변형
-        variants = [
-            ('raw', g),
-            ('upscale2x', cv2.resize(g, None, fx=2, fy=2,
-                                     interpolation=cv2.INTER_CUBIC)),
-        ]
-        for _, im in variants:
+    sid_votes = Counter()        # "N-i" 직접 투표 (Path 1)
+    suffix_votes = Counter()     # i만 투표 (Path 2 — prefix 오독 허용)
+
+    # Path 1: N-i 직접 — morphology 처리 + 2x 업스케일 두 variant
+    for im in (bw_small, g_big):
+        txt = _ocr_temp(im, psm='11', lang='eng', whitelist='0123456789-')
+        for sid in re.findall(r'\d+-\d+', txt):
+            if not candidate_sheets or sid in candidate_sheets:
+                sid_votes[sid] += 1
+            elif '-' in sid:
+                # prefix 오독이더라도 suffix는 참고용으로 수집
+                suf = sid.split('-')[-1]
+                if suf.isdigit() and int(suf) in valid_suffixes:
+                    suffix_votes[int(suf)] += 1
+
+    # Path 2: suffix only — raw + 2x 업스케일
+    if valid_suffixes:
+        for im in (g, g_big):
             txt = _ocr_temp(im, psm='11', lang='eng', whitelist='0123456789')
             for run in re.findall(r'\d+', txt):
-                # 단자릿: suffix 후보
-                # 다자릿: 마지막이 suffix (예: "71" → "7-1" suffix=1)
+                # 단자릿: suffix 후보 / 다자릿: 마지막 자리가 suffix
                 last = int(run[-1])
                 if last in valid_suffixes:
                     suffix_votes[last] += 1
 
+    # 결정: N-i 직접 매칭이 2표 이상 수렴하면 채택,
+    # 그렇지 않으면 suffix 투표(+prefix 고정)로 결정
+    if sid_votes:
+        best_sid, votes = sid_votes.most_common(1)[0]
+        if votes >= 2:
+            return best_sid
+        # 단일 variant만 찍었을 때는 suffix 투표와 교차검증
         if suffix_votes:
-            best = suffix_votes.most_common(1)[0][0]
-            if len(prefixes) == 1:
-                return f'{next(iter(prefixes))}-{best}'
-            # 다중 prefix(드문 케이스): suffix 매칭되는 첫 후보
-            for sid in candidate_sheets:
-                if sid.endswith(f'-{best}'):
-                    return sid
+            best_suf = suffix_votes.most_common(1)[0][0]
+            if best_sid.endswith(f'-{best_suf}'):
+                return best_sid
+            # 불일치 — suffix 투표 쪽이 variant를 더 모았으므로 그쪽 채택
+        else:
+            return best_sid
+
+    if suffix_votes and candidate_sheets:
+        best_suf = suffix_votes.most_common(1)[0][0]
+        if len(prefixes) == 1:
+            return f'{next(iter(prefixes))}-{best_suf}'
+        for sid in candidate_sheets:
+            if sid.endswith(f'-{best_suf}'):
+                return sid
 
     return None
 
@@ -328,11 +343,13 @@ def load_shp_index(shp_path):
 
 
 def _fuzzy_8digit_match(token, valid_codes):
-    """7~9자리 token을 valid_codes(8자리 set) 중 1자리 차이로 매칭.
+    """7~11자리 token을 valid_codes(8자리 set)에 매칭.
 
-    - 7자리: 어느 위치에 어떤 자리(0-9) 삽입해도 valid면 후보
+    - 7자리: 어느 위치에 어떤 자리 삽입해도 valid면 후보
     - 8자리: 정확 일치 또는 1자리 substitution이 valid면 후보
     - 9자리: 어느 1자리 빼도 valid면 후보
+    - 10~11자리: 모든 8자리 연속 substring을 valid와 교차검증
+      (OCR이 '(39010330)'을 '2539010330'처럼 앞뒤 노이즈와 병합한 케이스)
     """
     if not token.isdigit():
         return []
@@ -357,6 +374,11 @@ def _fuzzy_8digit_match(token, valid_codes):
     elif L == 9:
         for i in range(9):
             t = token[:i] + token[i + 1:]
+            if t in valid_codes:
+                cands.add(t)
+    elif L in (10, 11):
+        for i in range(L - 7):
+            t = token[i:i + 8]
             if t in valid_codes:
                 cands.add(t)
     return list(cands)
@@ -407,9 +429,9 @@ def _extract_admin_codes(text, valid_codes=None, shp_index=None):
         fuzzy_cands = set()
         for m in re.finditer(r'\(\s*([\d\s]+?)\s*\)', text):
             d = re.sub(r'\s', '', m.group(1))
-            if d.isdigit() and 7 <= len(d) <= 9:
+            if d.isdigit() and 7 <= len(d) <= 11:
                 fuzzy_cands.update(_fuzzy_8digit_match(d, shp_codes))
-        for tok in re.findall(r'\d{7,9}', text):
+        for tok in re.findall(r'\d{7,11}', text):
             fuzzy_cands.update(_fuzzy_8digit_match(tok, shp_codes))
         # 한글명 lookup
         name_cands = set(_extract_korean_admin_names(
@@ -1016,73 +1038,107 @@ def main():
     csv_path = os.path.join(args.out_dir, '_identification.csv')
     unmatched_dir = os.path.join(args.out_dir, '_unmatched')
     identified_dir = os.path.join(args.out_dir, 'identified')
-    seen_admin_sheet = {}  # (admin, sheet) → scan_path (중복 감지용)
+    # (admin, sheet) → [row_idx, ...]  — CONFLICT 시 이전 row까지 소급 수정
+    seen_admin_sheet = {}
+    rows = []  # CSV 행 in-memory 누적
+
+    def _move_to_unmatched(scan_path):
+        if args.no_unmatched:
+            return
+        os.makedirs(unmatched_dir, exist_ok=True)
+        dst = os.path.join(unmatched_dir, os.path.basename(scan_path))
+        if not os.path.exists(dst):
+            shutil.copy2(scan_path, dst)
+
+    n_ok = n_fail = n_err = 0
+    t0 = time.time()
+    for i, scan in enumerate(scans, 1):
+        ti = time.time()
+        r = identify_scan(scan, cache, valid_codes,
+                          shp_index=shp_index,
+                          fast_ocr=not args.thorough)
+        dt = time.time() - ti
+        renamed = ''
+        if r['status'] == 'OK':
+            key = (r['admin_code'], r['sheet_id'])
+            if key in seen_admin_sheet:
+                # 중복 감지 — OCR이 다른 sheet를 같은 값으로 오인식한 경우.
+                # 어느 게 정답인지 모르므로 **양쪽 모두** CONFLICT로 격리,
+                # 사용자가 2a 탭에서 각각 재지정.
+                prev_idxs = seen_admin_sheet[key]
+                msg = (f'중복 sheet_id: ({r["admin_code"]}_{r["sheet_id"]}) '
+                       f'다수 스캔이 같은 값으로 식별됨 — OCR 오인식 가능. '
+                       f'2a 탭에서 각각 재지정 필요')
+                print(f'  ⚠ {msg}')
+                # 이전 row(들) 소급 변경: OK→CONFLICT + identified/ 제거 + unmatched 복사
+                for pidx in prev_idxs:
+                    prow = rows[pidx]
+                    if prow['status'] == 'OK':
+                        prow['status'] = 'CONFLICT'
+                        prow['message'] = msg
+                        if prow['renamed_path'] and os.path.exists(prow['renamed_path']):
+                            try:
+                                os.remove(prow['renamed_path'])
+                            except OSError:
+                                pass
+                        prow['renamed_path'] = ''
+                        _move_to_unmatched(prow['scan_path'])
+                        n_ok -= 1
+                        n_fail += 1
+                # 현재 row도 CONFLICT로 기록
+                r['status'] = 'CONFLICT'
+                r['message'] = msg
+                n_fail += 1
+                _move_to_unmatched(scan)
+                seen_admin_sheet[key].append(len(rows))
+            else:
+                n_ok += 1
+                seen_admin_sheet[key] = [len(rows)]
+                if not args.no_rename:
+                    code = r['admin_code']
+                    sub_dir = os.path.join(
+                        identified_dir, code[:2], code[:5])
+                    os.makedirs(sub_dir, exist_ok=True)
+                    ext = os.path.splitext(scan)[1]
+                    renamed = os.path.join(
+                        sub_dir, f"{code}_{r['sheet_id']}{ext}")
+                    if os.path.exists(renamed):
+                        base = os.path.splitext(renamed)[0]
+                        k = 2
+                        while os.path.exists(f'{base}_{k}{ext}'):
+                            k += 1
+                        renamed = f'{base}_{k}{ext}'
+                    shutil.copy2(scan, renamed)
+        elif r['status'] == 'FAIL':
+            n_fail += 1
+            _move_to_unmatched(scan)
+        else:
+            n_err += 1
+
+        rows.append({
+            'scan_path': scan,
+            'status': r['status'],
+            'admin_code': r.get('admin_code') or '',
+            'sheet_id': r.get('sheet_id') or '',
+            'confidence': f"{r.get('confidence', 0):.3f}",
+            'method': r['method'],
+            'message': r['message'],
+            'renamed_path': renamed,
+            'elapsed_s': f'{dt:.2f}',
+        })
+        if i % 5 == 0 or i == len(scans):
+            print(f'  [{i}/{len(scans)}] OK={n_ok} FAIL={n_fail} '
+                  f'ERR={n_err} ({(time.time()-t0)/i:.1f}s/장)')
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(['scan_path', 'status', 'admin_code', 'sheet_id',
                     'confidence', 'method', 'message',
                     'renamed_path', 'elapsed_s'])
-        n_ok = n_fail = n_err = 0
-        t0 = time.time()
-        for i, scan in enumerate(scans, 1):
-            ti = time.time()
-            r = identify_scan(scan, cache, valid_codes,
-                              shp_index=shp_index,
-                              fast_ocr=not args.thorough)
-            dt = time.time() - ti
-            renamed = ''
-            if r['status'] == 'OK':
-                # 중복 감지 — OCR이 다른 sheet를 같은 값으로 오인식한 경우.
-                # 자동 해결 불가 (어느 게 정답인지 모름) → CONFLICT로 격리,
-                # 사용자가 2a 탭에서 각각 재지정.
-                key = (r['admin_code'], r['sheet_id'])
-                if key in seen_admin_sheet:
-                    prev = seen_admin_sheet[key]
-                    r['status'] = 'CONFLICT'
-                    r['message'] = (f'중복 sheet_id: "{prev}"과 같은 '
-                                    f'({r["admin_code"]}_{r["sheet_id"]}) '
-                                    f'— OCR 오인식 가능. 2a 탭에서 재지정 필요')
-                    print(f'  ⚠ {r["message"]}')
-                    n_fail += 1
-                    # _unmatched/로 격리 (identified/에는 복사 안 함)
-                    if not args.no_unmatched:
-                        os.makedirs(unmatched_dir, exist_ok=True)
-                        shutil.copy2(scan, os.path.join(
-                            unmatched_dir, os.path.basename(scan)))
-                else:
-                    n_ok += 1
-                    seen_admin_sheet[key] = os.path.basename(scan)
-                    if not args.no_rename:
-                        code = r['admin_code']
-                        sub_dir = os.path.join(
-                            identified_dir, code[:2], code[:5])
-                        os.makedirs(sub_dir, exist_ok=True)
-                        ext = os.path.splitext(scan)[1]
-                        renamed = os.path.join(
-                            sub_dir, f"{code}_{r['sheet_id']}{ext}")
-                        if os.path.exists(renamed):
-                            base = os.path.splitext(renamed)[0]
-                            k = 2
-                            while os.path.exists(f'{base}_{k}{ext}'):
-                                k += 1
-                            renamed = f'{base}_{k}{ext}'
-                        shutil.copy2(scan, renamed)
-            elif r['status'] == 'FAIL':
-                n_fail += 1
-                if not args.no_unmatched:
-                    os.makedirs(unmatched_dir, exist_ok=True)
-                    shutil.copy2(scan, os.path.join(
-                        unmatched_dir, os.path.basename(scan)))
-            else:
-                n_err += 1
-            w.writerow([scan, r['status'], r.get('admin_code') or '',
-                        r.get('sheet_id') or '',
-                        f"{r.get('confidence', 0):.3f}",
-                        r['method'], r['message'], renamed, f'{dt:.2f}'])
-            if i % 5 == 0 or i == len(scans):
-                print(f'  [{i}/{len(scans)}] OK={n_ok} FAIL={n_fail} '
-                      f'ERR={n_err} ({(time.time()-t0)/i:.1f}s/장)')
+        for row in rows:
+            w.writerow([row['scan_path'], row['status'], row['admin_code'],
+                        row['sheet_id'], row['confidence'], row['method'],
+                        row['message'], row['renamed_path'], row['elapsed_s']])
 
     # sheet_bboxes.json 저장
     bbox_path = os.path.join(args.out_dir, 'sheet_bboxes.json')
