@@ -795,18 +795,26 @@ class SheetCache:
         self._scale_cache[pdf_path] = scale
         return scale
 
-    def _extract_orange_skeleton(self, img_bgr):
+    def _extract_orange_skeleton(self, img_bgr, downscale=2):
         """이미지에서 주황 중심선 skeleton (짧은 컴포넌트 제거).
 
+        속도 최적화: downscale=2 로 1/2 축소 후 skeletonize (픽셀 4배↓).
+        반환 좌표는 원본 스케일로 환산.
+
         Returns:
-            (N, 2) pixel coords (x, y) 또는 None
+            (N, 2) pixel coords (x, y, 원본 스케일) 또는 None
         """
         try:
             from skimage.morphology import skeletonize
             from skimage.measure import label as sklabel, regionprops
         except ImportError:
             return None
-        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        if downscale > 1:
+            img_small = cv2.resize(img_bgr, None, fx=1.0/downscale,
+                                   fy=1.0/downscale, interpolation=cv2.INTER_AREA)
+        else:
+            img_small = img_bgr
+        hsv = cv2.cvtColor(img_small, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, (5, 100, 100), (25, 255, 255))
         if mask.sum() == 0:
             return None
@@ -815,13 +823,18 @@ class SheetCache:
         skel = skeletonize(mask_c > 0)
         lbl = sklabel(skel, connectivity=2)
         keep = np.zeros_like(skel, dtype=bool)
+        # downscale 적용 시 컴포넌트 길이도 1/downscale
+        min_comp = max(20, ICP_MIN_COMPONENT_PX // downscale)
         for p in regionprops(lbl):
-            if p.area >= ICP_MIN_COMPONENT_PX:
+            if p.area >= min_comp:
                 keep[lbl == p.label] = True
         if not keep.any():
             return None
         ys, xs = np.where(keep)
-        return np.column_stack([xs, ys]).astype(np.float64)
+        coords = np.column_stack([xs, ys]).astype(np.float64)
+        if downscale > 1:
+            coords *= downscale   # 원본 이미지 좌표로 환산
+        return coords
 
     def _sample_nearby_shp_boundary(self, sheet_bbox, buffer=ICP_SHP_BUFFER_M):
         """sheet bbox 주변 admin 경계 점 샘플 (~1m 간격). spatial index 활용."""
@@ -854,7 +867,8 @@ class SheetCache:
                 if not hasattr(s, 'exterior'):
                     continue
                 ls = LineString(list(s.exterior.coords))
-                n = max(50, int(ls.length))
+                # 샘플 간격 ~3m (ICP 수렴엔 충분)
+                n = max(50, int(ls.length / 3))
                 for i in range(n + 1):
                     p2 = ls.interpolate(i / n, normalized=True)
                     pts.append((p2.x, p2.y))
