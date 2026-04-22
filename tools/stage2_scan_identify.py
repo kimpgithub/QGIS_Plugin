@@ -1307,12 +1307,17 @@ def main():
     # === Pass 0: split PDF SIFT 일괄 선처리 (Pass 1 cold-cache 분산 방지) ===
     all_sheets = [(a, s) for a in cache.admins_with_sheets()
                   for s, _ in cache.get_sheets(a)]
-    print(f'[Pass 0] split PDF SIFT 캐시 준비 ({len(all_sheets)}개)...')
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    n_workers = min(8, (os.cpu_count() or 4))
+    print(f'[Pass 0] split PDF SIFT 캐시 준비 ({len(all_sheets)}개, {n_workers} threads)...')
     t_pre = time.time()
-    for k, (a, s) in enumerate(all_sheets, 1):
-        cache.get_sheet_sift(a, s)
-        if k % 10 == 0 or k == len(all_sheets):
-            print(f'  [{k}/{len(all_sheets)}] ({(time.time()-t_pre)/k:.1f}s/장)')
+    done = 0
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futs = [ex.submit(cache.get_sheet_sift, a, s) for a, s in all_sheets]
+        for _ in as_completed(futs):
+            done += 1
+            if done % 10 == 0 or done == len(all_sheets):
+                print(f'  [{done}/{len(all_sheets)}] ({(time.time()-t_pre)/done:.1f}s/장 평균)')
     print(f'  완료: {time.time()-t_pre:.1f}s')
 
     # === Pass 1: OCR admin + Visual sheet match (admin별 score matrix 수집) ===
