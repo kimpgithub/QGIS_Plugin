@@ -20,6 +20,7 @@ CLI:
 import argparse
 import csv
 import glob
+import json
 import os
 import re
 import sys
@@ -35,12 +36,14 @@ try:
     from ._legacy.common import (
         write_jgw, JGWParams, PRJ_5179,
         LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
+        extract_map_region,
     )
 except ImportError:
     from gis_scan_tools.tools._legacy.shp_georeferencer import SHPGeoreferencer
     from gis_scan_tools.tools._legacy.common import (
         write_jgw, JGWParams, PRJ_5179,
         LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
+        extract_map_region,
     )
 
 
@@ -286,6 +289,23 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
         pixel_size_y=-ps, top_left_x=tl_x, top_left_y=tl_y))
     with open(out_prj, 'w') as f:
         f.write(PRJ_5179)
+
+    # 9. body bbox 사이드카 (Stage 2가 TIF 재읽기 없이 활용)
+    #    pixmap은 이미 메모리에 있으므로 추가 비용 ≈ 0
+    try:
+        _, body_bbox_pix = extract_map_region(pdf['pixmap'], margin=0)
+        bx, by, bw, bh = body_bbox_pix
+        bminx = tl_x + bx * ps
+        bmaxx = tl_x + (bx + bw) * ps
+        bmaxy = tl_y - by * ps            # pixel_size_y = -ps
+        bminy = tl_y - (by + bh) * ps
+        if bminx > bmaxx: bminx, bmaxx = bmaxx, bminx
+        if bminy > bmaxy: bminy, bmaxy = bmaxy, bminy
+        out_body = os.path.join(out_dir, f'{base}.body.json')
+        with open(out_body, 'w') as f:
+            json.dump({'body_world_bbox': [bminx, bminy, bmaxx, bmaxy]}, f)
+    except Exception:
+        pass   # 폴백: Stage 2가 TIF 읽어 재계산
 
     return {
         'admin_code': code,
