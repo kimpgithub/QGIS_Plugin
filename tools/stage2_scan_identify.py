@@ -2,10 +2,11 @@
 
 각 스캔의 (admin_code, sheet_id)를 자동 식별.
 
-Tier A: 헤더 OCR로 admin_code 추출
-Tier B: pHash + SIFT로 admin_code 식별 (Tier A 실패 시)
-시트 식별: 그 admin의 분할 PDF들과 빠른 SIFT 매칭 → best inlier sheet 선택
-   동시에 분할 PDF ↔ 메인 PDF 아핀 매칭으로 sheet world bbox 계산 (캐시)
+admin_code : 헤더 OCR (한글명 + 8자리 fuzzy) — 기존 로직
+sheet_id   : 좌상단 큰 'N-i' 라벨 OCR — 다운스케일 + threshold fallback chain
+             admin의 valid 시트 집합(분할 PDF 파일명 인덱스)으로 결과 필터
+sheet bbox : 메인 PDF 'N-i' 라벨 좌표 + skeleton ICP (SHP 경계 정합)
+             SIFT 폴백(분할↔메인) 보존
 
 CLI:
   python -m gis_scan_tools.tools.stage2_scan_identify \\
@@ -230,9 +231,15 @@ def _ocr_temp(img, psm='11', lang='eng', whitelist=''):
 
 
 HEADER_OCR_TARGET_W = 1080  # 0.25x for 4320-px header — Tesseract 훈련 분포 정합
-SCAN_SIFT_TARGET_W = 1600   # scan SIFT 추출 전 다운스케일 폭 — SIFT 비용 핵심 파라미터
-VISUAL_INLIER_MIN = 30      # 정답 확신 최소 inlier — 이하면 FAIL/unmatched
-VISUAL_EARLY_EXIT = 800     # 이 이상 inlier면 남은 후보 스킵 (확실한 정답)
+
+# sheet_id OCR 설정 — 스캔 좌상단 'N-i' 대형 라벨 추출
+SHEET_OCR_CROP_H = 0.22       # 스캔 상단 비율
+SHEET_OCR_CROP_W = 0.30       # 스캔 좌측 비율
+SHEET_OCR_MIN_HEIGHT_PX = 180 # 원본 스케일 기준 최소 문자 높이 — 지도 안 작은 숫자 제외
+# (scale, threshold) 폴백 체인 — 50장 sweep 상위 5 config (s0.35/thr80이 96% 단독 커버)
+SHEET_OCR_CONFIGS = [(0.35, 80), (0.25, 130), (0.70, 80), (0.50, 80), (0.35, 100)]
+# OCR 문자 오인식 보정 — 7은 /, [, ], T 로 자주 읽힘 / 1은 | 로
+SHEET_OCR_CHAR_FIX = {'/': '7', '[': '7', ']': '7', 'T': '7', '|': '1'}
 
 
 def _downscale_to_width(img, target_w):
@@ -243,80 +250,96 @@ def _downscale_to_width(img, target_w):
     return cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
 
 
-_SIFT_SCAN = None
-_FLANN = None
+def _tesseract_tsv(img, psm='11', whitelist='', lang='eng'):
+    """tesseract TSV 출력 → (text, left, top, width, height) 리스트.
+
+    whitelist 지정 시 tessedit_char_whitelist 로 문자 제한.
+    """
+    cmd, _ = check_tesseract()
+    if not cmd:
+        return []
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    tmp.close()
+    try:
+        _imwrite(tmp.name, img)
+        args = [cmd, tmp.name, '-', '-l', lang, '--psm', psm]
+        if whitelist:
+            args += ['-c', f'tessedit_char_whitelist={whitelist}']
+        args.append('tsv')
+        r = subprocess.run(args, capture_output=True, text=True,
+                           timeout=20, **_SUBPROCESS_KW)
+        out = []
+        for ln in r.stdout.strip().split('\n')[1:]:
+            parts = ln.split('\t')
+            if len(parts) < 12:
+                continue
+            text = parts[11].strip()
+            if not text:
+                continue
+            try:
+                left, top, width, height = (int(parts[6]), int(parts[7]),
+                                             int(parts[8]), int(parts[9]))
+            except ValueError:
+                continue
+            out.append((text, left, top, width, height))
+        return out
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
 
 
-def _get_sift_scan():
-    """식별용 SIFT — feature 수를 5000으로 제한 (매칭 비용 5배 절감).
-    식별은 '같은 sheet인지 아닌지'만 판정하면 되므로 5K면 충분.
-    (Stage 3 정합용은 30K로 별도 유지.)"""
-    global _SIFT_SCAN
-    if _SIFT_SCAN is None:
-        _SIFT_SCAN = cv2.SIFT_create(nfeatures=5000, contrastThreshold=0.04)
-    return _SIFT_SCAN
+_SHEET_TOKEN_RE = re.compile(r'^([0-9/\[\]T|]{1,2})-(\d{1,2})$')
 
 
-def _get_flann():
-    # trees 4, checks 32 — 식별 정확도에 충분, 기본값보다 빠름
-    global _FLANN
-    if _FLANN is None:
-        _FLANN = cv2.FlannBasedMatcher(
-            {'algorithm': 1, 'trees': 4}, {'checks': 32})
-    return _FLANN
+def ocr_sheet_id(scan_img, valid_sheets=None):
+    """좌상단 큰 'N-i' 라벨 OCR.
 
-
-def _scan_sift(scan_img):
-    """스캔 이미지 SIFT 피처 추출 (다운스케일 + CLAHE)."""
-    g = cv2.cvtColor(scan_img, cv2.COLOR_BGR2GRAY) if scan_img.ndim == 3 \
-        else scan_img
-    h, w = g.shape
-    if w > SCAN_SIFT_TARGET_W:
-        s = SCAN_SIFT_TARGET_W / w
-        g = cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(16, 16))
-    g = clahe.apply(g)
-    return _get_sift_scan().detectAndCompute(g, None)
-
-
-def _match_inliers(des_s, kp_s, des_t, kp_t):
-    """FLANN knn + Lowe ratio + RANSAC → inlier 수."""
-    if (des_s is None or des_t is None
-            or len(des_s) < 20 or len(des_t) < 20):
-        return 0
-    pairs = _get_flann().knnMatch(des_s, des_t, k=2)
-    good = [m for m, n in pairs if len(pairs[0]) == 2
-            and m.distance < 0.75 * n.distance]
-    if len(good) < 10:
-        return 0
-    src = np.float32([kp_s[m.queryIdx].pt for m in good])
-    dst = np.float32([kp_t[m.trainIdx].pt for m in good])
-    _, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
-    if mask is None:
-        return 0
-    return int(mask.sum())
-
-
-def visual_sheet_match(scan_kp, scan_des, admin_code, sheet_cache):
-    """스캔 SIFT와 해당 admin의 모든 split PDF SIFT 매칭 → inlier dict.
+    - 스캔 좌상단 22% × 30% 크롭 → 다운스케일 + threshold + PSM 11 TSV
+    - height ≥ SHEET_OCR_MIN_HEIGHT_PX (원본 스케일) 토큰만
+    - 정규식 매치 후 문자 오인식 보정 ('/','[',']','T'→'7', '|'→'1')
+    - valid_sheets 지정 시 집합 필터 (admin의 분할 PDF 파일명에서 구성)
 
     Returns:
-        {sheet_id: inlier_count} — Hungarian 할당용 원시 점수
-        (조기 종료 시 미평가 sheet는 누락됨)
+        sheet_id ('N-i') or None
     """
-    scores = {}
-    sheets = sheet_cache.get_sheets(admin_code)
-    # 큰 sheet부터 평가(더 구별력 높음) — 정렬 불가능하니 그대로 진행
-    for sid, _ in sheets:
-        sheet_data = sheet_cache.get_sheet_sift(admin_code, sid)
-        if sheet_data is None:
-            scores[sid] = 0
-            continue
-        kp_t, des_t = sheet_data
-        scores[sid] = _match_inliers(scan_des, scan_kp, des_t, kp_t)
-        if scores[sid] >= VISUAL_EARLY_EXIT:
-            break  # 남은 sheet는 여기보다 낮을 거라 가정 (정답 확정)
-    return scores
+    if scan_img is None:
+        return None
+    h, w = scan_img.shape[:2]
+    crop = scan_img[:int(h * SHEET_OCR_CROP_H), :int(w * SHEET_OCR_CROP_W)]
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+
+    for sc, thr in SHEET_OCR_CONFIGS:
+        gs = (cv2.resize(g, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+              if sc != 1.0 else g)
+        _, bw = cv2.threshold(gs, thr, 255, cv2.THRESH_BINARY)
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
+        tokens = _tesseract_tsv(bw, psm='11',
+                                whitelist='0123456789-/[]|T')
+        best = None
+        best_h = 0
+        for text, _l, _t, _wd, ht in tokens:
+            ht_orig = int(ht / sc) if sc != 0 else ht
+            if ht_orig < SHEET_OCR_MIN_HEIGHT_PX:
+                continue
+            m = _SHEET_TOKEN_RE.match(text)
+            if not m:
+                continue
+            prefix = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in m.group(1))
+            sid = f'{prefix}-{m.group(2)}'
+            if valid_sheets and sid not in valid_sheets:
+                continue
+            if ht_orig > best_h:
+                best = sid
+                best_h = ht_orig
+        if best:
+            return best
+    return None
 
 
 def load_shp_index(shp_path):
@@ -553,7 +576,6 @@ class SheetCache:
         self._sheet_meta = {}      # admin_code → {sheet_id: pdf_path}
         self._main_pdfs = {}       # admin_code → main pdf path (PDF 라벨 추출용)
         self._main_sift = {}       # admin_code → (g_main_map, kp, des, main_bbox, main_jgw)
-        self._sheet_sift = {}      # (admin, sheet) → (kp, des)  scan 매칭용
         self._sheet_world_bbox = {}
         self._label_bboxes = {}    # admin_code → {sheet_id: bbox} 계산 캐시
         self._label_logged = set() # 로그 1회/admin
@@ -597,6 +619,10 @@ class SheetCache:
 
     def get_sheets(self, admin_code):
         return list(self._sheet_meta.get(admin_code, {}).items())
+
+    def get_valid_sheet_ids(self, admin_code):
+        """분할 PDF 파일명에서 뽑은 유효 sheet_id 집합 — OCR 필터용."""
+        return set(self._sheet_meta.get(admin_code, {}).keys())
 
     def _render_pdf(self, pdf_path, dpi=300):
         cache_jpg = os.path.join(self.cache_dir,
@@ -664,50 +690,6 @@ class SheetCache:
         except Exception:
             pass
         return self._main_sift[admin_code]
-
-    def get_sheet_sift(self, admin_code, sheet_id):
-        """분할 PDF의 지도영역 SIFT — scan ↔ sheet 매칭용.
-
-        식별 단계(Stage 2)에서 스캔의 sheet_id를 OCR 대신 SIFT로 결정하기 위해
-        사용. 메인 정합용 SIFT(get_main_sift_for_sheet_align)와 별개 캐시.
-        디스크 pickle 캐시 → 재실행 가속.
-        """
-        import pickle
-        key = (admin_code, sheet_id)
-        if key in self._sheet_sift:
-            return self._sheet_sift[key]
-        meta = self._sheet_meta.get(admin_code, {})
-        pdf_path = meta.get(sheet_id)
-        if pdf_path is None:
-            return None
-        cache_pkl = os.path.join(
-            self.cache_dir, f'sheet_sift_{admin_code}_{sheet_id}.pkl')
-        if os.path.exists(cache_pkl):
-            try:
-                with open(cache_pkl, 'rb') as f:
-                    data = pickle.load(f)
-                kp = [cv2.KeyPoint(x=p[0], y=p[1], size=p[2], angle=p[3])
-                      for p in data['kp']]
-                self._sheet_sift[key] = (kp, data['des'])
-                return self._sheet_sift[key]
-            except Exception:
-                pass
-        # 300dpi 캐시 공유 (Stage 3 export와) + 메모리에서 scale=0.5 다운 → SIFT
-        sheet_img = self._render_pdf(pdf_path)
-        sheet_map, _ = extract_map_region(sheet_img)
-        g = self._preprocess(sheet_map, scale=0.5)
-        sift = cv2.SIFT_create(nfeatures=5000, contrastThreshold=0.04)
-        kp, des = sift.detectAndCompute(g, None)
-        self._sheet_sift[key] = (kp, des)
-        try:
-            with open(cache_pkl, 'wb') as f:
-                pickle.dump({
-                    'kp': [(k.pt[0], k.pt[1], k.size, k.angle) for k in kp],
-                    'des': des,
-                }, f)
-        except Exception:
-            pass
-        return self._sheet_sift[key]
 
     def _bbox_from_grid(self, admin_code, sheet_id):
         """SIFT 실패 폴백: sheet_id 'N-i' 패턴으로 그리드 위치 추정.
@@ -1199,12 +1181,11 @@ class SheetCache:
 # ============================================================
 
 def identify_scan(scan_jpg, sheet_cache, valid_codes, shp_index=None):
-    """하이브리드 식별:
-      - admin: OCR (헤더 0.25x 다운스케일 + SHP fuzzy/한글명 + valid_codes 2-sub)
-      - sheet: Visual SIFT (스캔 ↔ admin 내 split PDF, Hungarian은 main_loop에서)
+    """OCR 기반 식별:
+      - admin_code: 헤더 OCR (SHP fuzzy/한글명 + valid_codes 2-sub 회수)
+      - sheet_id  : 좌상단 대형 'N-i' 라벨 OCR (valid_sheets 필터)
 
-    반환 dict에 'sheet_scores' 포함 — admin별 Hungarian 할당에 재사용.
-    sheet_id는 여기서 argmax로 잠정 결정, 최종은 main_loop이 확정.
+    SIFT 없음 → split PDF SIFT 캐시 불필요. scan당 OCR 2회로 확정.
     """
     img = _imread(scan_jpg)
     if img is None:
@@ -1226,35 +1207,24 @@ def identify_scan(scan_jpg, sheet_cache, valid_codes, shp_index=None):
             msg = (f'OCR은 동작하나 8자리 행정코드 미검출. '
                    f'헤더 raw text(일부): {raw[:150].strip()!r}')
         return {'status': 'FAIL', 'admin_code': None, 'sheet_id': None,
-                'method': 'OCR_FAIL', 'message': msg}
+                'method': 'OCR_ADMIN_FAIL', 'message': msg}
 
-    # scan SIFT
-    kp_s, des_s = _scan_sift(img)
-    if des_s is None or len(des_s) < 100:
+    # sheet_id OCR — admin의 valid 시트 집합으로 필터
+    valid_sheets = sheet_cache.get_valid_sheet_ids(code)
+    if not valid_sheets:
         return {'status': 'FAIL', 'admin_code': code, 'sheet_id': None,
-                'method': 'VISUAL', 'confidence': conf,
-                'message': f'스캔 SIFT 피처 부족 ({0 if des_s is None else len(des_s)})'}
+                'method': 'OCR_SHEET', 'confidence': conf,
+                'message': f'admin {code}의 분할 PDF 없음'}
 
-    # visual sheet match
-    scores = visual_sheet_match(kp_s, des_s, code, sheet_cache)
-    if not scores:
+    sheet = ocr_sheet_id(img, valid_sheets=valid_sheets)
+    if sheet is None:
         return {'status': 'FAIL', 'admin_code': code, 'sheet_id': None,
-                'method': 'VISUAL', 'confidence': conf,
-                'message': f'admin {code}의 split PDF 없음 or 매칭 전부 실패'}
+                'method': 'OCR_SHEET', 'confidence': conf,
+                'message': (f'sheet 라벨 OCR 실패 '
+                            f'(valid={sorted(valid_sheets)})')}
 
-    best_sid = max(scores, key=scores.get)
-    best_inl = scores[best_sid]
-    if best_inl < VISUAL_INLIER_MIN:
-        return {'status': 'FAIL', 'admin_code': code, 'sheet_id': None,
-                'method': 'VISUAL', 'confidence': conf,
-                'sheet_scores': scores,
-                'message': f'visual inlier 부족 (best={best_inl})'}
-
-    # sheet_id는 잠정. 최종 확정은 main_loop의 admin별 Hungarian이 담당.
-    # bbox/sheets_geo 출력도 Hungarian 이후에 수행.
-    return {'status': 'OK', 'admin_code': code, 'sheet_id': best_sid,
-            'method': 'VISUAL', 'confidence': best_inl,
-            'sheet_scores': scores, 'message': ''}
+    return {'status': 'OK', 'admin_code': code, 'sheet_id': sheet,
+            'method': 'OCR', 'confidence': conf, 'message': ''}
 
 
 # ============================================================
@@ -1316,25 +1286,9 @@ def main():
     csv_path = os.path.join(args.out_dir, '_identification.csv')
     unmatched_dir = os.path.join(args.out_dir, '_unmatched')
     identified_dir = os.path.join(args.out_dir, 'identified')
-    rows = []  # in-memory 누적 (CSV/파일작업은 Hungarian 이후 일괄)
+    rows = []
 
-    # === Pass 0: split PDF SIFT 일괄 선처리 (Pass 1 cold-cache 분산 방지) ===
-    all_sheets = [(a, s) for a in cache.admins_with_sheets()
-                  for s, _ in cache.get_sheets(a)]
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    n_workers = min(8, (os.cpu_count() or 4))
-    print(f'[Pass 0] split PDF SIFT 캐시 준비 ({len(all_sheets)}개, {n_workers} threads)...')
-    t_pre = time.time()
-    done = 0
-    with ThreadPoolExecutor(max_workers=n_workers) as ex:
-        futs = [ex.submit(cache.get_sheet_sift, a, s) for a, s in all_sheets]
-        for _ in as_completed(futs):
-            done += 1
-            if done % 10 == 0 or done == len(all_sheets):
-                print(f'  [{done}/{len(all_sheets)}] ({(time.time()-t_pre)/done:.1f}s/장 평균)')
-    print(f'  완료: {time.time()-t_pre:.1f}s')
-
-    # === Pass 1: OCR admin + Visual sheet match (admin별 score matrix 수집) ===
+    # === Pass 1: OCR 식별 (admin_code + sheet_id 모두 OCR) ===
     t0 = time.time()
     for i, scan in enumerate(scans, 1):
         ti = time.time()
@@ -1346,7 +1300,6 @@ def main():
             'admin_code': r.get('admin_code') or '',
             'sheet_id': r.get('sheet_id') or '',
             'confidence': r.get('confidence', 0),
-            'sheet_scores': r.get('sheet_scores'),
             'method': r['method'],
             'message': r['message'],
             'renamed_path': '',
@@ -1356,44 +1309,10 @@ def main():
             ok_c = sum(1 for x in rows if x['status'] == 'OK')
             fail_c = sum(1 for x in rows if x['status'] == 'FAIL')
             err_c = sum(1 for x in rows if x['status'] == 'ERROR')
-            print(f'  [1-pass {i}/{len(scans)}] OK={ok_c} FAIL={fail_c} '
+            print(f'  [{i}/{len(scans)}] OK={ok_c} FAIL={fail_c} '
                   f'ERR={err_c} ({(time.time()-t0)/i:.1f}s/장)')
 
-    # === Pass 2: admin별 Hungarian — 중복 수렴 제거, 전역 최적 1:1 할당 ===
-    from scipy.optimize import linear_sum_assignment
-    from collections import defaultdict
-    admin_groups = defaultdict(list)  # admin → [(row_idx, scores dict)]
-    for idx, row in enumerate(rows):
-        if row['status'] == 'OK' and row['sheet_scores']:
-            admin_groups[row['admin_code']].append((idx, row['sheet_scores']))
-
-    for admin, group in admin_groups.items():
-        if len(group) < 2:
-            continue  # 1장이면 argmax 결과 그대로 OK
-        sheets = sorted({s for _, d in group for s in d})
-        M = np.array([[g_scores.get(s, 0) for s in sheets]
-                      for _, g_scores in group], dtype=float)
-        row_ind, col_ind = linear_sum_assignment(-M)
-        for ri, cj in zip(row_ind, col_ind):
-            row_idx = group[ri][0]
-            assigned_sheet = sheets[cj]
-            inl = int(M[ri, cj])
-            prev_sheet = rows[row_idx]['sheet_id']
-            if inl < VISUAL_INLIER_MIN:
-                rows[row_idx]['status'] = 'FAIL'
-                rows[row_idx]['sheet_id'] = ''
-                rows[row_idx]['message'] = (
-                    f'Hungarian 할당 inlier 부족 ({inl}) — 다른 스캔이 이 sheet 선점')
-                rows[row_idx]['confidence'] = inl
-            else:
-                if assigned_sheet != prev_sheet:
-                    rows[row_idx]['message'] = (
-                        f'Hungarian 재배정: {prev_sheet}→{assigned_sheet} '
-                        f'(inlier {int(rows[row_idx]["confidence"])}→{inl})')
-                rows[row_idx]['sheet_id'] = assigned_sheet
-                rows[row_idx]['confidence'] = inl
-
-    # === Pass 3: 파일 작업 (identified/ 복사, _unmatched/ 복사, bbox, sheets_geo) ===
+    # === Pass 2: 파일 작업 (identified/ 복사, _unmatched/ 복사, bbox, sheets_geo) ===
     def _move_to_unmatched(scan_path):
         if args.no_unmatched:
             return
