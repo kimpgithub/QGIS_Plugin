@@ -387,35 +387,48 @@ def extract_map_region_scan(image: np.ndarray,
                 merged.append(int(c))
         return merged
 
-    row_lines = _line_centers(row_pct, row_thr)
     col_lines = _line_centers(col_pct, col_thr)
-    # 헤더조차 검출 실패 → row_thr 동적 완화 재시도 (헤더 라인이 매우 약한 시트)
-    if not row_lines:
-        relaxed = max(0.10, float(np.percentile(row_pct, 99)) * 0.9)
-        row_lines = _line_centers(row_pct, relaxed)
-        if not row_lines:
-            raise ValueError(
-                f'프레임 라인 미검출 (rows=0, cols={len(col_lines)})')
 
-    # 헤더/지도 분리선 = 위쪽 header_zone 안의 가장 아래 라인
-    top_zone = [r for r in row_lines if r < h * header_zone]
-    map_top = max(top_zone) if top_zone else row_lines[0]
-    # 하단 외곽 = 아래쪽 (1 - header_zone) 너머의 가장 위 라인
-    bot_zone = [r for r in row_lines if r > h * (1 - header_zone)]
-    if bot_zone:
-        map_bot = min(bot_zone)
+    # 헤더 / 본문 하단을 *각자 zone 에서 독립* 으로 검출.
+    # 전체 row_thr → 폴백 식으로 가면 본문 안 noise 가 row_lines 에 끼어들어
+    # zone 선택을 망가뜨림. zone 별 dedicated 검출이 robust.
+
+    def _detect_in_zone(zone_pct, primary_thr):
+        """zone 안에서 라인 검출. primary 실패 시 noise floor 대비 완화."""
+        lines = _line_centers(zone_pct, primary_thr)
+        if lines:
+            return lines
+        relaxed = float(np.median(zone_pct)) + 0.03
+        return _line_centers(zone_pct, relaxed)
+
+    # 헤더/지도 분리선 = 위쪽 *좁은* zone 의 가장 아래 라인
+    # 좁은 zone (header_zone * 0.4 = 보통 위 12%) 으로 본문 도시 영역의
+    # 약한 신호가 폴백 시 "헤더 라인" 으로 오인되는 것을 회피.
+    # 추가로 strength filter — 폴백 모드에서 본문 라벨/도시 경계 등 약한
+    # 신호가 라인으로 잡혀도, *peak 강도* 가 헤더 라인 (강한 그룹) 의 50%
+    # 미만이면 제외. 헤더 분리선만 정확히 잡힘.
+    header_top_zone = header_zone * 0.4
+    te = int(h * header_top_zone)
+    top_lines = _detect_in_zone(row_pct[:te], row_thr)
+    if not top_lines:
+        te = int(h * header_zone * 0.7)
+        top_lines = _detect_in_zone(row_pct[:te], row_thr)
+        if not top_lines:
+            raise ValueError(
+                f'헤더 분리선 미검출 (cols={len(col_lines)})')
+    # strength filter: max strength 의 50% 이상 라인만 헤더로 인정
+    max_strength = max(row_pct[r] for r in top_lines)
+    strong_top = [r for r in top_lines if row_pct[r] >= max_strength * 0.5]
+    map_top = max(strong_top)
+
+    # 본문 하단 = bot_zone 의 가장 강한 peak (noise spike 회피)
+    bs = int(h * (1 - header_zone))
+    bot_lines = _detect_in_zone(row_pct[bs:], row_thr)
+    if bot_lines:
+        map_bot = bs + max(bot_lines, key=lambda i: row_pct[bs + i])
     else:
-        # 1차 폴백: bot_zone 안에서 row_thr 동적 완화 재탐색
-        # (본문 하단 프레임이 임계 바로 아래로 약한 시트 회수)
-        bs = int(h * (1 - header_zone))
-        bot_pct = row_pct[bs:]
-        relaxed = max(0.10, float(np.percentile(bot_pct, 99)) * 0.9)
-        bot_lines = _line_centers(bot_pct, relaxed)
-        if bot_lines:
-            map_bot = bs + min(bot_lines)
-        else:
-            # 2차 폴백: 진짜 신호 없음 (스캔 잘림) → image bottom
-            map_bot = h - 1
+        # 진짜 신호 없음 (스캔 잘림) → image bottom
+        map_bot = h - 1
     # 좌/우 외곽 — zone 별 검출 (좌 < w*outer_zone, 우 > w*(1-outer_zone))
     # 못 잡히면 이미지 가장자리 폴백 (다도해/외곽 약함 케이스)
     outer_zone = 0.15

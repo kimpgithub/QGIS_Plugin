@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-04-27 — S7 zone 분리 검출 + 폴백 strength filter
+
+극단적으로 약한 시트 (39020120_4-4: 본문 거의 비고 헤더 약함, row max=0.158)
+처치 강화:
+
+- **헤더 / 본문 하단을 zone 별 독립 검출** — 전체 row_thr → 폴백 식이면
+  본문 안 noise 가 row_lines 전체에 끼어 zone 선택 망가짐. zone 안에서
+  primary → relaxed 폴백 으로 일관화
+- **헤더 zone 좁힘**: header_zone × 0.4 (= 위 12%) — 본문 도시 영역 oversampling
+  방지. 모든 알려진 시트 헤더 분리선이 위 10% 안. 미검출 시 0.7 까지 확장
+- **strength filter**: 폴백 검출 시 라인 후보의 *peak 강도* 가 max × 0.5
+  미만이면 헤더 라인으로 인정 안 함 — 본문 라벨/도시 경계 등 약한 신호 회피
+- **bot_zone 가장 강한 peak 선택** (min 대신): 폴백 시 다중 라인 중 진짜
+  본문 하단 프레임 (가장 강한 peak) 선택 → 본문 안 noise spike 회피
+- **검증**: 11 케이스 (6 silent + 4 다양한 FAIL + 1 정상) 모두 ratio 0.84~0.90
+
 ## 2026-04-27 — S7 적응 HSV 게이트 + col 검출 보강 + row 임계 폴백
 
 스캐너 캘리브레이션·종이 노화 차이로 시트별 "흰 톤" V 가 234~254 로
