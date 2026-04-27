@@ -1233,3 +1233,95 @@ def fft_match_position(
     offset_y = aoi[3] - (yi4 + dy_sub) * eff
 
     return (offset_x, offset_y)
+
+
+# ============================================================
+# 행정리 폴리곤 → PDF 픽셀 마스크
+#   Stage 3 매칭에서 행정리 영역 안 inlier 만 선별 (정합 정확도 ↑)
+# ============================================================
+
+# (shp_path, admin_cd) → list[ring(world)] 캐시 (한 시트 처리당 N admin → N 회 호출)
+_ADMIN_POLYGON_CACHE: dict = {}
+_DEFAULT_SHP = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    'data', 'bnd_adm_pg.shp')
+
+
+def load_admin_polygon_world(admin_cd: str,
+                              shp_path: Optional[str] = None) -> List[np.ndarray]:
+    """SHP 에서 admin_cd 폴리곤 → world 좌표 ring 리스트.
+
+    캐시: 같은 (shp, cd) 두 번째 호출은 즉시 반환.
+    Returns: [ring0(N0,2), ring1(N1,2), ...]  (외곽 + 내부 hole 포함)
+    빈 리스트면 폴리곤 없음.
+    """
+    shp_path = shp_path or _DEFAULT_SHP
+    key = (shp_path, admin_cd)
+    if key in _ADMIN_POLYGON_CACHE:
+        return _ADMIN_POLYGON_CACHE[key]
+
+    from osgeo import ogr  # 지연 import: SHP 안 쓰는 경로엔 의존성 없게
+    if not os.path.exists(shp_path):
+        # 캐시도 빈 결과로 — 매 호출 파일 stat 안 함
+        _ADMIN_POLYGON_CACHE[key] = []
+        return []
+    ds = ogr.Open(shp_path)
+    if ds is None:
+        _ADMIN_POLYGON_CACHE[key] = []
+        return []
+    lyr = ds.GetLayer()
+    lyr.SetAttributeFilter(f"adm_cd = '{admin_cd}'")
+    rings = []
+    for feat in lyr:
+        g = feat.GetGeometryRef()
+        if g is None:
+            continue
+        gt = g.GetGeometryType()
+        polys = ([g.GetGeometryRef(i) for i in range(g.GetGeometryCount())]
+                 if gt == ogr.wkbMultiPolygon else [g])
+        for poly in polys:
+            for j in range(poly.GetGeometryCount()):
+                r = poly.GetGeometryRef(j)
+                pts = np.array(
+                    [(r.GetX(k), r.GetY(k)) for k in range(r.GetPointCount())],
+                    dtype=np.float64)
+                rings.append(pts)
+    # 빈 결과(없는 admin)도 캐시 — 같은 코드 재조회 시 SHP 재스캔 회피
+    _ADMIN_POLYGON_CACHE[key] = rings
+    return rings
+
+
+def build_admin_polygon_mask(admin_cd: str, jgw: 'JGWParams',
+                              image_shape: Tuple[int, int],
+                              shp_path: Optional[str] = None) -> np.ndarray:
+    """행정리 폴리곤을 PDF 이미지 좌표계로 투영해 uint8 마스크 생성.
+
+    Args:
+      jgw          참조 PDF 의 JGW (rotation 0 가정)
+      image_shape  (H, W) — 마스크 크기
+
+    Returns: (H,W) uint8, 폴리곤 내부=255, 외부=0. 폴리곤 없거나
+             시트에 안 들어오면 전체 0 마스크.
+    """
+    H, W = image_shape[:2]
+    mask = np.zeros((H, W), dtype=np.uint8)
+    rings = load_admin_polygon_world(admin_cd, shp_path)
+    if not rings:
+        return mask
+    # rotation 0 가정 — pixel = (world - origin) / px_size
+    A = jgw.pixel_size_x; E = jgw.pixel_size_y
+    C = jgw.top_left_x; F = jgw.top_left_y
+    contours = []
+    for ring in rings:
+        col = (ring[:, 0] - C) / A
+        row = (ring[:, 1] - F) / E
+        pts = np.column_stack([col, row]).astype(np.int32)
+        # 시트 밖 점은 클리핑 (cv2.fillPoly 가 알아서 잘라주지만 명시)
+        pts[:, 0] = np.clip(pts[:, 0], -1, W)
+        pts[:, 1] = np.clip(pts[:, 1], -1, H)
+        if len(pts) < 3:
+            continue
+        contours.append(pts)
+    if contours:
+        cv2.fillPoly(mask, contours, 255)
+    return mask

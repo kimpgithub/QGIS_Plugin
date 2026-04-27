@@ -1,18 +1,19 @@
-"""Stage 3: 스캔 ↔ 분할 PDF SIFT 매칭 + TPS 워핑 (비선형)
+"""Stage 3: 스캔 ↔ 분할 PDF SIFT 매칭 + 단일 H 워핑
 
-최적 조합:
+흐름:
 - 매칭 대상: 분할 PDF의 지도영역 (Stage 2가 sheets_geo/에 JGW와 함께 저장)
 - 스케일: scan과 sheet PDF 모두 0.5x로 정규화 (동일 물리 해상도)
-- 특징점: SIFT 50,000개
+- 특징점: SIFT 30,000개
 - 매칭 필터: FLANN + Lowe ratio 0.75
-- outlier 거부: MAGSAC++ 호모그래피 (inlier 식별용으로만 사용)
-- 워핑: TPS (Thin-Plate Spline) via gdalwarp -tps
-  · inlier GCPs → 공간 균등 샘플 400개 → GDAL VRT
-  · 종이 접힘/휨 같은 비선형 왜곡 흡수
+- outlier 거부: MAGSAC++ 호모그래피
+- 폴리곤 필터: SHP 행정리 폴리곤 안 inlier 만 보존 (sparse admin 시 폴백)
+- 워핑: 단일 호모그래피 (cv2.warpPerspective)
+  · 분할시트 한 장 안에선 종이 휨이 충분히 선형 → 단일 H 가 TPS 보다 정확
+  · TPS smoothing=0+400 GCP 는 GCP 사이 진동(Runge)으로 회귀 → 폐기
 
 CLI:
   python -m gis_scan_tools.tools.stage3_scan_warp \\
-      --identification scan_identified/_identification.csv \\
+      --identified scan_identified/identified \\
       --sheets-geo scan_identified/sheets_geo \\
       --out warped/
 """
@@ -32,13 +33,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from ._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179,
+        build_admin_polygon_mask,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 except ImportError:
     from gis_scan_tools.tools._legacy.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179,
+        build_admin_polygon_mask,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
+
+# 폴리곤 필터 — in-polygon inlier 가 이 임계 미만이면 폴백(전체 inlier)
+POLY_FILTER_MIN_INLIERS = 50
 
 
 # ============================================================
@@ -159,7 +165,8 @@ class SheetSiftCache:
 
 def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
                    target_ps=None, scan_scale=0.5,
-                   save_intermediates=True, output_basename=None):
+                   save_intermediates=True, output_basename=None,
+                   shp_path=None):
     """단일 스캔 처리 — scan ↔ sheet PDF 매칭 + 호모그래피 워핑."""
     os.makedirs(out_dir, exist_ok=True)
     t_total = time.time()
@@ -235,7 +242,36 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
                       message=f'inlier 비율 과소: {100*inlier_pct:.1f}%')
         return result
 
-    # 5) 인라이어 시각화
+    # 5) 행정리 폴리곤 안 inlier 만 선별 (정합 정확도 향상)
+    #    sheet PDF 좌표계에 폴리곤 마스크를 만들어 dst 점 in/out 검사.
+    #    in-polygon inlier 가 너무 적으면 (sparse admin / 매칭 실패 영역) 전체 inlier 폴백.
+    sheet_h, sheet_w = sheet_img.shape[:2]
+    poly_mask = build_admin_polygon_mask(
+        admin_code, sheet_jgw, (sheet_h, sheet_w), shp_path=shp_path)
+    if poly_mask.any():
+        # dst 는 0.5x 좌표 → 풀 해상도로 환산해 마스크 인덱싱
+        dst_full = dst / scan_scale
+        xs = np.clip(dst_full[:, 0].astype(int), 0, sheet_w - 1)
+        ys = np.clip(dst_full[:, 1].astype(int), 0, sheet_h - 1)
+        in_poly = poly_mask[ys, xs] > 0
+        inl_in = inl & in_poly
+        n_in = int(inl_in.sum())
+        if n_in >= POLY_FILTER_MIN_INLIERS:
+            inl = inl_in
+            print(f'  폴리곤 필터: inlier {n_inl} → {n_in} '
+                  f'({100*n_in/n_inl:.1f}% 보존, admin {admin_code})')
+            n_inl = n_in
+            result['n_inliers_in_polygon'] = n_inl
+        else:
+            print(f'  폴리곤 필터 폴백: in={n_in} < {POLY_FILTER_MIN_INLIERS}, '
+                  f'전체 inlier 사용')
+            result['n_inliers_in_polygon'] = n_in
+            result['poly_filter_fallback'] = True
+    else:
+        print(f'  폴리곤 마스크 없음 (admin {admin_code} SHP 미존재) — 폴백')
+        result['poly_filter_fallback'] = True
+
+    # 6) 인라이어 시각화
     if save_intermediates:
         good_inl = [m for m, ok in zip(good, inl) if ok]
         vis = cv2.drawMatches(
@@ -244,21 +280,13 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         save_thumb(os.path.join(out_dir, '04_matches_inliers.jpg'),
                    vis, max_dim=2400)
 
-    # 6) Inlier GCPs를 원본 해상도 + world 좌표로 변환
-    scan_full_inl = src[inl] / scan_scale  # scan 원본 픽셀
-    sheet_full_inl = dst[inl] / scan_scale  # sheet PDF 원본 픽셀
-    world_x = sheet_jgw.top_left_x + sheet_full_inl[:, 0] * sheet_jgw.pixel_size_x
-    world_y = sheet_jgw.top_left_y + sheet_full_inl[:, 1] * sheet_jgw.pixel_size_y
-    world_pts = np.column_stack([world_x, world_y])
-
-    # 7) 출력 raster bbox 계산 — inlier GCPs world 범위 + 여유
-    # 호모그래피로 대충 코너 추정해도 되지만, inlier world 범위가 더 안전
-    corners_sheet = np.float32(
-        [[0, 0], [sw, 0], [sw, sh], [0, sh]]).reshape(-1, 1, 2)
+    # 7) 출력 raster bbox = scan 4코너를 sheet PDF px → world 로 투영
     S = np.diag([scan_scale, scan_scale, 1.0])
-    H_full = np.linalg.inv(S) @ H @ S
+    H_full = np.linalg.inv(S) @ H @ S   # scan(full) → sheet PDF px
+    corners_scan = np.float32(
+        [[0, 0], [sw, 0], [sw, sh], [0, sh]]).reshape(-1, 1, 2)
     corners_dst = cv2.perspectiveTransform(
-        corners_sheet, H_full).reshape(-1, 2)
+        corners_scan, H_full).reshape(-1, 2)
     cw_x = sheet_jgw.top_left_x + corners_dst[:, 0] * sheet_jgw.pixel_size_x
     cw_y = sheet_jgw.top_left_y + corners_dst[:, 1] * sheet_jgw.pixel_size_y
     out_minx, out_maxx = float(cw_x.min()), float(cw_x.max())
@@ -272,63 +300,30 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
                       message=f'출력 크기 비정상: {out_w}x{out_h}')
         return result
 
-    # 8) GCP 서브샘플링 + 중복 제거 (TPS 안정성)
-    scan_pts = scan_full_inl
-    # 공간 균등 400개 (TPS O(N^3) 완화)
-    MAX_GCPS = 400
-    if len(scan_pts) > MAX_GCPS:
-        idx = np.linspace(0, len(scan_pts) - 1, MAX_GCPS).astype(int)
-        scan_pts = scan_pts[idx]
-        world_pts = world_pts[idx]
-    # GDAL은 동일 좌표 GCP 있으면 matrix singular → dedup
-    seen_s = set(); seen_w = set()
-    keep = []
-    for (sx, sy), (wx, wy) in zip(scan_pts, world_pts):
-        sk = (round(sx, 1), round(sy, 1))
-        wk = (round(wx, 2), round(wy, 2))
-        if sk in seen_s or wk in seen_w:
-            continue
-        seen_s.add(sk); seen_w.add(wk)
-        keep.append(((sx, sy), (wx, wy)))
-    if len(keep) < 10:
-        result.update(status='FAIL',
-                      message=f'TPS GCP 부족 (dedup 후 {len(keep)})')
-        return result
-    result['n_gcps_tps'] = len(keep)
-
-    # 9) TPS 워핑 — 희소 격자 평가 + 조밀 보간 (gdalwarp의 1/10 속도)
-    # Opt #1: RBFInterpolator는 d-value 입력(N,2)을 한 번에 처리 — 커널 분해 1회로 단축
+    # 8) 단일 H 워핑 — 분할시트 한 장 안에선 종이 휨이 거의 선형 → 단일
+    # 호모그래피가 TPS 보다 정확. TPS smoothing=0+400 GCP 는 GCP 사이에서
+    # 진동(Runge) 으로 mean abs-diff 23→30 회귀 발생. 단일 H 로 회복.
     t = time.time()
-    from scipy.interpolate import RBFInterpolator
-    cw = np.array([w for _, w in keep], dtype=np.float64)   # world (N,2)
-    cs = np.array([s for s, _ in keep], dtype=np.float64)   # scan_px (N,2)
+    # 출력 좌표 (col,row) → world → sheet PDF px → scan px
+    # cv2.warpPerspective(WARP_INVERSE_MAP) 의 행렬은 dst→src 매핑
+    # M_out_to_scan = H_full⁻¹ @ M_world_to_pdf @ M_out_to_world
+    M_out_to_world = np.array([
+        [target_ps, 0, out_minx],
+        [0, -target_ps, out_maxy],
+        [0, 0, 1]], dtype=np.float64)
+    A_p = sheet_jgw.pixel_size_x; E_p = sheet_jgw.pixel_size_y
+    C_p = sheet_jgw.top_left_x; F_p = sheet_jgw.top_left_y
+    M_world_to_pdf = np.array([
+        [1 / A_p, 0, -C_p / A_p],
+        [0, 1 / E_p, -F_p / E_p],
+        [0, 0, 1]], dtype=np.float64)
+    M_dst_to_scan = np.linalg.inv(H_full) @ M_world_to_pdf @ M_out_to_world
 
-    rbf = RBFInterpolator(cw, cs, kernel='thin_plate_spline', smoothing=0.0)
-
-    # 희소 격자에서 평가 (16픽셀 간격)
-    STEP = 16
-    gy = np.arange(0, out_h + STEP, STEP)
-    gx = np.arange(0, out_w + STEP, STEP)
-    GX, GY = np.meshgrid(gx, gy)
-    world_xs = (out_minx + GX * target_ps).ravel()
-    world_ys = (out_maxy - GY * target_ps).ravel()
-    coords_wp = np.column_stack([world_xs, world_ys])
-    mapped = rbf(coords_wp)   # (M, 2) — x,y 동시 평가
-    sx_grid = mapped[:, 0].reshape(GX.shape).astype(np.float32)
-    sy_grid = mapped[:, 1].reshape(GY.shape).astype(np.float32)
-
-    # 격자 → 전체 크기 업샘플
-    map_x = cv2.resize(sx_grid, (out_w, out_h),
-                       interpolation=cv2.INTER_LINEAR)
-    map_y = cv2.resize(sy_grid, (out_w, out_h),
-                       interpolation=cv2.INTER_LINEAR)
-
-    # cv2.remap
-    warped = cv2.remap(
-        scan_img, map_x, map_y,
-        interpolation=cv2.INTER_CUBIC,
+    warped = cv2.warpPerspective(
+        scan_img, M_dst_to_scan, (out_w, out_h),
+        flags=cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP,
         borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
-    print(f'  TPS 워핑: {time.time()-t:.1f}s (GCP={len(keep)}, 격자={STEP}px)')
+    print(f'  단일 H 워핑: {time.time()-t:.1f}s')
 
     # 10) 저장
     base = output_basename or f'{admin_code}_{sheet_id}'
@@ -396,6 +391,9 @@ def main():
                     help='중간 시각화 파일 저장 안 함 (속도)')
     ap.add_argument('--target-ps', type=float, default=None,
                     help='출력 픽셀크기 (m/px). 기본=sheet PDF ps')
+    ap.add_argument('--shp', default=None,
+                    help='행정리 폴리곤 SHP. 기본=패키지 data/bnd_adm_pg.shp. '
+                         'inlier 를 폴리곤 안으로 한정해 정합 정확도 향상')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -447,7 +445,8 @@ def main():
                     scan, code, sid, sub_out, cache,
                     target_ps=args.target_ps,
                     save_intermediates=not args.no_intermediates,
-                    output_basename=label)
+                    output_basename=label,
+                    shp_path=args.shp)
                 osz = r.get('output_size', [0, 0])
                 inl_pct = r.get('inlier_pct', 0)
                 w.writerow([

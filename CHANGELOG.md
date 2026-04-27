@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-04-27 — Stage 3 정합 정확도 회복 (TPS → 단일 H + 폴리곤 필터)
+
+- **TPS 폐기 → 단일 호모그래피 워핑**
+  - 분할시트 한 장 안에선 종이 휨이 충분히 선형 → 단일 H 가 TPS 보다 정확
+  - TPS smoothing=0 + 400 GCP 가 GCP 사이 진동(Runge 현상) 일으켜 mean
+    abs-diff 가 23→30 으로 회귀하는 것을 확인 (39010110_4-1 케이스)
+  - 단일 H 로 회복: mean **22.96** / p95 **54** / p99 **96** (폴리곤 ∩ ¬마커)
+  - 워핑 시간 2.3s → 0.1s (23배). 시트당 처리 ~20s → ~17s
+  - `cv2.warpPerspective(WARP_INVERSE_MAP)` 한 번으로 scan→world 출력 frame 까지
+    합성변환 적용 (중간 grid resample 제거)
+- **행정리 폴리곤 필터 추가**
+  - SHP `bnd_adm_pg.shp` 의 admin_cd 폴리곤을 sheet PDF px 로 투영해 마스크 생성
+  - MAGSAC inlier 중 폴리곤 내부 점만 선별 → outlier 가 들어올 영역(헤더/바다)
+    원천 차단, sparse 시트에서 효과 큼
+  - 폴백: in-polygon < 50 이면 전체 inlier 사용 (도서/특수 케이스 보호)
+  - SHP/admin 미존재 시 graceful 폴백 (전체 inlier 사용)
+- **CLI**: `--shp` 인자 추가 (default: 패키지 `data/bnd_adm_pg.shp`)
+- **헬퍼**: `tools/_legacy/common.py` 에 `load_admin_polygon_world()`,
+  `build_admin_polygon_mask()` 추가. (shp_path, admin_cd) 캐시 — 같은 시트
+  여러 admin 처리 시 SHP 재스캔 0회
+
 ## 2026-04-27 — S7 지도영역 추출 알고리즘 교체
 
 - **SIFT + MAGSAC + TPS 폴백 → HSV "어두운 무채색" 게이팅**
