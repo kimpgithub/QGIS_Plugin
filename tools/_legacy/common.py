@@ -311,11 +311,12 @@ def extract_map_region(image: np.ndarray, edge_ratio: float = 0.2,
 def extract_map_region_scan(image: np.ndarray,
                              max_saturation: int = 30,
                              v_max: int = 130,
-                             row_thr: float = 0.20,
+                             row_thr: float = 0.17,
                              col_thr: float = 0.25,
                              min_gap: int = 20,
                              header_zone: float = 0.30,
-                             inset: int = 8):
+                             inset: int = 8,
+                             min_size_ratio: float = 0.30):
     """스캔 이미지의 지도영역 추출 (HSV "어두운 무채색" 매칭 기반).
 
     PDF 렌더용 ``extract_map_region()`` 은 행/열 평균 밝기로 프레임선을
@@ -338,12 +339,15 @@ def extract_map_region_scan(image: np.ndarray,
         min_gap: 인접 라인 후보 병합 거리 (px)
         header_zone: 위쪽 이 비율 안의 가장 아래 라인을 헤더/지도 분리선으로
         inset: 검출된 프레임선보다 이 px 안쪽으로 잘라 잔여 검정 줄 회피
+        min_size_ratio: 추출 영역이 (h/w) × 이 비율 미만이면 검출 실패로 보고
+            하단/우측 변을 이미지 가장자리로 폴백 (스캔 잘림 / 본문 하단
+            인쇄 약함 케이스 회수). silent fail (height=2 인데 OK 보고) 차단.
 
     Returns:
         (cropped_bgr, (x, y, w, h))  — 헤더 제거된 지도영역 + 좌상단 + 크기
 
     Raises:
-        ValueError: 행/열 프레임 라인 미검출
+        ValueError: 행/열 프레임 라인 미검출 또는 폴백 후에도 영역 비정상
     """
     h, w = image.shape[:2]
     if image.ndim != 3 or image.shape[2] != 3:
@@ -386,10 +390,24 @@ def extract_map_region_scan(image: np.ndarray,
     map_top = max(top_zone) if top_zone else row_lines[0]
     # 하단 외곽 = 아래쪽 (1 - header_zone) 너머의 가장 위 라인
     bot_zone = [r for r in row_lines if r > h * (1 - header_zone)]
-    map_bot = min(bot_zone) if bot_zone else row_lines[-1]
-    # 좌/우 외곽
-    map_left = col_lines[0]
-    map_right = col_lines[-1]
+    if bot_zone:
+        map_bot = min(bot_zone)
+    else:
+        # 본문 하단 프레임 검출 실패 — 스캔 잘림 또는 인쇄 약함.
+        # 이미지 하단을 그대로 사용 (사용자가 후속 정합으로 본문만 활용)
+        map_bot = h - 1
+    # 좌/우 외곽 (col 검출 실패 시 이미지 가장자리 폴백)
+    map_left = col_lines[0] if col_lines else 0
+    map_right = col_lines[-1] if len(col_lines) >= 2 else w - 1
+
+    # 추출 영역 사이즈가 예상보다 작으면 (예: 본문 안에 잘못된 라인 검출)
+    # 하단변/우측변을 이미지 가장자리로 강제 폴백
+    candidate_rh = map_bot - map_top
+    candidate_rw = map_right - map_left
+    if candidate_rh < h * min_size_ratio:
+        map_bot = h - 1
+    if candidate_rw < w * min_size_ratio:
+        map_right = w - 1
 
     # 라인 두께 + 약간 안쪽으로
     map_top = min(h - 2, map_top + inset)
@@ -399,6 +417,11 @@ def extract_map_region_scan(image: np.ndarray,
 
     rx, ry = map_left, map_top
     rw, rh = map_right - map_left + 1, map_bot - map_top + 1
+    # silent fail 차단 — 폴백 후에도 영역이 비정상이면 명시적 실패
+    if rh < h * min_size_ratio or rw < w * min_size_ratio:
+        raise ValueError(
+            f'추출 영역 비정상 ({rw}x{rh} < {int(w*min_size_ratio)}x'
+            f'{int(h*min_size_ratio)}) — 헤더 분리선 또는 좌측 외곽 검출 오류')
     return image[ry:ry + rh, rx:rx + rw], (rx, ry, rw, rh)
 
 
