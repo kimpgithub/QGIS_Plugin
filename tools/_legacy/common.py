@@ -308,6 +308,100 @@ def extract_map_region(image: np.ndarray, edge_ratio: float = 0.2,
     return image[ry:ry + rh, rx:rx + rw], (rx, ry, rw, rh)
 
 
+def extract_map_region_scan(image: np.ndarray,
+                             max_saturation: int = 30,
+                             v_max: int = 130,
+                             row_thr: float = 0.20,
+                             col_thr: float = 0.25,
+                             min_gap: int = 20,
+                             header_zone: float = 0.30,
+                             inset: int = 8):
+    """스캔 이미지의 지도영역 추출 (HSV "어두운 무채색" 매칭 기반).
+
+    PDF 렌더용 ``extract_map_region()`` 은 행/열 평균 밝기로 프레임선을
+    검출하지만, 스캔 이미지는 흰 배경이 압도적이라 행 평균이 항상 높아
+    그 방식이 통하지 않는다.
+
+    인쇄 프레임선의 본질은 "**저채도 (회색조) + 중간 어두움**" — 이 속성은
+    스캐너 캘리브레이션, 용지 노화, JPEG 압축에 강건하다. 빨강 수기(S>100),
+    주황 행정경계(S>100), 흰 배경(V>v_max), 컬러 라벨은 자동 제외되고
+    프레임선·표 셀선·검은 글자만 매칭. 글자는 행 폭의 일부만 차지하므로
+    행 임계(row_thr=0.20)를 못 넘기고, 프레임 라인은 한 행 전체를 가로지르므로
+    매칭 비율 ≈1.0 → 안정적 검출.
+
+    Args:
+        image: BGR 입력 (스캔 이미지)
+        max_saturation: 이 값 미만 채도(0~255) 픽셀만 후보. 30이면 회색조만
+        v_max: 이 값 이하 명도(0~255) 픽셀만 후보. 130이면 흰/연회색 제외
+        row_thr: 행이 프레임 라인으로 판정되는 매칭 픽셀 비율 임계
+        col_thr: 열이 프레임 라인으로 판정되는 매칭 픽셀 비율 임계
+        min_gap: 인접 라인 후보 병합 거리 (px)
+        header_zone: 위쪽 이 비율 안의 가장 아래 라인을 헤더/지도 분리선으로
+        inset: 검출된 프레임선보다 이 px 안쪽으로 잘라 잔여 검정 줄 회피
+
+    Returns:
+        (cropped_bgr, (x, y, w, h))  — 헤더 제거된 지도영역 + 좌상단 + 크기
+
+    Raises:
+        ValueError: 행/열 프레임 라인 미검출
+    """
+    h, w = image.shape[:2]
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError('extract_map_region_scan은 BGR 컬러 입력 필요')
+
+    # HSV 게이팅: 저채도(무채색) + 중간 어두움 → 프레임/표선/검은 글자만 통과
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    s = hsv[..., 1]
+    v = hsv[..., 2]
+    mask = (s < max_saturation) & (v <= v_max)
+
+    row_pct = mask.mean(axis=1)
+    col_pct = mask.mean(axis=0)
+
+    def _line_centers(profile, thr):
+        above = profile > thr
+        if not above.any():
+            return []
+        pad = np.concatenate([[False], above, [False]])
+        edges = np.diff(pad.astype(np.int8))
+        starts = np.where(edges == 1)[0]
+        ends = np.where(edges == -1)[0]
+        centers = [(s + e - 1) // 2 for s, e in zip(starts, ends)]
+        merged = [int(centers[0])]
+        for c in centers[1:]:
+            if c - merged[-1] < min_gap:
+                merged[-1] = (merged[-1] + int(c)) // 2
+            else:
+                merged.append(int(c))
+        return merged
+
+    row_lines = _line_centers(row_pct, row_thr)
+    col_lines = _line_centers(col_pct, col_thr)
+    if not row_lines or not col_lines:
+        raise ValueError(f'프레임 라인 미검출 (rows={len(row_lines)}, '
+                         f'cols={len(col_lines)})')
+
+    # 헤더/지도 분리선 = 위쪽 header_zone 안의 가장 아래 라인
+    top_zone = [r for r in row_lines if r < h * header_zone]
+    map_top = max(top_zone) if top_zone else row_lines[0]
+    # 하단 외곽 = 아래쪽 (1 - header_zone) 너머의 가장 위 라인
+    bot_zone = [r for r in row_lines if r > h * (1 - header_zone)]
+    map_bot = min(bot_zone) if bot_zone else row_lines[-1]
+    # 좌/우 외곽
+    map_left = col_lines[0]
+    map_right = col_lines[-1]
+
+    # 라인 두께 + 약간 안쪽으로
+    map_top = min(h - 2, map_top + inset)
+    map_bot = max(map_top + 1, map_bot - inset)
+    map_left = min(w - 2, map_left + inset)
+    map_right = max(map_left + 1, map_right - inset)
+
+    rx, ry = map_left, map_top
+    rw, rh = map_right - map_left + 1, map_bot - map_top + 1
+    return image[ry:ry + rh, rx:rx + rw], (rx, ry, rw, rh)
+
+
 def detect_frame_thickness(image: np.ndarray, edge_ratio: float = 0.2,
                             dark_threshold: float = 80) -> Tuple[int, int]:
     """이미지 테두리 프레임선의 가로/세로 두께 감지

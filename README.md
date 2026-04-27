@@ -26,7 +26,7 @@ QGIS 툴바에 아이콘 3개 + 전용 편집 툴바:
 | **1. PDF 좌표생성** | 메인 PDF에 JGW 부여 | PDF 메타(축척+분할도 라벨) + SHP admin bbox — 즉시, ≤4m. SIFT/Powell 폴백 |
 | **2. 스캔 식별** | 스캔의 (admin_code, sheet_id) 판정 | 헤더 OCR + SHP 한글명/fuzzy 회수 + PDF 후보 매칭 |
 | **2a. 미식별 보강** | 실패 스캔 수동 지정 | SHP 드롭다운 UI — CSV 편집 불필요 |
-| **2b. 지도영역 추출** | 스캔 프레임 안쪽 잘라냄 | 프레임 라인 검출 |
+| **2b. 지도영역 추출** | 스캔 프레임 안쪽 잘라냄 | HSV 어두운 무채색 게이트 (참조 PDF 불필요) |
 | **3. 매칭+워핑** | 스캔 ↔ 분할 PDF → 픽셀 정합 | SIFT + TPS (비선형) |
 | **4. 사분면 병합** | 시트별 크롭 → 모자이크 | world bbox 기반 + 테두리 여유 옵션 |
 | **5. 경계 검수** | 병합 결과 vs SHP 경계 비교 | 오렌지 마스크 distance map |
@@ -173,9 +173,9 @@ python -m gis_scan_tools.tools.stage2_scan_identify \
     --pdf-main pdf_main_geo/ --shp bnd_adm_pg.shp \
     --out scan_identified/
 
-# S7: 지도영역 추출 (선택)
+# S7: 지도영역 추출 (HSV 게이트 — 참조 불필요, < 0.5s/장)
 python -m gis_scan_tools.tools.stage_extract_map \
-    --in scan/ --out map_only/ --margin 3
+    --identified scan_identified/identified --out map_extracted/
 
 # Stage 3 — identified/ 폴더 기반 입력 (수동 보강 파일 자동 포함)
 python -m gis_scan_tools.tools.stage3_scan_warp \
@@ -201,7 +201,7 @@ python -m gis_scan_tools.tools.stage5_validate \
 |---|---|---|---|
 | Stage 1 | admin | ~26s | PDF 렌더링이 대부분 |
 | Stage 2 | scan | ~22s | OCR + PDF 라벨 (SIFT 우회) |
-| S7 | scan | ~3.6s | 프레임 검출 |
+| S7 | scan | ~3s | HSV 게이트 + 라인 프로파일 |
 | Stage 3 | sheet | ~50s | SIFT + TPS 워핑 |
 | Stage 4 | admin | ~14s | 병합 |
 | Stage 5 | admin | ~27s | 검수 + 시각화 |
@@ -228,7 +228,7 @@ python -m gis_scan_tools.tools.stage5_validate \
 │   ├── _unmatched/                # 실패 스캔 (2a 탭으로 보강)
 │   ├── sheets_geo/                # 분할 PDF + JGW (Stage 3 매칭용)
 │   └── _sheet_cache/
-├── 2b_map_only/                   # (선택) 프레임 제거 스캔
+├── 2b_map_only/                   # 헤더/프레임 제거 스캔 (HSV 게이트)
 ├── 3_warped/
 │   └── {시도}/{시군구}/{admin}_{sheet}/
 │       ├── {admin}_{sheet}.jpg, .jgw, .prj

@@ -813,16 +813,13 @@ class ExtractMapTab(StageTab):
         super().__init__(common)
 
     def build_options(self):
-        pass  # 파라미터 없음 (SIFT+MAGSAC++ 자동)
+        pass  # 파라미터 없음 (프레임선 색 매칭 자동)
 
     def io_summary(self):
         proj = self.common.project_dir.text()
         return ([('Stage 2 identified/', os.path.join(
                     self.common.sub(SUB_SCAN_ID),
-                    'identified') if proj else ''),
-                 ('Stage 2 sheets_geo/', os.path.join(
-                    self.common.sub(SUB_SCAN_ID),
-                    'sheets_geo') if proj else '')],
+                    'identified') if proj else '')],
                 self.get_out_dir())
 
     def get_out_dir(self):
@@ -833,8 +830,6 @@ class ExtractMapTab(StageTab):
         self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
         return ['--identified',
                 os.path.join(self.common.sub(SUB_SCAN_ID), 'identified'),
-                '--sheets-geo',
-                os.path.join(self.common.sub(SUB_SCAN_ID), 'sheets_geo'),
                 '--out', self.get_out_dir()]
 
 
