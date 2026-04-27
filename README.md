@@ -3,7 +3,9 @@
 스캔된 종이 지도에 좌표를 부여해 GIS 데이터로 변환하고, 그 위에
 행정리 경계를 편집해 PostGIS에 저장하는 QGIS 플러그인.
 
-같은 내용의 PDF를 좌표 운반체로 사용하므로 스캔 품질에 영향을 덜 받습니다.
+같은 내용의 분할 PDF를 *좌표 운반체* 로 사용 — PDF 메타에서 즉시 좌표를
+얻고, 스캔은 PDF 와의 SIFT 매칭으로 정합. 스캔 품질·기울어짐·노출 차이에
+강건.
 
 ## 구성
 
@@ -26,9 +28,9 @@ QGIS 툴바에 아이콘 3개 + 전용 편집 툴바:
 | **1. PDF 좌표생성** | 메인 PDF에 JGW 부여 | PDF 메타(축척+분할도 라벨) + SHP admin bbox — 즉시, ≤4m. SIFT/Powell 폴백 |
 | **2. 스캔 식별** | 스캔의 (admin_code, sheet_id) 판정 | 헤더 OCR + SHP 한글명/fuzzy 회수 + PDF 후보 매칭 |
 | **2a. 미식별 보강** | 실패 스캔 수동 지정 | SHP 드롭다운 UI — CSV 편집 불필요 |
-| **2b. 지도영역 추출** | 스캔 프레임 안쪽 잘라냄 | HSV 어두운 무채색 게이트 (참조 PDF 불필요) |
-| **3. 매칭+워핑** | 스캔 ↔ 분할 PDF → 픽셀 정합 | SIFT + TPS (비선형) |
-| **4. 사분면 병합** | 시트별 크롭 → 모자이크 | world bbox 기반 + 테두리 여유 옵션 |
+| **2b. 지도영역 추출** | 스캔 프레임 안쪽 잘라냄 | HSV 적응 게이트 (시트별 흰 톤 v_p95 기준) + zone 별 라인 검출 + 사이즈 sanity (참조 PDF 불필요) |
+| **3. 매칭+워핑** | 스캔 ↔ 분할 PDF → 픽셀 정합 | SIFT + MAGSAC 단일 H + admin 폴리곤 inlier 필터. 출력 = sheet PDF 1:1 frame |
+| **4. 병합** | 시트별 크롭 → 모자이크 | sheet world bbox 기반 + 테두리 여유 옵션 |
 | **5. 경계 검수** | 병합 결과 vs SHP 경계 비교 | 오렌지 마스크 distance map |
 
 ### 입력 파일 컨벤션
@@ -178,9 +180,11 @@ python -m gis_scan_tools.tools.stage_extract_map \
     --identified scan_identified/identified --out map_extracted/
 
 # Stage 3 — identified/ 폴더 기반 입력 (수동 보강 파일 자동 포함)
+# --shp 지정 시 admin 폴리곤 안 inlier 만 보존 (sparse 시트 outlier 차단)
 python -m gis_scan_tools.tools.stage3_scan_warp \
     --identified scan_identified/identified \
     --sheets-geo scan_identified/sheets_geo \
+    --shp bnd_adm_pg.shp \
     --out warped/
 
 # Stage 4 — 병합 (시트 경계 여유 옵션)
@@ -202,12 +206,12 @@ python -m gis_scan_tools.tools.stage5_validate \
 | Stage 1 | admin | ~26s | PDF 렌더링이 대부분 |
 | Stage 2 | scan | ~22s | OCR + PDF 라벨 (SIFT 우회) |
 | S7 | scan | ~3s | HSV 게이트 + 라인 프로파일 |
-| Stage 3 | sheet | ~50s | SIFT + TPS 워핑 |
+| Stage 3 | sheet | ~17s | SIFT + 단일 H 워핑 (TPS 폐기) |
 | Stage 4 | admin | ~14s | 병합 |
 | Stage 5 | admin | ~27s | 검수 + 시각화 |
 
 **만장 스케일** (예: 10000 admin × 4시트):
-- 단일 프로세스 ~30일 → 4프로세스 병렬 ~7-8일
+- 단일 프로세스 ~20일 → 4프로세스 병렬 ~5일
 
 상세 분석: `OPTIMIZATION_NOTES.md`.
 
@@ -249,7 +253,11 @@ python -m gis_scan_tools.tools.stage5_validate \
 - **Stage 1 다도해 admin(추자면 등) 실패**: PDF 메타 경로가 자동 대응. 여전히 실패 시 [외부 JGW 가져오기] 수동 해결
 - **Stage 2 OCR 실패**: `--shp` 필수. 그래도 실패한 파일은 `_unmatched/`에 격리 → [2a. 미식별 보강] 탭으로 해결
 - **Stage 2 sheet bbox 부정확**: PDF 텍스트 라벨 없으면 SIFT 폴백. 모서리 ±15m 허용
+- **S7 추출 실패 (frame 미검출)**: row/col 모두 임계 미달인 거의 빈 시트. 헤더 신호조차 약하면 ValueError 로 표시 — 스캔 재촬영 권장
+- **S7 silent fail 차단**: 추출 영역이 image × 0.30 미만이면 ValueError. 이전 height=2 같은 무결과 OK 보고 차단됨
 - **Stage 3 inliers < 30**: 스캔 품질 문제. `04_matches_inliers.jpg` 시각화 확인
+- **Stage 3 출력 frame**: sheet PDF 사이즈 1:1 매핑 — JGW 도 sheet 와 동일. Stage 4 mosaic 가 PDF 좌표계 기준이라 자연 호환
+- **Stage 3 SHP 미설정**: 폴리곤 필터 비활성, 정합은 정상 진행 (LFS 포인터 / 손상 SHP 도 graceful 폴백)
 - **Stage 4 누락 시트**: `{admin}_status.json`의 `skipped` 필드 체크
 
 ### DB 작업
@@ -297,6 +305,12 @@ gis_scan_tools/
 - 미식별 보강 UI (드롭다운)
 - DB 작업 플러그인 (PG 연결 + 엑셀 탑재 + 행정리 편집)
 - QGIS 3.40 편집 툴바 (Toggle/Save/Split/Simplify)
+- S7 적응 HSV 게이트 (시트별 V 톤 차이 흡수) + zone 별 라인 검출 + 사이즈 sanity → silent fail 차단
+- Stage 3 TPS → 단일 H 교체 (mean abs-diff 23/p99 96 회복, 워핑 23배 가속)
+- Stage 3 admin 폴리곤 inlier 필터 (sparse 시트 outlier 차단, LFS/손상 SHP graceful 폴백)
+- Stage 3 출력 frame = sheet PDF 1:1 (다도해 inlier 클러스터 케이스 H 외삽 unstable 회피)
+
+상세는 `CHANGELOG.md`.
 
 ## 라이선스 / 기여
 
