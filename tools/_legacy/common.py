@@ -421,11 +421,17 @@ def extract_map_region_scan(image: np.ndarray,
     strong_top = [r for r in top_lines if row_pct[r] >= max_strength * 0.5]
     map_top = max(strong_top)
 
-    # 본문 하단 = bot_zone 의 가장 강한 peak (noise spike 회피)
+    # 본문 하단 = bot_zone 안 *충분히 강한 라인 중 가장 아래쪽* (max position)
+    # 이유: bot_zone bottommost 라인 = 본문 하단 프레임 (의미상). 그 위쪽
+    # 라인은 본문 안 도로/마커 등 내부 신호. strongest peak 만 보면 내부
+    # 신호가 frame 보다 강한 케이스 (39010330_4-1) 에서 본문 잘림.
+    # strength filter (>= max × 0.5) 로 noise 거른 후 가장 아래 선택.
     bs = int(h * (1 - header_zone))
     bot_lines = _detect_in_zone(row_pct[bs:], row_thr)
     if bot_lines:
-        map_bot = bs + max(bot_lines, key=lambda i: row_pct[bs + i])
+        max_pct = max(row_pct[bs + i] for i in bot_lines)
+        strong = [i for i in bot_lines if row_pct[bs + i] >= max_pct * 0.5]
+        map_bot = bs + max(strong)
     else:
         # 진짜 신호 없음 (스캔 잘림) → image bottom
         map_bot = h - 1
