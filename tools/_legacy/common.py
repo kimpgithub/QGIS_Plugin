@@ -433,6 +433,11 @@ def extract_map_region_scan(image: np.ndarray,
     else:
         # 진짜 신호 없음 (스캔 잘림) → image bottom
         map_bot = h - 1
+    # CUT 케이스: 검출된 라인이 이미지 끝에 붙어있으면 (footer 거의 없음) →
+    # 본문이 이미지 가장자리까지 이어지는 스캔 잘림 → image bottom 으로 스냅.
+    # 정상 시트는 footer 가 500+ px 라 이 분기 안 들어감.
+    if h - map_bot < 100:
+        map_bot = h - 1
     # 좌/우 외곽 — zone 안에서 dedicated 검출 (기울어진 시트는 col_pct 가
     # 분산돼 primary col_thr 미달, zone-별 noise floor 폴백 필요)
     outer_zone = 0.15
