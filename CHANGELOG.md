@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-04-27 — S7 적응 HSV 게이트 + col 검출 보강 + row 임계 폴백
+
+스캐너 캘리브레이션·종이 노화 차이로 시트별 "흰 톤" V 가 234~254 로
+편차 있음 — 고정 임계 V≤130 이 밝은 시트에서 라인 검출 미달.
+
+- **적응 v_max**: `max(130, percentile_95(V) - 70)`
+  - 시트의 흰 톤에서 darkness offset 만큼 아래까지 통과
+  - 어두운 시트는 130 floor 로 보호 (회귀 0)
+- **col_thr 0.25 → 0.10**: 좌/우 외곽 약한 시트 회수
+- **col 좌/우 zone 별 검출**: outer_zone=0.15. 좌(< w*0.15) / 우(> w*0.85)
+  zone 내 라인 사용. 미검출 시 image edge 폴백
+- **row 검출 폴백 2단계**:
+  - 헤더조차 검출 실패 → 전체 row_pct p99·0.9 로 완화 재탐색
+  - bot_zone 검출 실패 → bot_zone 내 p99·0.9 로 완화 재탐색
+  - 그래도 신호 없으면 image bottom (스캔 잘림 케이스)
+- **검증**: 11 케이스 (6 silent + 4 cols=0 / rows=0 FAIL + 1 정상 표본)
+  모두 OK, ratio 0.85~0.90
+
 ## 2026-04-27 — S7 silent fail 차단 + 하단 인쇄 약함/스캔 잘림 회수
 
 - **`extract_map_region_scan` 하단 검출 강화**

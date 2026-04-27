@@ -311,8 +311,9 @@ def extract_map_region(image: np.ndarray, edge_ratio: float = 0.2,
 def extract_map_region_scan(image: np.ndarray,
                              max_saturation: int = 30,
                              v_max: int = 130,
+                             v_dark_offset: int = 70,
                              row_thr: float = 0.17,
-                             col_thr: float = 0.25,
+                             col_thr: float = 0.10,
                              min_gap: int = 20,
                              header_zone: float = 0.30,
                              inset: int = 8,
@@ -333,7 +334,11 @@ def extract_map_region_scan(image: np.ndarray,
     Args:
         image: BGR 입력 (스캔 이미지)
         max_saturation: 이 값 미만 채도(0~255) 픽셀만 후보. 30이면 회색조만
-        v_max: 이 값 이하 명도(0~255) 픽셀만 후보. 130이면 흰/연회색 제외
+        v_max: 명도 임계 floor (0~255). 적응값과 max() 로 결합. 어두운 스캔
+            보호용 — 적응값이 이 값보다 작으면 이 값 사용. 기본 130
+        v_dark_offset: 적응 임계 = (V 의 p95) - v_dark_offset. 시트별 "흰 톤"
+            에서 이만큼 어두운 픽셀까지 통과. 70이면 흰 V≈250 시트에서
+            v_max≈180 → 라인(V≈80~120) 통과, 배경(V>200) 제외
         row_thr: 행이 프레임 라인으로 판정되는 매칭 픽셀 비율 임계
         col_thr: 열이 프레임 라인으로 판정되는 매칭 픽셀 비율 임계
         min_gap: 인접 라인 후보 병합 거리 (px)
@@ -357,7 +362,10 @@ def extract_map_region_scan(image: np.ndarray,
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     s = hsv[..., 1]
     v = hsv[..., 2]
-    mask = (s < max_saturation) & (v <= v_max)
+    # 적응 임계: 시트의 흰 톤 (V p95) 으로부터 v_dark_offset 만큼 아래까지 통과
+    # 스캐너 노출/캘리브레이션/종이 노화 차이 흡수. 어두운 시트는 v_max(130) 으로 보호
+    v_max_eff = max(v_max, int(np.percentile(v, 95)) - v_dark_offset)
+    mask = (s < max_saturation) & (v <= v_max_eff)
 
     row_pct = mask.mean(axis=1)
     col_pct = mask.mean(axis=0)
@@ -381,9 +389,13 @@ def extract_map_region_scan(image: np.ndarray,
 
     row_lines = _line_centers(row_pct, row_thr)
     col_lines = _line_centers(col_pct, col_thr)
-    if not row_lines or not col_lines:
-        raise ValueError(f'프레임 라인 미검출 (rows={len(row_lines)}, '
-                         f'cols={len(col_lines)})')
+    # 헤더조차 검출 실패 → row_thr 동적 완화 재시도 (헤더 라인이 매우 약한 시트)
+    if not row_lines:
+        relaxed = max(0.10, float(np.percentile(row_pct, 99)) * 0.9)
+        row_lines = _line_centers(row_pct, relaxed)
+        if not row_lines:
+            raise ValueError(
+                f'프레임 라인 미검출 (rows=0, cols={len(col_lines)})')
 
     # 헤더/지도 분리선 = 위쪽 header_zone 안의 가장 아래 라인
     top_zone = [r for r in row_lines if r < h * header_zone]
@@ -393,12 +405,24 @@ def extract_map_region_scan(image: np.ndarray,
     if bot_zone:
         map_bot = min(bot_zone)
     else:
-        # 본문 하단 프레임 검출 실패 — 스캔 잘림 또는 인쇄 약함.
-        # 이미지 하단을 그대로 사용 (사용자가 후속 정합으로 본문만 활용)
-        map_bot = h - 1
-    # 좌/우 외곽 (col 검출 실패 시 이미지 가장자리 폴백)
-    map_left = col_lines[0] if col_lines else 0
-    map_right = col_lines[-1] if len(col_lines) >= 2 else w - 1
+        # 1차 폴백: bot_zone 안에서 row_thr 동적 완화 재탐색
+        # (본문 하단 프레임이 임계 바로 아래로 약한 시트 회수)
+        bs = int(h * (1 - header_zone))
+        bot_pct = row_pct[bs:]
+        relaxed = max(0.10, float(np.percentile(bot_pct, 99)) * 0.9)
+        bot_lines = _line_centers(bot_pct, relaxed)
+        if bot_lines:
+            map_bot = bs + min(bot_lines)
+        else:
+            # 2차 폴백: 진짜 신호 없음 (스캔 잘림) → image bottom
+            map_bot = h - 1
+    # 좌/우 외곽 — zone 별 검출 (좌 < w*outer_zone, 우 > w*(1-outer_zone))
+    # 못 잡히면 이미지 가장자리 폴백 (다도해/외곽 약함 케이스)
+    outer_zone = 0.15
+    left_zone = [c for c in col_lines if c < w * outer_zone]
+    right_zone = [c for c in col_lines if c > w * (1 - outer_zone)]
+    map_left = max(left_zone) if left_zone else 0
+    map_right = min(right_zone) if right_zone else w - 1
 
     # 추출 영역 사이즈가 예상보다 작으면 (예: 본문 안에 잘못된 라인 검출)
     # 하단변/우측변을 이미지 가장자리로 강제 폴백
