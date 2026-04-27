@@ -285,48 +285,30 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         save_thumb(os.path.join(out_dir, '04_matches_inliers.jpg'),
                    vis, max_dim=2400)
 
-    # 7) 출력 raster bbox = scan 4코너를 sheet PDF px → world 로 투영
+    # 7) 출력 frame = sheet PDF 그대로 사용
+    # scan 4코너 호모그래피 외삽으로 bbox 계산하던 방식은 inlier 가 작은
+    # 영역에 클러스터링된 케이스 (다도해 39010320_7-1 등) 에서 H 가 외삽 시
+    # degenerate → bbox=0x0 발생. sheet PDF 본문 사이즈/JGW 를 그대로 사용하면
+    # H 외삽 의존성 제거, Stage 4 mosaic 도 PDF 좌표계 기준이라 자연 호환.
     S = np.diag([scan_scale, scan_scale, 1.0])
     H_full = np.linalg.inv(S) @ H @ S   # scan(full) → sheet PDF px
-    corners_scan = np.float32(
-        [[0, 0], [sw, 0], [sw, sh], [0, sh]]).reshape(-1, 1, 2)
-    corners_dst = cv2.perspectiveTransform(
-        corners_scan, H_full).reshape(-1, 2)
-    cw_x = sheet_jgw.top_left_x + corners_dst[:, 0] * sheet_jgw.pixel_size_x
-    cw_y = sheet_jgw.top_left_y + corners_dst[:, 1] * sheet_jgw.pixel_size_y
-    out_minx, out_maxx = float(cw_x.min()), float(cw_x.max())
-    out_miny, out_maxy = float(cw_y.min()), float(cw_y.max())
-    out_w = int(np.ceil((out_maxx - out_minx) / target_ps))
-    out_h = int(np.ceil((out_maxy - out_miny) / target_ps))
+    out_h, out_w = sheet_img.shape[:2]
+    target_ps = abs(sheet_jgw.pixel_size_x)
     result['output_size'] = [out_w, out_h]
-    result['world_bbox'] = [out_minx, out_miny, out_maxx, out_maxy]
-    if out_w <= 0 or out_h <= 0:
-        result.update(status='FAIL',
-                      message=f'출력 크기 비정상: {out_w}x{out_h}')
-        return result
+    out_minx = sheet_jgw.top_left_x
+    out_maxy = sheet_jgw.top_left_y
+    out_maxx = out_minx + out_w * sheet_jgw.pixel_size_x
+    out_miny = out_maxy + out_h * sheet_jgw.pixel_size_y  # ps_y 음수
+    result['world_bbox'] = [float(out_minx), float(out_miny),
+                             float(out_maxx), float(out_maxy)]
 
     # 8) 단일 H 워핑 — 분할시트 한 장 안에선 종이 휨이 거의 선형 → 단일
     # 호모그래피가 TPS 보다 정확. TPS smoothing=0+400 GCP 는 GCP 사이에서
     # 진동(Runge) 으로 mean abs-diff 23→30 회귀 발생. 단일 H 로 회복.
     t = time.time()
-    # 출력 좌표 (col,row) → world → sheet PDF px → scan px
-    # cv2.warpPerspective(WARP_INVERSE_MAP) 의 행렬은 dst→src 매핑
-    # M_out_to_scan = H_full⁻¹ @ M_world_to_pdf @ M_out_to_world
-    M_out_to_world = np.array([
-        [target_ps, 0, out_minx],
-        [0, -target_ps, out_maxy],
-        [0, 0, 1]], dtype=np.float64)
-    A_p = sheet_jgw.pixel_size_x; E_p = sheet_jgw.pixel_size_y
-    C_p = sheet_jgw.top_left_x; F_p = sheet_jgw.top_left_y
-    M_world_to_pdf = np.array([
-        [1 / A_p, 0, -C_p / A_p],
-        [0, 1 / E_p, -F_p / E_p],
-        [0, 0, 1]], dtype=np.float64)
-    M_dst_to_scan = np.linalg.inv(H_full) @ M_world_to_pdf @ M_out_to_world
-
     warped = cv2.warpPerspective(
-        scan_img, M_dst_to_scan, (out_w, out_h),
-        flags=cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP,
+        scan_img, H_full, (out_w, out_h),
+        flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
     print(f'  단일 H 워핑: {time.time()-t:.1f}s')
 
@@ -336,10 +318,11 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     warped_jgw = os.path.join(out_dir, f'{base}.jgw')
     warped_prj = os.path.join(out_dir, f'{base}.prj')
     _imwrite(warped_jpg, warped, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    # 출력 JGW = sheet JGW 그대로 (1:1 픽셀 매핑)
     write_jgw(warped_jgw, JGWParams(
-        pixel_size_x=target_ps, rotation_x=0.0, rotation_y=0.0,
-        pixel_size_y=-target_ps,
-        top_left_x=out_minx, top_left_y=out_maxy))
+        pixel_size_x=sheet_jgw.pixel_size_x, rotation_x=0.0, rotation_y=0.0,
+        pixel_size_y=sheet_jgw.pixel_size_y,
+        top_left_x=sheet_jgw.top_left_x, top_left_y=sheet_jgw.top_left_y))
     with open(warped_prj, 'w') as f:
         f.write(PRJ_5179)
     if save_intermediates:
