@@ -51,22 +51,12 @@ POLY_FILTER_MIN_INLIERS = 50
 # 전처리
 # ============================================================
 
-def _mask_red(bgr):
-    """스캔의 빨강 마커(수기 수정 표시)를 흰색으로 덮음."""
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    m1 = cv2.inRange(hsv, (0, 80, 80), (15, 255, 255))
-    m2 = cv2.inRange(hsv, (165, 80, 80), (180, 255, 255))
-    red = m1 | m2
-    if red.any():
-        out = bgr.copy()
-        out[red > 0] = (255, 255, 255)
-        return out
-    return bgr
+def preprocess(img, scale=0.5):
+    """SIFT 입력 전처리 — 그레이 + CLAHE + 다운샘플 + 가우시안.
 
-
-def preprocess(img, scale=0.5, strip_red=False):
-    if strip_red and img.ndim == 3:
-        img = _mask_red(img)
+    빨강 마커 마스킹은 제거됨 — H≤15 임계가 주황 (행정경계 인쇄색) 까지
+    덮어 정합 신호 손상. MAGSAC 이 마커 outlier 충분히 거름 (실측 inlier 90%+).
+    """
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(16, 16))
     g = clahe.apply(g)
@@ -185,7 +175,7 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     if save_intermediates:
         save_thumb(os.path.join(out_dir, '02_scan_raw.jpg'), scan_img)
 
-    g_scan = preprocess(scan_img, scale=scan_scale, strip_red=True)
+    g_scan = preprocess(scan_img, scale=scan_scale)
     if save_intermediates:
         _imwrite(os.path.join(out_dir, '03_scan_prep.jpg'), g_scan,
                  [cv2.IMWRITE_JPEG_QUALITY, 85])
