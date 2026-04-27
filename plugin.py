@@ -869,6 +869,10 @@ class Stage3Tab(StageTab):
                 '--sheets-geo', os.path.join(
                     self.common.sub(SUB_SCAN_ID), 'sheets_geo'),
                 '--out', self.get_out_dir()]
+        # 사용자가 공통설정에 SHP 지정했으면 행정리 폴리곤 필터에 활용
+        # (지정 안 하면 패키지 기본 data/bnd_adm_pg.shp — LFS 미해결 시 폴백)
+        if self.common.shp.text():
+            argv += ['--shp', self.common.shp.text()]
         if self.no_intermediates.isChecked():
             argv.append('--no-intermediates')
         return argv

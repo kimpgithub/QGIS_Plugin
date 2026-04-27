@@ -245,9 +245,14 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     # 5) 행정리 폴리곤 안 inlier 만 선별 (정합 정확도 향상)
     #    sheet PDF 좌표계에 폴리곤 마스크를 만들어 dst 점 in/out 검사.
     #    in-polygon inlier 가 너무 적으면 (sparse admin / 매칭 실패 영역) 전체 inlier 폴백.
+    #    SHP 로드 실패 (LFS 포인터, 권한 등) 시에도 정합은 계속 — 폴리곤 필터만 비활성.
     sheet_h, sheet_w = sheet_img.shape[:2]
-    poly_mask = build_admin_polygon_mask(
-        admin_code, sheet_jgw, (sheet_h, sheet_w), shp_path=shp_path)
+    try:
+        poly_mask = build_admin_polygon_mask(
+            admin_code, sheet_jgw, (sheet_h, sheet_w), shp_path=shp_path)
+    except Exception as e:
+        print(f'  폴리곤 마스크 빌드 실패 ({e}) — 폴백')
+        poly_mask = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
     if poly_mask.any():
         # dst 는 0.5x 좌표 → 풀 해상도로 환산해 마스크 인덱싱
         dst_full = dst / scan_scale

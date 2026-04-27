@@ -1325,7 +1325,12 @@ def load_admin_polygon_world(admin_cd: str,
         # 캐시도 빈 결과로 — 매 호출 파일 stat 안 함
         _ADMIN_POLYGON_CACHE[key] = []
         return []
-    ds = ogr.Open(shp_path)
+    # GDAL ≥ 3.x 일부 버전은 ogr.UseExceptions() 가 기본 활성화 → ogr.Open
+    # 실패가 None 대신 RuntimeError 로. LFS 포인터 / 손상된 SHP 등.
+    try:
+        ds = ogr.Open(shp_path)
+    except Exception:
+        ds = None
     if ds is None:
         _ADMIN_POLYGON_CACHE[key] = []
         return []
