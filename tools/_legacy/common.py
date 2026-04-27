@@ -387,19 +387,19 @@ def extract_map_region_scan(image: np.ndarray,
                 merged.append(int(c))
         return merged
 
-    col_lines = _line_centers(col_pct, col_thr)
-
-    # 헤더 / 본문 하단을 *각자 zone 에서 독립* 으로 검출.
-    # 전체 row_thr → 폴백 식으로 가면 본문 안 noise 가 row_lines 에 끼어들어
+    # 헤더 / 본문 하단 / 좌우 외곽을 *각자 zone 에서 독립* 으로 검출.
+    # 전체 임계 → 폴백 식으로 가면 본문 안 noise 가 라인에 끼어들어
     # zone 선택을 망가뜨림. zone 별 dedicated 검출이 robust.
 
     def _detect_in_zone(zone_pct, primary_thr):
-        """zone 안에서 라인 검출. primary 실패 시 noise floor 대비 완화."""
+        """zone 안에서 라인 검출. primary 실패 시 noise floor 대비 완화.
+        Returns (lines, is_relaxed) — relaxed 모드면 호출자가 strength filter 등 추가 처리.
+        """
         lines = _line_centers(zone_pct, primary_thr)
         if lines:
-            return lines
+            return lines, False
         relaxed = float(np.median(zone_pct)) + 0.03
-        return _line_centers(zone_pct, relaxed)
+        return _line_centers(zone_pct, relaxed), True
 
     # 헤더/지도 분리선 = 위쪽 *좁은* zone 의 가장 아래 라인
     # 좁은 zone (header_zone * 0.4 = 보통 위 12%) 으로 본문 도시 영역의
@@ -409,25 +409,23 @@ def extract_map_region_scan(image: np.ndarray,
     # 미만이면 제외. 헤더 분리선만 정확히 잡힘.
     header_top_zone = header_zone * 0.4
     te = int(h * header_top_zone)
-    top_lines = _detect_in_zone(row_pct[:te], row_thr)
+    top_lines, top_relaxed = _detect_in_zone(row_pct[:te], row_thr)
     if not top_lines:
         te = int(h * header_zone * 0.7)
-        top_lines = _detect_in_zone(row_pct[:te], row_thr)
+        top_lines, top_relaxed = _detect_in_zone(row_pct[:te], row_thr)
         if not top_lines:
-            raise ValueError(
-                f'헤더 분리선 미검출 (cols={len(col_lines)})')
-    # strength filter: max strength 의 50% 이상 라인만 헤더로 인정
-    max_strength = max(row_pct[r] for r in top_lines)
-    strong_top = [r for r in top_lines if row_pct[r] >= max_strength * 0.5]
-    map_top = max(strong_top)
+            raise ValueError(f'헤더 분리선 미검출')
+    if top_relaxed:
+        # relaxed 모드 — 본문 약한 신호 끼었을 가능성. strength filter 로 거름
+        max_s = max(row_pct[r] for r in top_lines)
+        top_lines = [r for r in top_lines if row_pct[r] >= max_s * 0.5]
+    # primary 모드는 모든 라인이 헤더 라인 → max(): 헤더 분리선
+    map_top = max(top_lines)
 
     # 본문 하단 = bot_zone 안 *충분히 강한 라인 중 가장 아래쪽* (max position)
-    # 이유: bot_zone bottommost 라인 = 본문 하단 프레임 (의미상). 그 위쪽
-    # 라인은 본문 안 도로/마커 등 내부 신호. strongest peak 만 보면 내부
-    # 신호가 frame 보다 강한 케이스 (39010330_4-1) 에서 본문 잘림.
-    # strength filter (>= max × 0.5) 로 noise 거른 후 가장 아래 선택.
+    # bot_zone bottommost 라인 = 본문 하단 프레임. strength filter 로 noise 거름.
     bs = int(h * (1 - header_zone))
-    bot_lines = _detect_in_zone(row_pct[bs:], row_thr)
+    bot_lines, _ = _detect_in_zone(row_pct[bs:], row_thr)
     if bot_lines:
         max_pct = max(row_pct[bs + i] for i in bot_lines)
         strong = [i for i in bot_lines if row_pct[bs + i] >= max_pct * 0.5]
@@ -435,13 +433,14 @@ def extract_map_region_scan(image: np.ndarray,
     else:
         # 진짜 신호 없음 (스캔 잘림) → image bottom
         map_bot = h - 1
-    # 좌/우 외곽 — zone 별 검출 (좌 < w*outer_zone, 우 > w*(1-outer_zone))
-    # 못 잡히면 이미지 가장자리 폴백 (다도해/외곽 약함 케이스)
+    # 좌/우 외곽 — zone 안에서 dedicated 검출 (기울어진 시트는 col_pct 가
+    # 분산돼 primary col_thr 미달, zone-별 noise floor 폴백 필요)
     outer_zone = 0.15
-    left_zone = [c for c in col_lines if c < w * outer_zone]
-    right_zone = [c for c in col_lines if c > w * (1 - outer_zone)]
-    map_left = max(left_zone) if left_zone else 0
-    map_right = min(right_zone) if right_zone else w - 1
+    L_end = int(w * outer_zone); R_start = int(w * (1 - outer_zone))
+    left_lines, _ = _detect_in_zone(col_pct[:L_end], col_thr)
+    right_lines, _ = _detect_in_zone(col_pct[R_start:], col_thr)
+    map_left = max(left_lines) if left_lines else 0
+    map_right = (R_start + min(right_lines)) if right_lines else w - 1
 
     # 추출 영역 사이즈가 예상보다 작으면 (예: 본문 안에 잘못된 라인 검출)
     # 하단변/우측변을 이미지 가장자리로 강제 폴백
