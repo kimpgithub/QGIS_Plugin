@@ -784,14 +784,56 @@ class RecoveryTab(QWidget):
         import shutil as _sh
         try:
             _sh.copy2(src, dst)
-            self.status_label.setText(
-                f'저장 완료: {dst} — 다음 Stage 실행 시 자동 처리됩니다.')
-            # 리스트에서 현재 항목 제거
-            row = self.file_list.currentRow()
-            self.file_list.takeItem(row)
-            self.count_label.setText(f'미식별: {self.file_list.count()}건')
         except Exception as e:
             self.status_label.setText(f'저장 실패: {e}')
+            return
+
+        # sheets_geo + sheet_bboxes.json 업데이트 — Stage 3/4가 의존
+        warn = self._update_sheet_geo(code, sid)
+
+        msg = f'저장 완료: {dst}'
+        if warn:
+            msg += f' — 주의: {warn}'
+        else:
+            msg += ' (sheets_geo + bbox 갱신)'
+        self.status_label.setText(msg)
+        # 리스트에서 현재 항목 제거
+        row = self.file_list.currentRow()
+        self.file_list.takeItem(row)
+        self.count_label.setText(f'미식별: {self.file_list.count()}건')
+
+    def _update_sheet_geo(self, code, sid):
+        """Stage 2 SheetCache 로 sheets_geo/{code}_{sid}.jpg|jgw 생성 및
+        sheet_bboxes.json 항목 업데이트.
+
+        Returns: 경고 메시지 (성공 시 None).
+        """
+        proj = self.common.project_dir.text()
+        pdf_input = self.common.pdf_input.text()
+        if not proj or not pdf_input:
+            return 'project_dir/pdf_input 미설정 — Stage 3 전 재실행 필요'
+        sheets_geo = os.path.join(proj, SUB_SCAN_ID, 'sheets_geo')
+        bbox_json = os.path.join(proj, SUB_SCAN_ID, 'sheet_bboxes.json')
+        pdf_main = os.path.join(proj, SUB_PDF_GEO)
+        if not os.path.isdir(pdf_main):
+            return f'Stage 1 출력 폴더 없음: {pdf_main}'
+        os.makedirs(sheets_geo, exist_ok=True)
+        try:
+            from .tools.stage2_scan_identify import SheetCache
+            cache = SheetCache(pdf_input, pdf_main,
+                               bbox_cache_path=(bbox_json
+                                                if os.path.exists(bbox_json)
+                                                else None))
+            bbox = cache.compute_sheet_world_bbox(code, sid)
+            if bbox is None:
+                return f'sheet bbox 계산 실패: {code} {sid}'
+            cache.export_sheet_geo(code, sid, sheets_geo)
+            import json as _json
+            with open(bbox_json, 'w') as f:
+                _json.dump(cache._sheet_world_bbox, f, indent=2)
+        except Exception as e:
+            return f'sheets_geo 생성 실패: {e}'
+        return None
 
     def _on_skip(self):
         row = self.file_list.currentRow()
