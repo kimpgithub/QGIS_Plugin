@@ -37,12 +37,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from ._legacy.common import (
+    from .common import (
         parse_jgw, extract_map_region, find_main_image,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 except ImportError:
-    from gis_scan_tools.tools._legacy.common import (
+    from gis_scan_tools.tools.common import (
         parse_jgw, extract_map_region, find_main_image,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
@@ -288,16 +288,14 @@ def _tesseract_tsv(img, psm='11', whitelist='', lang='eng'):
             pass
 
 
-_SHEET_TOKEN_RE = re.compile(r'^([0-9/\[\]T|]{1,2})-(\d{1,2})$')
-
-
 def ocr_sheet_id(scan_img, valid_sheets=None):
-    """좌상단 큰 'N-i' 라벨 OCR.
+    """좌상단 큰 'N-i' 라벨 OCR — hyphen-less 다수결 채택.
 
     - 스캔 좌상단 22% × 30% 크롭 → 다운스케일 + threshold + PSM 11 TSV
-    - height ≥ SHEET_OCR_MIN_HEIGHT_PX (원본 스케일) 토큰만
-    - 정규식 매치 후 문자 오인식 보정 ('/','[',']','T'→'7', '|'→'1')
-    - valid_sheets 지정 시 집합 필터 (admin의 분할 PDF 파일명에서 구성)
+    - 토큰의 hyphen은 무시하고 숫자만 추출 (대시는 흐리게 인쇄돼 OCR 누락 잦음)
+    - 첫자리/끝자리로 (prefix, idx) 구성 → valid_sheets 와 매치되는 후보만 채택
+    - 모든 config 합산 후 (vote count desc, max height desc) 정렬해 최상위 채택
+    - height ≥ SHEET_OCR_MIN_HEIGHT_PX (원본 스케일) 토큰만 후보 등록
 
     Returns:
         sheet_id ('N-i') or None
@@ -308,6 +306,7 @@ def ocr_sheet_id(scan_img, valid_sheets=None):
     crop = scan_img[:int(h * SHEET_OCR_CROP_H), :int(w * SHEET_OCR_CROP_W)]
     g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
 
+    candidates = {}  # sid -> (vote_count, max_ht)
     for sc, thr in SHEET_OCR_CONFIGS:
         gs = (cv2.resize(g, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
               if sc != 1.0 else g)
@@ -316,25 +315,24 @@ def ocr_sheet_id(scan_img, valid_sheets=None):
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
         tokens = _tesseract_tsv(bw, psm='11',
                                 whitelist='0123456789-/[]|T')
-        best = None
-        best_h = 0
         for text, _l, _t, _wd, ht in tokens:
             ht_orig = int(ht / sc) if sc != 0 else ht
             if ht_orig < SHEET_OCR_MIN_HEIGHT_PX:
                 continue
-            m = _SHEET_TOKEN_RE.match(text)
-            if not m:
+            fixed = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in text)
+            digits = re.sub(r'\D', '', fixed)
+            if len(digits) < 2:
                 continue
-            prefix = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in m.group(1))
-            sid = f'{prefix}-{m.group(2)}'
+            sid = f'{digits[0]}-{digits[-1]}'
             if valid_sheets and sid not in valid_sheets:
                 continue
-            if ht_orig > best_h:
-                best = sid
-                best_h = ht_orig
-        if best:
-            return best
-    return None
+            cnt, mh = candidates.get(sid, (0, 0))
+            candidates[sid] = (cnt + 1, max(mh, ht_orig))
+
+    if not candidates:
+        return None
+    sid, _ = max(candidates.items(), key=lambda kv: (kv[1][0], kv[1][1]))
+    return sid
 
 
 def load_shp_index(shp_path):
@@ -551,7 +549,7 @@ def ocr_admin_code(scan_img, valid_codes=None, shp_index=None):
 # ============================================================
 # 시트 PDF 캐시 + sheet bbox 계산
 # ============================================================
-# LABEL_OFFSET_X/Y_PT: _legacy/common.py에서 import (Stage 1과 공유)
+# LABEL_OFFSET_X/Y_PT: common.py에서 import (Stage 1과 공유)
 
 
 class SheetCache:
@@ -875,7 +873,7 @@ class SheetCache:
         if os.path.exists(jpg_path) and os.path.exists(jgw_path):
             return jpg_path
 
-        from ._legacy.common import write_jgw, JGWParams, PRJ_5179
+        from .common import write_jgw, JGWParams, PRJ_5179
         # JPG 저장 (_imwrite는 Unicode 경로 안전)
         ok, buf = cv2.imencode('.jpg', sheet_map,
                                [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -1027,6 +1025,24 @@ def main():
             err_c = sum(1 for x in rows if x['status'] == 'ERROR')
             print(f'  [{i}/{len(scans)}] OK={ok_c} FAIL={fail_c} '
                   f'ERR={err_c} ({(time.time()-t0)/i:.1f}s/장)')
+
+    # === Pass 1.5: CONFLICT 격리 — 동일 (admin, sheet_id) 다중 OK는 양쪽 모두 FAIL ===
+    key_counts = Counter((r['admin_code'], r['sheet_id']) for r in rows
+                          if r['status'] == 'OK')
+    n_conflict = 0
+    for r in rows:
+        if r['status'] != 'OK':
+            continue
+        key = (r['admin_code'], r['sheet_id'])
+        if key_counts[key] > 1:
+            r['status'] = 'FAIL'
+            r['method'] = 'CONFLICT'
+            r['message'] = (f'CONFLICT: 동일 (admin={key[0]}, sheet={key[1]}) '
+                            f'{key_counts[key]}건')
+            r['sheet_id'] = ''
+            n_conflict += 1
+    if n_conflict:
+        print(f'  [CONFLICT] {n_conflict}건 격리 (동일 (admin, sheet) 충돌)')
 
     # === Pass 2: 파일 작업 (identified/ 복사, _unmatched/ 복사, bbox, sheets_geo) ===
     def _move_to_unmatched(scan_path):

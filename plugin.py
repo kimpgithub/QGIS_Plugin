@@ -429,7 +429,7 @@ class Stage1Tab(StageTab):
         prj_out = os.path.join(out_dir, f'{code}.prj')
         if not os.path.exists(prj_out):
             try:
-                from .tools._legacy.common import PRJ_5179
+                from .tools.common import PRJ_5179
                 with open(prj_out, 'w') as f:
                     f.write(PRJ_5179)
                 copied.append(f'{code}.prj (기본 EPSG:5179)')

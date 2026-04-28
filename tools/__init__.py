@@ -7,5 +7,6 @@
   python -m gis_scan_tools.tools.stage4_merge
   python -m gis_scan_tools.tools.stage5_validate
 
-Legacy 모듈(common, boundary_validator 등)은 _legacy/ 에 보관.
+코어 모듈: common (이미지 I/O · JGW · ICP/FFT · GCP 유틸),
+          shp_georeferencer (SIFT 폴백), boundary_validator (Stage 5).
 """

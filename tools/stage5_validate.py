@@ -15,10 +15,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from ._legacy.boundary_validator import BoundaryValidator
+    from .boundary_validator import BoundaryValidator
     from .stage2_scan_identify import check_tesseract
 except ImportError:
-    from gis_scan_tools.tools._legacy.boundary_validator import BoundaryValidator
+    from gis_scan_tools.tools.boundary_validator import BoundaryValidator
     from gis_scan_tools.tools.stage2_scan_identify import check_tesseract
 
 

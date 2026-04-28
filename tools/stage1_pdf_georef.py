@@ -4,7 +4,7 @@
   1) largest_polygon_bbox: PDF 주황 path 중 가장 큰 것 bbox ↔
      SHP admin 가장 큰 polygon bbox. 12 admin 검증 sub-2m.
   2) grid_center:  sheet 그리드 중심 ↔ admin bbox/centroid 정렬 (폴백).
-  3) SIFT (`_legacy SHPGeoreferencer`): 텍스트 메타 추출 실패 시.
+  3) SIFT (`SHPGeoreferencer`): 텍스트 메타 추출 실패 시.
 
 핵심 최적화 (Phase 1j+):
   · PDF 1회 open — text/drawings/pixmap 통합 파싱
@@ -32,15 +32,15 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from ._legacy.shp_georeferencer import SHPGeoreferencer
-    from ._legacy.common import (
+    from .shp_georeferencer import SHPGeoreferencer
+    from .common import (
         write_jgw, JGWParams, PRJ_5179,
         LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
         extract_map_region,
     )
 except ImportError:
-    from gis_scan_tools.tools._legacy.shp_georeferencer import SHPGeoreferencer
-    from gis_scan_tools.tools._legacy.common import (
+    from gis_scan_tools.tools.shp_georeferencer import SHPGeoreferencer
+    from gis_scan_tools.tools.common import (
         write_jgw, JGWParams, PRJ_5179,
         LABEL_OFFSET_X_PT, LABEL_OFFSET_Y_PT,
         extract_map_region,

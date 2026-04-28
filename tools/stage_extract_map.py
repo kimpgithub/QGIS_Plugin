@@ -32,12 +32,12 @@ import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
-    from ._legacy.common import (
+    from .common import (
         extract_map_region_scan,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 except ImportError:
-    from gis_scan_tools.tools._legacy.common import (
+    from gis_scan_tools.tools.common import (
         extract_map_region_scan,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
