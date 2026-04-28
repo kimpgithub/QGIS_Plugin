@@ -230,16 +230,17 @@ HEADER_OCR_TARGET_W = 1080  # 0.25x for 4320-px header — Tesseract 훈련 분�
 # sheet_id OCR 설정 — 스캔 좌상단 'N-i' 대형 라벨 추출
 SHEET_OCR_CROP_H = 0.22       # 스캔 상단 비율
 SHEET_OCR_CROP_W = 0.30       # 스캔 좌측 비율
-SHEET_OCR_MIN_HEIGHT_PX = 180 # 원본 스케일 기준 최소 문자 높이 — 지도 안 작은 숫자 제외
-# (scale, threshold) 폴백 체인 — 50장 sweep 상위 5 config (s0.35/thr80이 96% 단독 커버)
-SHEET_OCR_CONFIGS = [(0.35, 80), (0.25, 130), (0.70, 80), (0.50, 80), (0.35, 100)]
+SHEET_OCR_MIN_HEIGHT_PX = 60  # OCR 토큰 최소 높이 (다운스케일 후 입력 기준)
 # OCR 문자 오인식 보정 — 7은 /, [, ], T 로 자주 읽힘 / 1은 | 로
 SHEET_OCR_CHAR_FIX = {'/': '7', '[': '7', ']': '7', 'T': '7', '|': '1'}
 
-# 라벨 단독 영역 (PSM 7/10 패스 입력) — 좌상단 큰 'N-i' 만 격리
-SHEET_OCR_LABEL_CROP_H = 0.10  # 위에서 10%
-SHEET_OCR_LABEL_CROP_W = 0.13  # 왼쪽 13%
-SHEET_OCR_LABEL_THRS = (80, 100, 130)
+# 검은 잉크 필터 (HSV) — 라벨은 검정, 행정명·경계선은 빨강 → 채도로 분리
+SHEET_OCR_BLACK_V_MAX = 100   # 밝기 임계 (V ≤)
+SHEET_OCR_BLACK_S_MAX = 60    # 채도 임계 (S ≤) — 무채색만
+# 두께 필터 — erosion-dilation. 라벨 stroke ~30-50px, 잡문자·경계 ~5-10px
+SHEET_OCR_EROSION_PX = 8
+# OCR 입력 다운스케일 (Tesseract 훈련 분포 정합)
+SHEET_OCR_INPUT_SCALE = 0.35
 
 
 def _downscale_to_width(img, target_w):
@@ -306,83 +307,65 @@ def _add_sheet_candidate(candidates, text, ht, valid_sheets):
     candidates[sid] = (cnt + 1, max(mh, ht))
 
 
-def ocr_sheet_id(scan_img, valid_sheets=None):
-    """좌상단 큰 'N-i' 라벨 OCR — 3-strategy 앙상블 + 다수결 채택.
+def _isolate_sheet_label(scan_img):
+    """좌상단 22%×30% 크롭 → HSV 검은 잉크 마스크 → 두께 필터 → OCR 입력.
 
-    - Strategy A (PSM 11 sparse): 22%×30% 크롭, 5 config 다운스케일 sweep.
-    - Strategy B (PSM 7 single line): 10%×13% 라벨 단독 크롭, 3 threshold.
-      hyphen 흐림 대비 단일 라인 강제 해석.
-    - Strategy C (PSM 10 single char + valid 끝자리 whitelist): 라벨 크롭의
-      오른쪽 절반에서 끝자리만 단독 인식. valid_sheets 의 끝자리 집합으로
-      whitelist 제한 → 잘못된 자릿수 출력 차단.
-
-    토큰의 hyphen은 무시하고 숫자만 추출. 첫·끝자리로 (prefix, idx) 구성 →
-    valid_sheets 매치 후보만 등록 (vote count desc, max height desc 채택).
-    height ≥ SHEET_OCR_MIN_HEIGHT_PX (원본 스케일) 토큰만.
+    라벨은 검정(어둡고 무채색), 행정명·경계선은 빨강(채도 높음) → 채도로 분리.
+    erosion-dilation으로 라벨처럼 두꺼운 stroke만 남김.
 
     Returns:
-        sheet_id ('N-i') or None
+        OCR-ready (black on white, 다운스케일된) 이미지. None if scan_img is None.
     """
     if scan_img is None:
         return None
     h, w = scan_img.shape[:2]
     crop = scan_img[:int(h * SHEET_OCR_CROP_H), :int(w * SHEET_OCR_CROP_W)]
-    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
-    k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    if crop.ndim == 2:
+        # grayscale 입력 — 채도 정보 없음, 밝기만으로 처리
+        v = crop
+        s = np.zeros_like(crop)
+    else:
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        v = hsv[:, :, 2]
+        s = hsv[:, :, 1]
+    black = ((v <= SHEET_OCR_BLACK_V_MAX) &
+             (s <= SHEET_OCR_BLACK_S_MAX)).astype(np.uint8) * 255
+    ksz = SHEET_OCR_EROSION_PX * 2 + 1
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+    eroded = cv2.erode(black, k)
+    thick = cv2.dilate(eroded, k)
+    feed = cv2.bitwise_not(thick)  # 글자=검정, 배경=흰색
+    sc = SHEET_OCR_INPUT_SCALE
+    return cv2.resize(feed, None, fx=sc, fy=sc,
+                      interpolation=cv2.INTER_AREA)
+
+
+def ocr_sheet_id(scan_img, valid_sheets=None):
+    """좌상단 큰 'N-i' 라벨 OCR — 검은 잉크 필터 + 두께 필터 + 다중 PSM.
+
+    파이프라인:
+      1. 22%×30% 크롭 → HSV 검은 잉크 마스크 (V≤100, S≤60)
+         라벨(검정)만 남기고 빨간 행정명·경계선·맵라인 제거.
+      2. erosion-dilation 두께 필터 → 굵은 라벨 stroke 만 잔존.
+      3. 흑백 반전 후 0.35x 다운스케일 → PSM 11/6/7 OCR.
+      4. 토큰의 hyphen은 무시, 숫자 첫·끝자리로 (prefix, idx) 구성 →
+         valid_sheets 매치 후보만 등록.
+      5. (vote count desc, max height desc) 정렬해 최상위 채택.
+
+    Returns:
+        sheet_id ('N-i') or None
+    """
+    feed = _isolate_sheet_label(scan_img)
+    if feed is None:
+        return None
 
     candidates = {}  # sid -> (vote_count, max_ht)
-
-    # === Strategy A: PSM 11 sparse text on 22%×30% crop ===
-    for sc, thr in SHEET_OCR_CONFIGS:
-        gs = (cv2.resize(g, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
-              if sc != 1.0 else g)
-        _, bw = cv2.threshold(gs, thr, 255, cv2.THRESH_BINARY)
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
-        tokens = _tesseract_tsv(bw, psm='11',
-                                whitelist='0123456789-/[]|T')
-        for text, _l, _t, _wd, ht in tokens:
-            ht_orig = int(ht / sc) if sc != 0 else ht
-            if ht_orig < SHEET_OCR_MIN_HEIGHT_PX:
-                continue
-            _add_sheet_candidate(candidates, text, ht_orig, valid_sheets)
-
-    # === Strategy B: PSM 7 single line on tight label crop ===
-    tight_h = int(h * SHEET_OCR_LABEL_CROP_H)
-    tight_w = int(w * SHEET_OCR_LABEL_CROP_W)
-    tight = g[:tight_h, :tight_w]
-    for thr in SHEET_OCR_LABEL_THRS:
-        _, bw = cv2.threshold(tight, thr, 255, cv2.THRESH_BINARY)
-        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
-        tokens = _tesseract_tsv(bw, psm='7',
-                                whitelist='0123456789-/[]|T ')
+    for psm in ('11', '6', '7'):
+        tokens = _tesseract_tsv(feed, psm=psm, whitelist='0123456789-')
         for text, _l, _t, _wd, ht in tokens:
             if ht < SHEET_OCR_MIN_HEIGHT_PX:
                 continue
             _add_sheet_candidate(candidates, text, ht, valid_sheets)
-
-    # === Strategy C: PSM 10 single char on right half, valid 끝자리만 ===
-    if valid_sheets:
-        prefixes = {sid.split('-')[0] for sid in valid_sheets if '-' in sid}
-        last_digits = ''.join(sorted({sid.rsplit('-', 1)[-1][-1]
-                                       for sid in valid_sheets
-                                       if sid and sid[-1].isdigit()}))
-        if len(prefixes) == 1 and last_digits:
-            prefix = next(iter(prefixes))
-            right = tight[:, tight_w // 2:]
-            for thr in SHEET_OCR_LABEL_THRS:
-                _, bw = cv2.threshold(right, thr, 255, cv2.THRESH_BINARY)
-                bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
-                tokens = _tesseract_tsv(bw, psm='10', whitelist=last_digits)
-                for text, _l, _t, _wd, ht in tokens:
-                    if ht < SHEET_OCR_MIN_HEIGHT_PX:
-                        continue
-                    digit = text.strip()
-                    if len(digit) == 1 and digit in last_digits:
-                        sid = f'{prefix}-{digit}'
-                        if sid not in valid_sheets:
-                            continue
-                        cnt, mh = candidates.get(sid, (0, 0))
-                        candidates[sid] = (cnt + 1, max(mh, ht))
 
     if not candidates:
         return None
@@ -391,10 +374,14 @@ def ocr_sheet_id(scan_img, valid_sheets=None):
 
 
 def dump_sheet_ocr_debug(scan_img, scan_name, out_dir, valid_sheets=None):
-    """sheet_id OCR 디버그 덤프 — FAIL/CONFLICT 케이스 환경 비교용.
+    """sheet_id OCR 디버그 덤프 — FAIL/CONFLICT 케이스 분석용.
 
-    out_dir/{scan_name}/ 에 crop.jpg, sc{sc}_thr{thr}.png, tokens.csv 저장.
-    tokens.csv: scale,thr,text,h_orig,sid_cand,valid
+    out_dir/{scan_name}/ 에 다음 산출:
+      crop.jpg     원본 좌상단 컬러 크롭
+      black.png    검은 잉크 마스크 (HSV 필터 결과)
+      thick.png    두께 필터 후 (라벨 글리프만)
+      feed.png     OCR 입력 (반전 + 다운스케일)
+      tokens.csv   psm × token × h × sid_cand × valid
     """
     if scan_img is None:
         return
@@ -404,33 +391,44 @@ def dump_sheet_ocr_debug(scan_img, scan_name, out_dir, valid_sheets=None):
     crop = scan_img[:int(h * SHEET_OCR_CROP_H), :int(w * SHEET_OCR_CROP_W)]
     _imwrite(os.path.join(d, 'crop.jpg'), crop,
              [cv2.IMWRITE_JPEG_QUALITY, 85])
-    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+
+    if crop.ndim == 2:
+        v = crop; s = np.zeros_like(crop)
+    else:
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        v = hsv[:, :, 2]; s = hsv[:, :, 1]
+    black = ((v <= SHEET_OCR_BLACK_V_MAX) &
+             (s <= SHEET_OCR_BLACK_S_MAX)).astype(np.uint8) * 255
+    _imwrite(os.path.join(d, 'black.png'), black)
+
+    ksz = SHEET_OCR_EROSION_PX * 2 + 1
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+    thick = cv2.dilate(cv2.erode(black, k), k)
+    _imwrite(os.path.join(d, 'thick.png'), thick)
+
+    feed = cv2.bitwise_not(thick)
+    sc = SHEET_OCR_INPUT_SCALE
+    feed_s = cv2.resize(feed, None, fx=sc, fy=sc,
+                        interpolation=cv2.INTER_AREA)
+    _imwrite(os.path.join(d, 'feed.png'), feed_s)
 
     tokens_csv = os.path.join(d, 'tokens.csv')
     with open(tokens_csv, 'w', newline='', encoding='utf-8') as f:
         cw = csv.writer(f)
-        cw.writerow(['scale', 'thr', 'text', 'h_orig', 'sid_cand', 'valid'])
-        for sc, thr in SHEET_OCR_CONFIGS:
-            gs = (cv2.resize(g, None, fx=sc, fy=sc,
-                             interpolation=cv2.INTER_AREA)
-                  if sc != 1.0 else g)
-            _, bw = cv2.threshold(gs, thr, 255, cv2.THRESH_BINARY)
-            k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
-            _imwrite(os.path.join(d, f'sc{sc}_thr{thr}.png'), bw)
-            tokens = _tesseract_tsv(bw, psm='11',
-                                    whitelist='0123456789-/[]|T')
+        cw.writerow(['psm', 'text', 'h', 'sid_cand', 'valid'])
+        for psm in ('11', '6', '7'):
+            tokens = _tesseract_tsv(feed_s, psm=psm,
+                                    whitelist='0123456789-')
             for text, _l, _t, _wd, ht in tokens:
-                ht_orig = int(ht / sc) if sc != 0 else ht
                 fixed = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in text)
                 digits = re.sub(r'\D', '', fixed)
                 sid_cand = (f'{digits[0]}-{digits[-1]}'
                             if len(digits) >= 2 else '')
-                valid = ('y' if (sid_cand and
+                vmark = ('y' if (sid_cand and
                                  (not valid_sheets or sid_cand in valid_sheets)
-                                 and ht_orig >= SHEET_OCR_MIN_HEIGHT_PX)
+                                 and ht >= SHEET_OCR_MIN_HEIGHT_PX)
                          else 'n')
-                cw.writerow([sc, thr, text, ht_orig, sid_cand, valid])
+                cw.writerow([psm, text, ht, sid_cand, vmark])
 
 
 def load_shp_index(shp_path):
