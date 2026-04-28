@@ -188,7 +188,7 @@ def _tesseract(img, config='--psm 6', lang='kor+eng'):
     try:
         _imwrite(tmp.name, img)
         r = subprocess.run(
-            [cmd, tmp.name, '-', '-l', lang] + config.split(),
+            [cmd, tmp.name, '-', '-l', lang, '--oem', '1'] + config.split(),
             capture_output=True, text=True, timeout=30, **_SUBPROCESS_KW)
         return r.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -210,7 +210,7 @@ def _ocr_temp(img, psm='11', lang='eng', whitelist=''):
     tmp.close()
     try:
         _imwrite(tmp.name, img)
-        args = [cmd, tmp.name, '-', '-l', lang, '--psm', psm]
+        args = [cmd, tmp.name, '-', '-l', lang, '--oem', '1', '--psm', psm]
         if whitelist:
             args += ['-c', f'tessedit_char_whitelist={whitelist}']
         r = subprocess.run(args, capture_output=True, text=True,
@@ -258,7 +258,7 @@ def _tesseract_tsv(img, psm='11', whitelist='', lang='eng'):
     tmp.close()
     try:
         _imwrite(tmp.name, img)
-        args = [cmd, tmp.name, '-', '-l', lang, '--psm', psm]
+        args = [cmd, tmp.name, '-', '-l', lang, '--oem', '1', '--psm', psm]
         if whitelist:
             args += ['-c', f'tessedit_char_whitelist={whitelist}']
         args.append('tsv')
@@ -333,6 +333,49 @@ def ocr_sheet_id(scan_img, valid_sheets=None):
         return None
     sid, _ = max(candidates.items(), key=lambda kv: (kv[1][0], kv[1][1]))
     return sid
+
+
+def dump_sheet_ocr_debug(scan_img, scan_name, out_dir, valid_sheets=None):
+    """sheet_id OCR 디버그 덤프 — FAIL/CONFLICT 케이스 환경 비교용.
+
+    out_dir/{scan_name}/ 에 crop.jpg, sc{sc}_thr{thr}.png, tokens.csv 저장.
+    tokens.csv: scale,thr,text,h_orig,sid_cand,valid
+    """
+    if scan_img is None:
+        return
+    d = os.path.join(out_dir, scan_name)
+    os.makedirs(d, exist_ok=True)
+    h, w = scan_img.shape[:2]
+    crop = scan_img[:int(h * SHEET_OCR_CROP_H), :int(w * SHEET_OCR_CROP_W)]
+    _imwrite(os.path.join(d, 'crop.jpg'), crop,
+             [cv2.IMWRITE_JPEG_QUALITY, 85])
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+
+    tokens_csv = os.path.join(d, 'tokens.csv')
+    with open(tokens_csv, 'w', newline='', encoding='utf-8') as f:
+        cw = csv.writer(f)
+        cw.writerow(['scale', 'thr', 'text', 'h_orig', 'sid_cand', 'valid'])
+        for sc, thr in SHEET_OCR_CONFIGS:
+            gs = (cv2.resize(g, None, fx=sc, fy=sc,
+                             interpolation=cv2.INTER_AREA)
+                  if sc != 1.0 else g)
+            _, bw = cv2.threshold(gs, thr, 255, cv2.THRESH_BINARY)
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
+            _imwrite(os.path.join(d, f'sc{sc}_thr{thr}.png'), bw)
+            tokens = _tesseract_tsv(bw, psm='11',
+                                    whitelist='0123456789-/[]|T')
+            for text, _l, _t, _wd, ht in tokens:
+                ht_orig = int(ht / sc) if sc != 0 else ht
+                fixed = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in text)
+                digits = re.sub(r'\D', '', fixed)
+                sid_cand = (f'{digits[0]}-{digits[-1]}'
+                            if len(digits) >= 2 else '')
+                valid = ('y' if (sid_cand and
+                                 (not valid_sheets or sid_cand in valid_sheets)
+                                 and ht_orig >= SHEET_OCR_MIN_HEIGHT_PX)
+                         else 'n')
+                cw.writerow([sc, thr, text, ht_orig, sid_cand, valid])
 
 
 def load_shp_index(shp_path):
@@ -1043,6 +1086,22 @@ def main():
             n_conflict += 1
     if n_conflict:
         print(f'  [CONFLICT] {n_conflict}건 격리 (동일 (admin, sheet) 충돌)')
+
+    # === Pass 1.6: sheet_id OCR 실패/CONFLICT 디버그 덤프 (환경 비교용) ===
+    debug_dir = os.path.join(args.out_dir, '_debug_sheet_ocr')
+    n_dump = 0
+    for r in rows:
+        if r['status'] == 'FAIL' and r['method'] in ('OCR_SHEET', 'CONFLICT'):
+            img = _imread(r['scan_path'])
+            if img is None:
+                continue
+            valid = (cache.get_valid_sheet_ids(r['admin_code'])
+                     if r['admin_code'] else None)
+            scan_name = os.path.splitext(os.path.basename(r['scan_path']))[0]
+            dump_sheet_ocr_debug(img, scan_name, debug_dir, valid_sheets=valid)
+            n_dump += 1
+    if n_dump:
+        print(f'  [DEBUG] sheet OCR 덤프 {n_dump}건 → {debug_dir}')
 
     # === Pass 2: 파일 작업 (identified/ 복사, _unmatched/ 복사, bbox, sheets_geo) ===
     def _move_to_unmatched(scan_path):
