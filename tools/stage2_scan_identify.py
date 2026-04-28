@@ -236,6 +236,11 @@ SHEET_OCR_CONFIGS = [(0.35, 80), (0.25, 130), (0.70, 80), (0.50, 80), (0.35, 100
 # OCR 문자 오인식 보정 — 7은 /, [, ], T 로 자주 읽힘 / 1은 | 로
 SHEET_OCR_CHAR_FIX = {'/': '7', '[': '7', ']': '7', 'T': '7', '|': '1'}
 
+# 라벨 단독 영역 (PSM 7/10 패스 입력) — 좌상단 큰 'N-i' 만 격리
+SHEET_OCR_LABEL_CROP_H = 0.10  # 위에서 10%
+SHEET_OCR_LABEL_CROP_W = 0.13  # 왼쪽 13%
+SHEET_OCR_LABEL_THRS = (80, 100, 130)
+
 
 def _downscale_to_width(img, target_w):
     h, w = img.shape[:2]
@@ -288,14 +293,32 @@ def _tesseract_tsv(img, psm='11', whitelist='', lang='eng'):
             pass
 
 
-def ocr_sheet_id(scan_img, valid_sheets=None):
-    """좌상단 큰 'N-i' 라벨 OCR — hyphen-less 다수결 채택.
+def _add_sheet_candidate(candidates, text, ht, valid_sheets):
+    """OCR 토큰 → digit 추출 후 valid_sheets 매치되는 sid를 후보 dict에 누적."""
+    fixed = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in text)
+    digits = re.sub(r'\D', '', fixed)
+    if len(digits) < 2:
+        return
+    sid = f'{digits[0]}-{digits[-1]}'
+    if valid_sheets and sid not in valid_sheets:
+        return
+    cnt, mh = candidates.get(sid, (0, 0))
+    candidates[sid] = (cnt + 1, max(mh, ht))
 
-    - 스캔 좌상단 22% × 30% 크롭 → 다운스케일 + threshold + PSM 11 TSV
-    - 토큰의 hyphen은 무시하고 숫자만 추출 (대시는 흐리게 인쇄돼 OCR 누락 잦음)
-    - 첫자리/끝자리로 (prefix, idx) 구성 → valid_sheets 와 매치되는 후보만 채택
-    - 모든 config 합산 후 (vote count desc, max height desc) 정렬해 최상위 채택
-    - height ≥ SHEET_OCR_MIN_HEIGHT_PX (원본 스케일) 토큰만 후보 등록
+
+def ocr_sheet_id(scan_img, valid_sheets=None):
+    """좌상단 큰 'N-i' 라벨 OCR — 3-strategy 앙상블 + 다수결 채택.
+
+    - Strategy A (PSM 11 sparse): 22%×30% 크롭, 5 config 다운스케일 sweep.
+    - Strategy B (PSM 7 single line): 10%×13% 라벨 단독 크롭, 3 threshold.
+      hyphen 흐림 대비 단일 라인 강제 해석.
+    - Strategy C (PSM 10 single char + valid 끝자리 whitelist): 라벨 크롭의
+      오른쪽 절반에서 끝자리만 단독 인식. valid_sheets 의 끝자리 집합으로
+      whitelist 제한 → 잘못된 자릿수 출력 차단.
+
+    토큰의 hyphen은 무시하고 숫자만 추출. 첫·끝자리로 (prefix, idx) 구성 →
+    valid_sheets 매치 후보만 등록 (vote count desc, max height desc 채택).
+    height ≥ SHEET_OCR_MIN_HEIGHT_PX (원본 스케일) 토큰만.
 
     Returns:
         sheet_id ('N-i') or None
@@ -305,13 +328,15 @@ def ocr_sheet_id(scan_img, valid_sheets=None):
     h, w = scan_img.shape[:2]
     crop = scan_img[:int(h * SHEET_OCR_CROP_H), :int(w * SHEET_OCR_CROP_W)]
     g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
     candidates = {}  # sid -> (vote_count, max_ht)
+
+    # === Strategy A: PSM 11 sparse text on 22%×30% crop ===
     for sc, thr in SHEET_OCR_CONFIGS:
         gs = (cv2.resize(g, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
               if sc != 1.0 else g)
         _, bw = cv2.threshold(gs, thr, 255, cv2.THRESH_BINARY)
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
         tokens = _tesseract_tsv(bw, psm='11',
                                 whitelist='0123456789-/[]|T')
@@ -319,15 +344,45 @@ def ocr_sheet_id(scan_img, valid_sheets=None):
             ht_orig = int(ht / sc) if sc != 0 else ht
             if ht_orig < SHEET_OCR_MIN_HEIGHT_PX:
                 continue
-            fixed = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in text)
-            digits = re.sub(r'\D', '', fixed)
-            if len(digits) < 2:
+            _add_sheet_candidate(candidates, text, ht_orig, valid_sheets)
+
+    # === Strategy B: PSM 7 single line on tight label crop ===
+    tight_h = int(h * SHEET_OCR_LABEL_CROP_H)
+    tight_w = int(w * SHEET_OCR_LABEL_CROP_W)
+    tight = g[:tight_h, :tight_w]
+    for thr in SHEET_OCR_LABEL_THRS:
+        _, bw = cv2.threshold(tight, thr, 255, cv2.THRESH_BINARY)
+        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
+        tokens = _tesseract_tsv(bw, psm='7',
+                                whitelist='0123456789-/[]|T ')
+        for text, _l, _t, _wd, ht in tokens:
+            if ht < SHEET_OCR_MIN_HEIGHT_PX:
                 continue
-            sid = f'{digits[0]}-{digits[-1]}'
-            if valid_sheets and sid not in valid_sheets:
-                continue
-            cnt, mh = candidates.get(sid, (0, 0))
-            candidates[sid] = (cnt + 1, max(mh, ht_orig))
+            _add_sheet_candidate(candidates, text, ht, valid_sheets)
+
+    # === Strategy C: PSM 10 single char on right half, valid 끝자리만 ===
+    if valid_sheets:
+        prefixes = {sid.split('-')[0] for sid in valid_sheets if '-' in sid}
+        last_digits = ''.join(sorted({sid.rsplit('-', 1)[-1][-1]
+                                       for sid in valid_sheets
+                                       if sid and sid[-1].isdigit()}))
+        if len(prefixes) == 1 and last_digits:
+            prefix = next(iter(prefixes))
+            right = tight[:, tight_w // 2:]
+            for thr in SHEET_OCR_LABEL_THRS:
+                _, bw = cv2.threshold(right, thr, 255, cv2.THRESH_BINARY)
+                bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k)
+                tokens = _tesseract_tsv(bw, psm='10', whitelist=last_digits)
+                for text, _l, _t, _wd, ht in tokens:
+                    if ht < SHEET_OCR_MIN_HEIGHT_PX:
+                        continue
+                    digit = text.strip()
+                    if len(digit) == 1 and digit in last_digits:
+                        sid = f'{prefix}-{digit}'
+                        if sid not in valid_sheets:
+                            continue
+                        cnt, mh = candidates.get(sid, (0, 0))
+                        candidates[sid] = (cnt + 1, max(mh, ht))
 
     if not candidates:
         return None
