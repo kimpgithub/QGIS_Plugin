@@ -72,95 +72,38 @@ ORB_SCAN_W = 800           # ORB 매칭용 스캔 다운스케일 폭
 ORB_NFEATURES = 5000
 ORB_MIN_INLIERS = 30
 ORB_RANSAC_THR = 5.0
-# Post-warp trim 파라미터 (ORB 코너 외삽 오차 보정)
-TRIM_LABEL_QUADRANT = 0.20       # 좌상단 분석 영역 비율 (이 안에서 라벨 검출)
-TRIM_LABEL_V_MAX = 100           # 검은 잉크 임계 (밝기)
-TRIM_LABEL_S_MAX = 60            # 검은 잉크 임계 (채도)
-TRIM_LABEL_EROSION_FRAC = 0.001  # warped 폭 대비 erosion 커널 (라벨 두께 필터)
-TRIM_LABEL_MIN_AREA_FRAC = 1e-5  # 검출 글리프 최소 면적 (warped 전체 대비)
+# ECC (Enhanced Correlation Coefficient) — ORB 후 픽셀 단위 정밀화
+ECC_MAX_ITER = 50
+ECC_EPS = 1e-5
+ECC_GAUSS_FILT = 5
 
 
-def _trim_via_label(warped):
-    """좌상단 시트라벨 (예: '4-1') 글리프를 anchor 로 본문 좌상단 코너 정밀 검출.
+def _refine_homography_ecc(body, scan_g, H_init):
+    """ORB H 를 ECC (Enhanced Correlation Coefficient) 로 픽셀 단위 정밀화.
 
-    PDF body 템플릿은 본문 좌상단이 이미지 (0,0). 시트라벨은 그 코너 바로
-    안쪽 (~수십 px) 에 위치하는 굵은 검정 글리프. 두께 필터 + 가장 큰
-    connected component 로 라벨 위치를 robust 하게 검출.
+    body, scan_g 모두 grayscale. H_init: ORB 가 추정한 body→scan 호모그래피.
+    ECC 가 모든 픽셀 intensity correlation 을 최대화하도록 H 를 iterative
+    refine. 코너 외삽 오차를 직접 보정 (sparse feature 한계 우회).
 
     Returns:
-        (label_top, label_left, label_h, label_w) — 검출 성공
-        None — 실패 (라벨 미검출)
+        H_refined (np.float64) or H_init on failure.
     """
-    h, w = warped.shape[:2]
-    qh = int(h * TRIM_LABEL_QUADRANT)
-    qw = int(w * TRIM_LABEL_QUADRANT)
-    region = warped[:qh, :qw]
-    if region.ndim == 3:
-        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-        v = hsv[:, :, 2]; sat = hsv[:, :, 1]
-        black = ((v <= TRIM_LABEL_V_MAX) &
-                 (sat <= TRIM_LABEL_S_MAX)).astype(np.uint8) * 255
-    else:
-        black = (region <= TRIM_LABEL_V_MAX).astype(np.uint8) * 255
-    er = max(5, int(w * TRIM_LABEL_EROSION_FRAC))
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                   (er * 2 + 1, er * 2 + 1))
-    thick = cv2.morphologyEx(black, cv2.MORPH_OPEN, k)
-    n, _, stats, _ = cv2.connectedComponentsWithStats(thick)
-    if n <= 1:
-        return None
-    min_area = int(qh * qw * TRIM_LABEL_MIN_AREA_FRAC)
-    cands = [i for i in range(1, n)
-             if stats[i, cv2.CC_STAT_AREA] >= min_area]
-    if not cands:
-        return None
-    # 라벨은 'N-i' 등 다중 글리프로 분리됨 (예: '4', '-', '3' 3개 CC).
-    # 가장 큰 CC (앵커, 보통 'N' 또는 'i') 의 행 위치를 기준으로 같은 줄에
-    # 있는 CC 들 union → 라벨 전체 bbox.
-    anchor = max(cands, key=lambda i: stats[i, cv2.CC_STAT_AREA])
-    a_top = stats[anchor, cv2.CC_STAT_TOP]
-    a_h = stats[anchor, cv2.CC_STAT_HEIGHT]
-    a_cy = a_top + a_h / 2
-    # 같은 행 (수직 중심이 anchor 글리프 높이 범위 안) + 면적 anchor 의 10% 이상
-    same_row = []
-    for i in cands:
-        cy = stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] / 2
-        if abs(cy - a_cy) <= a_h * 0.6 and \
-           stats[i, cv2.CC_STAT_AREA] >= stats[anchor, cv2.CC_STAT_AREA] * 0.1:
-            same_row.append(i)
-    if not same_row:
-        same_row = [anchor]
-    # union bbox
-    label_top = min(stats[i, cv2.CC_STAT_TOP] for i in same_row)
-    label_left = min(stats[i, cv2.CC_STAT_LEFT] for i in same_row)
-    label_bot = max(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]
-                     for i in same_row)
-    label_right = max(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]
-                       for i in same_row)
-    return (int(label_top), int(label_left),
-            int(label_bot - label_top), int(label_right - label_left))
-
-
-def _trim_to_frame(warped):
-    """라벨 anchor 기반 좌·상 trim. (라벨이 본문 좌상단에 위치한다는 사전 정보 활용)
-
-    1. 라벨 검출 → (label_top, label_left)
-    2. 본문 좌상단 코너 = 라벨 좌상단 (라벨이 본문 안쪽 시작점이라 가정)
-    3. warped 를 (label_top, label_left) 에서 시작하도록 trim
-    4. 우·하단은 미수정 (라벨 anchor 없음, ORB warp 결과 그대로)
-    """
-    label = _trim_via_label(warped)
-    if label is None:
-        return warped, None
-    label_top, label_left, label_h, label_w = label
-    # 라벨은 본문 좌상단 코너에서 동일 거리만큼 떨어져 위치 (사용자 측정 25%).
-    # 검출되는 CC 가 단일 글자('4')라 width < height 이므로 양 방향 동일하게
-    # label_h 기준으로 margin 산출.
-    margin = int(label_h * 0.25)
-    top = max(0, label_top - margin)
-    left = max(0, label_left - margin)
-    h, w = warped.shape[:2]
-    return warped[top:, left:], (top, h, left, w)
+    try:
+        body_f = body.astype(np.float32) / 255.0
+        scan_f = scan_g.astype(np.float32) / 255.0
+        # ECC 의 warpMatrix 는 float32 필요
+        warp = H_init.astype(np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                    ECC_MAX_ITER, ECC_EPS)
+        cc, warp = cv2.findTransformECC(
+            body_f, scan_f, warp,
+            motionType=cv2.MOTION_HOMOGRAPHY,
+            criteria=criteria,
+            inputMask=None,
+            gaussFiltSize=ECC_GAUSS_FILT)
+        return warp.astype(np.float64)
+    except cv2.error:
+        return H_init
 
 
 def orb_extract_body(scan, body_template_path):
@@ -207,6 +150,9 @@ def orb_extract_body(scan, body_template_path):
     if inliers < ORB_MIN_INLIERS:
         return None
 
+    # ECC dense refinement — ORB sparse 한계 극복, 코너 외삽 오차 픽셀 단위 보정
+    H = _refine_homography_ecc(body, scan_g, H)
+
     # PDF body 4 코너 → scan 다운스케일 좌표 → 원본 해상도 환산
     corners = np.float32([[0, 0], [tw, 0], [tw, th], [0, th]]).reshape(-1, 1, 2)
     proj = cv2.perspectiveTransform(corners, H).reshape(-1, 2) / sc
@@ -233,10 +179,7 @@ def orb_extract_body(scan, body_template_path):
     M = cv2.getPerspectiveTransform(src_quad, dst_quad)
     warped = cv2.warpPerspective(scan, M, (out_w, out_h),
                                   flags=cv2.INTER_LINEAR)
-
-    # post-warp trim — frame 라인까지 정밀 보정 (코너 외삽 오차 흡수)
-    warped, _ = _trim_to_frame(warped)
-    aspect = warped.shape[1] / warped.shape[0]
+    aspect = out_w / out_h
     return warped, ax_bbox, inliers, aspect, proj
 
 
