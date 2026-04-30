@@ -114,13 +114,31 @@ def _trim_via_label(warped):
              if stats[i, cv2.CC_STAT_AREA] >= min_area]
     if not cands:
         return None
-    # 좌상단에 가까운 큰 CC (left + top 합 최소)
-    label_idx = min(cands, key=lambda i: (stats[i, cv2.CC_STAT_LEFT] +
-                                           stats[i, cv2.CC_STAT_TOP]))
-    return (int(stats[label_idx, cv2.CC_STAT_TOP]),
-            int(stats[label_idx, cv2.CC_STAT_LEFT]),
-            int(stats[label_idx, cv2.CC_STAT_HEIGHT]),
-            int(stats[label_idx, cv2.CC_STAT_WIDTH]))
+    # 라벨은 'N-i' 등 다중 글리프로 분리됨 (예: '4', '-', '3' 3개 CC).
+    # 가장 큰 CC (앵커, 보통 'N' 또는 'i') 의 행 위치를 기준으로 같은 줄에
+    # 있는 CC 들 union → 라벨 전체 bbox.
+    anchor = max(cands, key=lambda i: stats[i, cv2.CC_STAT_AREA])
+    a_top = stats[anchor, cv2.CC_STAT_TOP]
+    a_h = stats[anchor, cv2.CC_STAT_HEIGHT]
+    a_cy = a_top + a_h / 2
+    # 같은 행 (수직 중심이 anchor 글리프 높이 범위 안) + 면적 anchor 의 10% 이상
+    same_row = []
+    for i in cands:
+        cy = stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] / 2
+        if abs(cy - a_cy) <= a_h * 0.6 and \
+           stats[i, cv2.CC_STAT_AREA] >= stats[anchor, cv2.CC_STAT_AREA] * 0.1:
+            same_row.append(i)
+    if not same_row:
+        same_row = [anchor]
+    # union bbox
+    label_top = min(stats[i, cv2.CC_STAT_TOP] for i in same_row)
+    label_left = min(stats[i, cv2.CC_STAT_LEFT] for i in same_row)
+    label_bot = max(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]
+                     for i in same_row)
+    label_right = max(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]
+                       for i in same_row)
+    return (int(label_top), int(label_left),
+            int(label_bot - label_top), int(label_right - label_left))
 
 
 def _trim_to_frame(warped):
