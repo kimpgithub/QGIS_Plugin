@@ -72,13 +72,89 @@ ORB_SCAN_W = 800           # ORB 매칭용 스캔 다운스케일 폭
 ORB_NFEATURES = 5000
 ORB_MIN_INLIERS = 30
 ORB_RANSAC_THR = 5.0
+# Post-warp trim 파라미터 (ORB 코너 외삽 오차 보정)
+TRIM_LABEL_QUADRANT = 0.20       # 좌상단 분석 영역 비율 (이 안에서 라벨 검출)
+TRIM_LABEL_V_MAX = 100           # 검은 잉크 임계 (밝기)
+TRIM_LABEL_S_MAX = 60            # 검은 잉크 임계 (채도)
+TRIM_LABEL_EROSION_FRAC = 0.001  # warped 폭 대비 erosion 커널 (라벨 두께 필터)
+TRIM_LABEL_MIN_AREA_FRAC = 1e-5  # 검출 글리프 최소 면적 (warped 전체 대비)
+
+
+def _trim_via_label(warped):
+    """좌상단 시트라벨 (예: '4-1') 글리프를 anchor 로 본문 좌상단 코너 정밀 검출.
+
+    PDF body 템플릿은 본문 좌상단이 이미지 (0,0). 시트라벨은 그 코너 바로
+    안쪽 (~수십 px) 에 위치하는 굵은 검정 글리프. 두께 필터 + 가장 큰
+    connected component 로 라벨 위치를 robust 하게 검출.
+
+    Returns:
+        (label_top, label_left, label_h, label_w) — 검출 성공
+        None — 실패 (라벨 미검출)
+    """
+    h, w = warped.shape[:2]
+    qh = int(h * TRIM_LABEL_QUADRANT)
+    qw = int(w * TRIM_LABEL_QUADRANT)
+    region = warped[:qh, :qw]
+    if region.ndim == 3:
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        v = hsv[:, :, 2]; sat = hsv[:, :, 1]
+        black = ((v <= TRIM_LABEL_V_MAX) &
+                 (sat <= TRIM_LABEL_S_MAX)).astype(np.uint8) * 255
+    else:
+        black = (region <= TRIM_LABEL_V_MAX).astype(np.uint8) * 255
+    er = max(5, int(w * TRIM_LABEL_EROSION_FRAC))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                   (er * 2 + 1, er * 2 + 1))
+    thick = cv2.morphologyEx(black, cv2.MORPH_OPEN, k)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(thick)
+    if n <= 1:
+        return None
+    min_area = int(qh * qw * TRIM_LABEL_MIN_AREA_FRAC)
+    cands = [i for i in range(1, n)
+             if stats[i, cv2.CC_STAT_AREA] >= min_area]
+    if not cands:
+        return None
+    # 좌상단에 가까운 큰 CC (left + top 합 최소)
+    label_idx = min(cands, key=lambda i: (stats[i, cv2.CC_STAT_LEFT] +
+                                           stats[i, cv2.CC_STAT_TOP]))
+    return (int(stats[label_idx, cv2.CC_STAT_TOP]),
+            int(stats[label_idx, cv2.CC_STAT_LEFT]),
+            int(stats[label_idx, cv2.CC_STAT_HEIGHT]),
+            int(stats[label_idx, cv2.CC_STAT_WIDTH]))
+
+
+def _trim_to_frame(warped):
+    """라벨 anchor 기반 좌·상 trim. (라벨이 본문 좌상단에 위치한다는 사전 정보 활용)
+
+    1. 라벨 검출 → (label_top, label_left)
+    2. 본문 좌상단 코너 = 라벨 좌상단 (라벨이 본문 안쪽 시작점이라 가정)
+    3. warped 를 (label_top, label_left) 에서 시작하도록 trim
+    4. 우·하단은 미수정 (라벨 anchor 없음, ORB warp 결과 그대로)
+    """
+    label = _trim_via_label(warped)
+    if label is None:
+        return warped, None
+    label_top, label_left, label_h, label_w = label
+    # 라벨은 본문 좌상단 코너에서 동일 거리만큼 떨어져 위치 (사용자 측정 25%).
+    # 검출되는 CC 가 단일 글자('4')라 width < height 이므로 양 방향 동일하게
+    # label_h 기준으로 margin 산출.
+    margin = int(label_h * 0.25)
+    top = max(0, label_top - margin)
+    left = max(0, label_left - margin)
+    h, w = warped.shape[:2]
+    return warped[top:, left:], (top, h, left, w)
 
 
 def orb_extract_body(scan, body_template_path):
-    """ORB 매칭으로 scan 내 PDF body 영역 검출.
+    """ORB 매칭으로 scan 내 PDF body 영역 검출 + perspective warp.
+
+    PDF body 4 코너를 scan 좌표로 projection 한 quadrilateral 을 그대로
+    perspective warp 의 src 로 사용 → 기울어진 스캔도 deskew + crop 동시.
+    출력 크기는 4 변 길이 평균으로 결정 (원본 해상도 보존에 가깝게).
 
     Returns:
-        (bbox_xywh, n_inliers, detected_aspect) — 성공
+        (warped_img, axis_bbox_xywh, n_inliers, output_aspect, proj_quad)
+            — 성공. proj_quad: 원본 해상도 4 코너 (디버그 시각화용)
         None — 실패 (템플릿 없음/매칭 부족/homography 실패)
     """
     body = cv2.imread(body_template_path, cv2.IMREAD_GRAYSCALE)
@@ -113,19 +189,37 @@ def orb_extract_body(scan, body_template_path):
     if inliers < ORB_MIN_INLIERS:
         return None
 
+    # PDF body 4 코너 → scan 다운스케일 좌표 → 원본 해상도 환산
     corners = np.float32([[0, 0], [tw, 0], [tw, th], [0, th]]).reshape(-1, 1, 2)
-    proj = cv2.perspectiveTransform(corners, H).reshape(-1, 2)
+    proj = cv2.perspectiveTransform(corners, H).reshape(-1, 2) / sc
+    # axis-aligned bbox (status 기록용)
     minx, miny = proj.min(axis=0)
     maxx, maxy = proj.max(axis=0)
-    x0 = max(0, int(minx / sc))
-    y0 = max(0, int(miny / sc))
-    x1 = min(sw, int(maxx / sc))
-    y1 = min(sh, int(maxy / sc))
-    bw, bh = x1 - x0, y1 - y0
-    if bw <= 0 or bh <= 0:
+    ax_bbox = (max(0, int(minx)), max(0, int(miny)),
+               min(sw, int(maxx)) - max(0, int(minx)),
+               min(sh, int(maxy)) - max(0, int(miny)))
+
+    # 출력 크기 = 4 변 길이 평균
+    p_tl, p_tr, p_br, p_bl = proj
+    width = (np.linalg.norm(p_tr - p_tl) +
+             np.linalg.norm(p_br - p_bl)) / 2
+    height = (np.linalg.norm(p_bl - p_tl) +
+              np.linalg.norm(p_br - p_tr)) / 2
+    out_w = int(round(width))
+    out_h = int(round(height))
+    if out_w <= 0 or out_h <= 0:
         return None
-    aspect = bw / bh
-    return (x0, y0, bw, bh), inliers, aspect
+
+    src_quad = proj.astype(np.float32)
+    dst_quad = np.float32([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]])
+    M = cv2.getPerspectiveTransform(src_quad, dst_quad)
+    warped = cv2.warpPerspective(scan, M, (out_w, out_h),
+                                  flags=cv2.INTER_LINEAR)
+
+    # post-warp trim — frame 라인까지 정밀 보정 (코너 외삽 오차 흡수)
+    warped, _ = _trim_to_frame(warped)
+    aspect = warped.shape[1] / warped.shape[0]
+    return warped, ax_bbox, inliers, aspect, proj
 
 
 def _expected_aspect(sheet_bboxes, admin, sid):
@@ -189,6 +283,22 @@ def _aspect_guard(scan_shape, bbox, expected_aspect, tol=0.03):
         return None, deviation, ''
 
 
+def _save_orb_debug(scan, proj, debug_dir, name, downscale=0.15):
+    """ORB 매칭 4 코너를 scan 위에 overlay 해서 저장 (시각 검증용).
+
+    proj: 원본 해상도 4 코너 좌표 (orb_extract_body 산출).
+    """
+    sh, sw = scan.shape[:2]
+    vis = cv2.resize(scan, None, fx=downscale, fy=downscale,
+                     interpolation=cv2.INTER_AREA)
+    pts = (proj * downscale).astype(np.int32)
+    cv2.polylines(vis, [pts], True, (0, 255, 0), 2)
+    for p in pts:
+        cv2.circle(vis, tuple(p), 6, (0, 0, 255), -1)
+    out = os.path.join(debug_dir, f'{name}_proj.jpg')
+    _imwrite(out, vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='지도영역 추출 (ORB 매칭 기본 / HSV 폴백)')
@@ -207,6 +317,8 @@ def main():
                     help='Stage 2 산출 sheet_bboxes.json — 종횡비 가드 활성화')
     ap.add_argument('--aspect-tol', type=float, default=0.03,
                     help='종횡비 편차 허용 (기본 3%%, HSV 폴백 시 보정)')
+    ap.add_argument('--no-debug', action='store_true',
+                    help='ORB 매칭 4 코너 overlay 디버그 이미지 저장 비활성')
     args = ap.parse_args()
 
     sheet_bboxes = {}
@@ -222,6 +334,10 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     targets = _discover_identified(args.identified)
     has_cache = args.sheet_cache and os.path.isdir(args.sheet_cache)
+    debug_dir = (None if args.no_debug
+                 else os.path.join(args.out_dir, '_orb_debug'))
+    if debug_dir:
+        os.makedirs(debug_dir, exist_ok=True)
     print(f'[지도영역 추출] {len(targets)}장 처리 시작 '
           f'(mode={"ORB+HSV폴백" if has_cache else "HSV 단독"})')
 
@@ -251,21 +367,30 @@ def main():
             method = ''
             inliers = ''
             bbox = None
+            cropped = None
 
-            # 1차: ORB 매칭 (sheet-cache + body 템플릿 있을 때)
+            # 1차: ORB 매칭 + perspective warp (deskew + crop 동시)
             if has_cache:
                 body_path = os.path.join(args.sheet_cache,
                                           f'{admin}_{sid}.body.jpg')
                 if os.path.exists(body_path):
                     res = orb_extract_body(scan, body_path)
                     if res is not None:
-                        bbox, n_in, _ = res
+                        cropped, bbox, n_in, _, proj = res
                         method = 'ORB'
                         inliers = str(n_in)
                         n_orb += 1
+                        if debug_dir:
+                            scan_name = os.path.splitext(
+                                os.path.basename(scan_path))[0]
+                            try:
+                                _save_orb_debug(scan, proj, debug_dir,
+                                                scan_name)
+                            except Exception:
+                                pass
 
-            # 2차: HSV 폴백
-            if bbox is None:
+            # 2차: HSV 폴백 (axis-aligned crop)
+            if cropped is None:
                 try:
                     _cropped, bbox = extract_map_region_scan(
                         scan,
@@ -282,7 +407,7 @@ def main():
                     n_err += 1
                     continue
 
-            # 종횡비 가드 — HSV 결과만 보정 (ORB 는 충분 정확)
+            # 종횡비 가드 — HSV 결과만 보정 (ORB warped 는 정확)
             exp_aspect = _expected_aspect(sheet_bboxes, admin, sid)
             axis = ''
             deviation = 0.0
@@ -292,16 +417,16 @@ def main():
                 if corrected_bbox is not None:
                     bbox = corrected_bbox
                     n_corrected += 1
+                x, y, bw, bh = bbox
+                cropped = scan[y:y+bh, x:x+bw]
             else:
-                # ORB 결과의 종횡비 편차도 기록
+                # ORB warped 종횡비 편차 기록만
                 if exp_aspect:
-                    x, y, bw, bh = bbox
-                    det = bw / bh if bh > 0 else 0
+                    ch, cw = cropped.shape[:2]
+                    det = cw / ch if ch > 0 else 0
                     deviation = (det - exp_aspect) / exp_aspect
-
-            x, y, bw, bh = bbox
-            cropped = scan[y:y+bh, x:x+bw]
-            det_aspect = bw / bh if bh > 0 else 0
+            ch, cw = cropped.shape[:2]
+            det_aspect = cw / ch if ch > 0 else 0
 
             rel = os.path.relpath(scan_path, args.identified)
             out_path = os.path.join(args.out_dir, rel)
