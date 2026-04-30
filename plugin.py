@@ -820,7 +820,9 @@ class RecoveryTab(QWidget):
         os.makedirs(sheets_geo, exist_ok=True)
         try:
             from .tools.stage2_scan_identify import SheetCache
+            sheet_cache_dir = os.path.join(proj, SUB_SCAN_ID, '_sheet_cache')
             cache = SheetCache(pdf_input, pdf_main,
+                               cache_dir=sheet_cache_dir,
                                bbox_cache_path=(bbox_json
                                                 if os.path.exists(bbox_json)
                                                 else None))
@@ -870,9 +872,17 @@ class ExtractMapTab(StageTab):
 
     def get_argv(self):
         self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
-        return ['--identified',
-                os.path.join(self.common.sub(SUB_SCAN_ID), 'identified'),
+        scan_id_dir = self.common.sub(SUB_SCAN_ID)
+        argv = ['--identified', os.path.join(scan_id_dir, 'identified'),
                 '--out', self.get_out_dir()]
+        # ORB 매칭용 body 템플릿 (Stage 2 산출)
+        sheet_cache = os.path.join(scan_id_dir, '_sheet_cache')
+        if os.path.isdir(sheet_cache):
+            argv += ['--sheet-cache', sheet_cache]
+        sheet_bboxes = os.path.join(scan_id_dir, 'sheet_bboxes.json')
+        if os.path.exists(sheet_bboxes):
+            argv += ['--sheet-bboxes', sheet_bboxes]
+        return argv
 
 
 # ============================================================

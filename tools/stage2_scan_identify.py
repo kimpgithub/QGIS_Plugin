@@ -984,7 +984,34 @@ class SheetCache:
         write_jgw(jgw_path, jgw)
         with open(prj_path, 'w') as f:
             f.write(PRJ_5179)
+
+        # S7 ORB 매칭용 body 템플릿 (800px 폭) — 시트당 1회 캐시
+        self._save_body_template(admin_code, sheet_id, sheet_map)
         return jpg_path
+
+    def _save_body_template(self, admin_code, sheet_id, body_img,
+                             target_w=800):
+        """ORB 매칭용 다운스케일 body 캐시 저장.
+
+        S7 (stage_extract_map) 가 scan↔PDF body 매칭으로 정확한 본문 영역을
+        검출할 때 참조 템플릿으로 사용. 시트당 ~1MB.
+        """
+        out = os.path.join(self.cache_dir,
+                           f'{admin_code}_{sheet_id}.body.jpg')
+        if os.path.exists(out):
+            return out
+        h, w = body_img.shape[:2]
+        if w > target_w:
+            sc = target_w / w
+            small = cv2.resize(body_img, None, fx=sc, fy=sc,
+                                interpolation=cv2.INTER_AREA)
+        else:
+            small = body_img
+        ok, buf = cv2.imencode('.jpg', small,
+                                [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ok:
+            buf.tofile(out)
+        return out
 
 
 # ============================================================
