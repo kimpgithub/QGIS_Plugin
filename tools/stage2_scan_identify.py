@@ -231,8 +231,12 @@ HEADER_OCR_TARGET_W = 1080  # 0.25x for 4320-px header — Tesseract 훈련 분�
 SHEET_OCR_CROP_H = 0.22       # 스캔 상단 비율
 SHEET_OCR_CROP_W = 0.30       # 스캔 좌측 비율
 SHEET_OCR_MIN_HEIGHT_PX = 60  # OCR 토큰 최소 높이 (다운스케일 후 입력 기준)
-# OCR 문자 오인식 보정 — 7은 /, [, ], T 로 자주 읽힘 / 1은 | 로
-SHEET_OCR_CHAR_FIX = {'/': '7', '[': '7', ']': '7', 'T': '7', '|': '1'}
+# OCR 문자 오인식 보정 — morphology 후 7의 위쪽 가로획이 얇아져 /로 읽히는 등
+SHEET_OCR_CHAR_FIX = {'/': '7', '[': '7', ']': '7', 'T': '7',
+                       '|': '1', 'l': '1', 'I': '1', 'i': '1',
+                       'O': '0', 'o': '0', 'L': '1'}
+# OCR whitelist — char fix 매핑 char 도 포함해야 7→/ 등 confusion 회수 가능
+SHEET_OCR_WHITELIST = '0123456789-/[]T|lIiOoL'
 
 # 검은 잉크 필터 (HSV) — 라벨은 검정, 행정명·경계선은 빨강 → 채도로 분리
 SHEET_OCR_BLACK_V_MAX = 100   # 밝기 임계 (V ≤)
@@ -294,34 +298,44 @@ def _tesseract_tsv(img, psm='11', whitelist='', lang='eng'):
             pass
 
 
-def _add_sheet_candidate(candidates, text, ht, valid_sheets):
-    """OCR 토큰 → digit 추출 후 valid_sheets 매치되는 sid를 후보 dict에 누적."""
+def _add_sheet_candidate(candidates, text, ht, valid_sheets,
+                          forced_prefix=None):
+    """OCR 토큰 → digit 추출 후 valid_sheets 매치되는 sid 후보 dict 누적.
+
+    forced_prefix: valid_sheets 가 동일 prefix 공유 시 (예: {7-1, 7-2, ..., 7-7})
+        OCR 첫자리 무시하고 강제. morphology 후 7→1/5→9 류 오인식 회수.
+    """
     fixed = ''.join(SHEET_OCR_CHAR_FIX.get(c, c) for c in text)
     digits = re.sub(r'\D', '', fixed)
     if len(digits) < 2:
         return
-    sid = f'{digits[0]}-{digits[-1]}'
+    prefix = forced_prefix if forced_prefix else digits[0]
+    sid = f'{prefix}-{digits[-1]}'
     if valid_sheets and sid not in valid_sheets:
         return
     cnt, mh = candidates.get(sid, (0, 0))
     candidates[sid] = (cnt + 1, max(mh, ht))
 
 
-def _isolate_sheet_label(scan_img):
+def _isolate_sheet_label(scan_img, erosion_px=None):
     """좌상단 22%×30% 크롭 → HSV 검은 잉크 마스크 → 두께 필터 → OCR 입력.
 
     라벨은 검정(어둡고 무채색), 행정명·경계선은 빨강(채도 높음) → 채도로 분리.
     erosion-dilation으로 라벨처럼 두꺼운 stroke만 남김.
+
+    Args:
+        erosion_px: None → SHEET_OCR_EROSION_PX (기본 8). 적응 호출 시 다른값 지정
 
     Returns:
         OCR-ready (black on white, 다운스케일된) 이미지. None if scan_img is None.
     """
     if scan_img is None:
         return None
+    if erosion_px is None:
+        erosion_px = SHEET_OCR_EROSION_PX
     h, w = scan_img.shape[:2]
     crop = scan_img[:int(h * SHEET_OCR_CROP_H), :int(w * SHEET_OCR_CROP_W)]
     if crop.ndim == 2:
-        # grayscale 입력 — 채도 정보 없음, 밝기만으로 처리
         v = crop
         s = np.zeros_like(crop)
     else:
@@ -330,11 +344,11 @@ def _isolate_sheet_label(scan_img):
         s = hsv[:, :, 1]
     black = ((v <= SHEET_OCR_BLACK_V_MAX) &
              (s <= SHEET_OCR_BLACK_S_MAX)).astype(np.uint8) * 255
-    ksz = SHEET_OCR_EROSION_PX * 2 + 1
+    ksz = erosion_px * 2 + 1
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
     eroded = cv2.erode(black, k)
     thick = cv2.dilate(eroded, k)
-    feed = cv2.bitwise_not(thick)  # 글자=검정, 배경=흰색
+    feed = cv2.bitwise_not(thick)
     sc = SHEET_OCR_INPUT_SCALE
     return cv2.resize(feed, None, fx=sc, fy=sc,
                       interpolation=cv2.INTER_AREA)
@@ -355,17 +369,35 @@ def ocr_sheet_id(scan_img, valid_sheets=None):
     Returns:
         sheet_id ('N-i') or None
     """
-    feed = _isolate_sheet_label(scan_img)
-    if feed is None:
+    if scan_img is None:
         return None
 
+    # valid_sheets 가 동일 prefix 공유하면 강제 (e.g., 7-tile → {7-1...7-7}, prefix '7')
+    forced_prefix = None
+    if valid_sheets:
+        prefixes = {s.split('-')[0] for s in valid_sheets if '-' in s}
+        if len(prefixes) == 1:
+            forced_prefix = next(iter(prefixes))
+
+    # 적응 erosion — 기본 8 로 시도 → 실패 시 6, 12 추가 (morphology 후 글자
+    # 깎임 정도가 케이스마다 달라 단일 erosion 으로는 일부 라벨 누락. 다른
+    # erosion 으로 7→1/5→9 류 회수)
     candidates = {}  # sid -> (vote_count, max_ht)
-    for psm in ('11', '6', '7'):
-        tokens = _tesseract_tsv(feed, psm=psm, whitelist='0123456789-')
-        for text, _l, _t, _wd, ht in tokens:
-            if ht < SHEET_OCR_MIN_HEIGHT_PX:
-                continue
-            _add_sheet_candidate(candidates, text, ht, valid_sheets)
+    for erosion in (SHEET_OCR_EROSION_PX, 6, 12):
+        feed = _isolate_sheet_label(scan_img, erosion_px=erosion)
+        if feed is None:
+            continue
+        for psm in ('11', '6', '7'):
+            tokens = _tesseract_tsv(feed, psm=psm,
+                                     whitelist=SHEET_OCR_WHITELIST)
+            for text, _l, _t, _wd, ht in tokens:
+                if ht < SHEET_OCR_MIN_HEIGHT_PX:
+                    continue
+                _add_sheet_candidate(candidates, text, ht, valid_sheets,
+                                      forced_prefix=forced_prefix)
+        if candidates:
+            # 첫 erosion 에서 후보 얻었으면 추가 erosion 생략 (성능)
+            break
 
     if not candidates:
         return None
@@ -522,7 +554,8 @@ def _extract_admin_codes(text, valid_codes=None, shp_index=None):
     """텍스트에서 8자리 행정코드 추출.
 
     우선순위:
-    1. 괄호 안 정확 8자리 + valid_codes 매칭 (기존)
+    1. 괄호 안 정확 8자리 + valid_codes 매칭 + 한글명 cross-check
+       (paren 결과가 한글명과 불일치 시 reject → 다음 tier 폴백)
     2. SHP 한글명 + 자릿수 fuzzy 교차검증 (둘 다 같은 코드 가리키면 강한 신호)
     3. SHP 한글명 단독 매칭 (코드 OCR 실패해도 한글명 인식되면 회수)
     4. SHP fuzzy 7~9자리 단독 매칭
@@ -530,7 +563,13 @@ def _extract_admin_codes(text, valid_codes=None, shp_index=None):
 
     valid_codes (PDF 보유 admin) 주어지면 최종 필터링.
     """
-    # Tier 1: 괄호 안 정확 8자리 (기존)
+    # 한글명 cross-check 사전 계산 (Tier 1 검증 + Tier 2-3 재사용)
+    name_cands_set = set()
+    if shp_index is not None:
+        name_cands_set = set(_extract_korean_admin_names(
+            text, shp_index['by_name']))
+
+    # Tier 1: 괄호 안 정확 8자리 + 한글명 cross-check
     paren_candidates = []
     for m in re.finditer(r'\(\s*([\d\s]+?)\s*\)', text):
         digits = re.sub(r'\s', '', m.group(1))
@@ -539,11 +578,23 @@ def _extract_admin_codes(text, valid_codes=None, shp_index=None):
     if valid_codes is not None:
         paren_valid = [c for c in paren_candidates if c in valid_codes]
         if paren_valid:
-            return paren_valid
+            # 한글명 추출됐으면 cross-check 강제 (OCR 끝자리 오인 차단)
+            if name_cands_set:
+                confirmed = [c for c in paren_valid if c in name_cands_set]
+                if confirmed:
+                    return confirmed
+                # paren-name 불일치 → 다음 tier 폴백 (return 하지 않음)
+            else:
+                return paren_valid
     elif paren_candidates:
-        return paren_candidates
+        if name_cands_set:
+            confirmed = [c for c in paren_candidates if c in name_cands_set]
+            if confirmed:
+                return confirmed
+        else:
+            return paren_candidates
 
-    # Tier 2~4: SHP 활용 회수
+    # Tier 2~4: SHP 활용 회수 (name_cands_set 은 Tier 1 사전 계산 재사용)
     if shp_index is not None:
         shp_codes = shp_index['codes']
         # 자릿수 fuzzy: 괄호 안 + 자유 위치 모두 시도
@@ -554,9 +605,7 @@ def _extract_admin_codes(text, valid_codes=None, shp_index=None):
                 fuzzy_cands.update(_fuzzy_8digit_match(d, shp_codes))
         for tok in re.findall(r'\d{7,11}', text):
             fuzzy_cands.update(_fuzzy_8digit_match(tok, shp_codes))
-        # 한글명 lookup
-        name_cands = set(_extract_korean_admin_names(
-            text, shp_index['by_name']))
+        name_cands = name_cands_set
 
         # Tier 2: 교차검증 — 둘 다 가리키는 코드
         if fuzzy_cands and name_cands:
