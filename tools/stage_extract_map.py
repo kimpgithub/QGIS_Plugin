@@ -111,8 +111,8 @@ TRIM_LABEL_MIN_H_FRAC = 0.005    # 라벨 글리프 최소 height (warped 높이
 TRIM_LABEL_MARGIN_FRAC = 0.25    # 라벨 height 대비 좌·상 padding 비율
 # src_quad 외삽 — body 좌상귀를 위·왼쪽으로 확장해 라벨 영역까지 sampling
 # (라벨은 body template 의 (0,0) 보다 위·왼쪽에 위치하므로 H 외삽으로 흡수)
-SRC_EXPAND_TOP_FRAC = 0.05
-SRC_EXPAND_LEFT_FRAC = 0.05
+SRC_EXPAND_TOP_FRAC = 0.08
+SRC_EXPAND_LEFT_FRAC = 0.08
 # 라벨 미검출 시 적응 padding (src 외삽 후에도 ECC 가 더 잘라낸 코너 케이스 보강)
 TRIM_LABEL_FALLBACK_STEP_FRAC = 0.01   # 시도당 padding 증가량 (warped 높이 대비)
 TRIM_LABEL_FALLBACK_MAX_FRAC = 0.04    # 최대 padding cap (src 외삽으로 대부분 흡수)
