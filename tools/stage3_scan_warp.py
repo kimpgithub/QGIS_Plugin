@@ -153,11 +153,65 @@ class SheetSiftCache:
 # 매칭 + 워핑 (단일 경로: 호모그래피)
 # ============================================================
 
+def _save_warped(warped, sheet_jgw, out_dir, base, save_intermediates,
+                  result, method, t_total):
+    """warp 결과 저장 (jpg + jgw + prj) + result dict 업데이트."""
+    warped_jpg = os.path.join(out_dir, f'{base}.jpg')
+    warped_jgw = os.path.join(out_dir, f'{base}.jgw')
+    warped_prj = os.path.join(out_dir, f'{base}.prj')
+    _imwrite(warped_jpg, warped, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    write_jgw(warped_jgw, JGWParams(
+        pixel_size_x=sheet_jgw.pixel_size_x, rotation_x=0.0, rotation_y=0.0,
+        pixel_size_y=sheet_jgw.pixel_size_y,
+        top_left_x=sheet_jgw.top_left_x, top_left_y=sheet_jgw.top_left_y))
+    with open(warped_prj, 'w') as f:
+        f.write(PRJ_5179)
+    if save_intermediates:
+        save_thumb(os.path.join(out_dir, '05_warped_scan.jpg'), warped)
+    result['warped_jpg'] = warped_jpg
+    result['warped_jgw'] = warped_jgw
+    result['method'] = method
+    result['elapsed'] = time.time() - t_total
+    with open(os.path.join(out_dir, 'status.json'), 'w') as f:
+        json.dump(result, f, indent=2)
+    return result
+
+
+def _axis_aligned_fallback(scan_img, sheet_img, sheet_jgw, out_dir, base,
+                            save_intermediates, result, t_total,
+                            fallback_reason):
+    """SIFT 매칭 실패 시 axis-aligned 4-corner 매핑으로 warp.
+
+    scan body 4-corner ↔ sheet PDF body 4-corner 직접 perspective transform.
+    SIFT 의존성 0 → 희박 본문(다도해/작은 섬 산재) 케이스에서 안정 동작.
+    가정: scan body 와 sheet PDF body 가 동일 영역을 다른 비율로 렌더 ↔ 1:1 대응.
+    정확도는 SIFT 보다 약간 떨어지나 sheet_bbox 와 1:1 dimension 유지 → 병합 갭 없음.
+    """
+    sh, sw = scan_img.shape[:2]
+    ph, pw = sheet_img.shape[:2]
+    src = np.float32([[0, 0], [sw, 0], [sw, sh], [0, sh]])
+    dst = np.float32([[0, 0], [pw, 0], [pw, ph], [0, ph]])
+    H_fb = cv2.getPerspectiveTransform(src, dst)
+    warped = cv2.warpPerspective(scan_img, H_fb, (pw, ph),
+                                  flags=cv2.INTER_CUBIC,
+                                  borderMode=cv2.BORDER_CONSTANT,
+                                  borderValue=(255, 255, 255))
+    print(f'  axis-aligned fallback warp ({fallback_reason}): '
+          f'{pw}x{ph}')
+    result.update(status='OK', message=f'fallback: {fallback_reason}')
+    return _save_warped(warped, sheet_jgw, out_dir, base,
+                         save_intermediates, result,
+                         method='AXIS_ALIGNED_FALLBACK', t_total=t_total)
+
+
 def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
                    target_ps=None, scan_scale=0.5,
                    save_intermediates=True, output_basename=None,
                    shp_path=None):
-    """단일 스캔 처리 — scan ↔ sheet PDF 매칭 + 호모그래피 워핑."""
+    """단일 스캔 처리 — scan ↔ sheet PDF 매칭 + 호모그래피 워핑.
+
+    SIFT 매칭 실패 (희박 본문 등) 시 axis-aligned 4-corner 매핑 폴백.
+    """
     os.makedirs(out_dir, exist_ok=True)
     t_total = time.time()
     result = {
@@ -180,21 +234,23 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         _imwrite(os.path.join(out_dir, '03_scan_prep.jpg'), g_scan,
                  [cv2.IMWRITE_JPEG_QUALITY, 85])
 
+    # 2) sheet PDF SIFT (캐시) — fallback 시에도 sheet_img/jgw 필요해서 먼저 로드
+    g_sheet, kp_p, des_p, sheet_img, sheet_jgw = sheet_cache.get(
+        admin_code, sheet_id)
+    if target_ps is None:
+        target_ps = abs(sheet_jgw.pixel_size_x)
+    base = output_basename or f'{admin_code}_{sheet_id}'
+
     sift = cv2.SIFT_create(nfeatures=30000, contrastThreshold=0.025,
                            edgeThreshold=20, sigma=1.6)
     t = time.time()
     kp_s, des_s = sift.detectAndCompute(g_scan, None)
     print(f'  SIFT scan: {len(kp_s)} ({time.time()-t:.1f}s)')
     if des_s is None or len(kp_s) < 200:
-        result.update(status='FAIL',
-                      message=f'스캔 키포인트 부족: {len(kp_s)}')
-        return result
-
-    # 2) sheet PDF SIFT (캐시)
-    g_sheet, kp_p, des_p, sheet_img, sheet_jgw = sheet_cache.get(
-        admin_code, sheet_id)
-    if target_ps is None:
-        target_ps = abs(sheet_jgw.pixel_size_x)  # sheet native = scan native
+        return _axis_aligned_fallback(
+            scan_img, sheet_img, sheet_jgw, out_dir, base,
+            save_intermediates, result, t_total,
+            fallback_reason=f'스캔 키포인트 부족 ({len(kp_s)})')
 
     # 3) FLANN + Lowe ratio
     matcher = cv2.FlannBasedMatcher(
@@ -204,9 +260,10 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     result['n_good'] = len(good)
     print(f'  good matches: {len(good)}')
     if len(good) < 100:
-        result.update(status='FAIL',
-                      message=f'good matches 부족: {len(good)}')
-        return result
+        return _axis_aligned_fallback(
+            scan_img, sheet_img, sheet_jgw, out_dir, base,
+            save_intermediates, result, t_total,
+            fallback_reason=f'good matches 부족 ({len(good)})')
 
     # 4) MAGSAC++ 호모그래피 (정규화 좌표계: scan 0.5x ↔ sheet 0.5x)
     src = np.float32([kp_s[m.queryIdx].pt for m in good])
@@ -215,22 +272,21 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         src, dst, cv2.USAC_MAGSAC, 3.0,
         maxIters=10000, confidence=0.9999)
     if H is None or mask is None:
-        result.update(status='FAIL', message='호모그래피 추정 실패')
-        return result
+        return _axis_aligned_fallback(
+            scan_img, sheet_img, sheet_jgw, out_dir, base,
+            save_intermediates, result, t_total,
+            fallback_reason='호모그래피 추정 실패')
     inl = mask.ravel().astype(bool)
     n_inl = int(inl.sum())
     inlier_pct = n_inl / len(good)
     result['n_inliers'] = n_inl
     result['inlier_pct'] = inlier_pct
     print(f'  MAGSAC inliers: {n_inl}/{len(good)} ({100*inlier_pct:.1f}%)')
-    if n_inl < 30:
-        result.update(status='FAIL',
-                      message=f'inliers 부족: {n_inl}')
-        return result
-    if inlier_pct < 0.05:
-        result.update(status='FAIL',
-                      message=f'inlier 비율 과소: {100*inlier_pct:.1f}%')
-        return result
+    if n_inl < 30 or inlier_pct < 0.05:
+        return _axis_aligned_fallback(
+            scan_img, sheet_img, sheet_jgw, out_dir, base,
+            save_intermediates, result, t_total,
+            fallback_reason=f'inliers 부족 ({n_inl}, {100*inlier_pct:.1f}%)')
 
     # 5) 행정리 폴리곤 안 inlier 만 선별 (정합 정확도 향상)
     #    sheet PDF 좌표계에 폴리곤 마스크를 만들어 dst 점 in/out 검사.
@@ -303,28 +359,10 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     print(f'  단일 H 워핑: {time.time()-t:.1f}s')
 
     # 10) 저장
-    base = output_basename or f'{admin_code}_{sheet_id}'
-    warped_jpg = os.path.join(out_dir, f'{base}.jpg')
-    warped_jgw = os.path.join(out_dir, f'{base}.jgw')
-    warped_prj = os.path.join(out_dir, f'{base}.prj')
-    _imwrite(warped_jpg, warped, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    # 출력 JGW = sheet JGW 그대로 (1:1 픽셀 매핑)
-    write_jgw(warped_jgw, JGWParams(
-        pixel_size_x=sheet_jgw.pixel_size_x, rotation_x=0.0, rotation_y=0.0,
-        pixel_size_y=sheet_jgw.pixel_size_y,
-        top_left_x=sheet_jgw.top_left_x, top_left_y=sheet_jgw.top_left_y))
-    with open(warped_prj, 'w') as f:
-        f.write(PRJ_5179)
-    if save_intermediates:
-        save_thumb(os.path.join(out_dir, '05_warped_scan.jpg'), warped)
-
-    result['warped_jpg'] = warped_jpg
-    result['warped_jgw'] = warped_jgw
     result['target_ps'] = target_ps
-    result['elapsed'] = time.time() - t_total
-    with open(os.path.join(out_dir, 'status.json'), 'w') as f:
-        json.dump(result, f, indent=2)
-    return result
+    return _save_warped(warped, sheet_jgw, out_dir, base,
+                         save_intermediates, result,
+                         method='SIFT_MAGSAC_H', t_total=t_total)
 
 
 # ============================================================
