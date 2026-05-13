@@ -438,12 +438,25 @@ def extract_map_region_scan(image: np.ndarray,
     # 정상 시트는 footer 가 500+ px 라 이 분기 안 들어감.
     if h - map_bot < 100:
         map_bot = h - 1
-    # 좌/우 외곽 — zone 안에서 dedicated 검출 (기울어진 시트는 col_pct 가
-    # 분산돼 primary col_thr 미달, zone-별 noise floor 폴백 필요)
-    outer_zone = 0.15
+    # 좌/우 외곽 — zone 안에서 dedicated 검출 + frame-strength 필터
+    # 빈 본문 케이스에서 zone 안에 (1) 좌측 frame, (2) 시트라벨, (3) 본문 안
+    # 행정코드 텍스트 다중 신호가 들어와 max(rightmost) 가 내부 텍스트를 frame 으로
+    # 오인하던 회귀 차단. zone 을 paper 의 10% 로 좁혀 본문 내부 텍스트를 일차 제외.
+    # 이후 col_pct 강도가 zone 최대값의 frame_strength_ratio 이상인 후보만 유지
+    # (frame 은 본문 전체 height 를 가로질러 강하고 길게 유지, 라벨/텍스트는 짧아 약함)
+    outer_zone = 0.10
+    frame_strength_ratio = 0.5
     L_end = int(w * outer_zone); R_start = int(w * (1 - outer_zone))
     left_lines, _ = _detect_in_zone(col_pct[:L_end], col_thr)
     right_lines, _ = _detect_in_zone(col_pct[R_start:], col_thr)
+    if left_lines:
+        max_l = max(col_pct[i] for i in left_lines)
+        left_lines = [i for i in left_lines
+                      if col_pct[i] >= max_l * frame_strength_ratio]
+    if right_lines:
+        max_r = max(col_pct[R_start + i] for i in right_lines)
+        right_lines = [i for i in right_lines
+                       if col_pct[R_start + i] >= max_r * frame_strength_ratio]
     map_left = max(left_lines) if left_lines else 0
     map_right = (R_start + min(right_lines)) if right_lines else w - 1
 

@@ -76,6 +76,46 @@ ORB_RANSAC_THR = 5.0
 ECC_MAX_ITER = 50
 ECC_EPS = 1e-5
 ECC_GAUSS_FILT = 5
+# ECC 발산 가드 — ORB H 대비 4-corner 평균 편차가 이 비율(폭)을 넘으면 ORB H 사용
+ECC_MAX_DRIFT_FRAC = 0.05
+# 투영 quad sanity — scan 경계를 이 비율 이상 벗어나면 ORB H 자체 거부 (HSV 폴백)
+PROJ_MAX_OOB_FRAC = 0.10
+# 투영 quad 종횡비 — body 템플릿 종횡비 대비 이 비율 벗어나면 거부
+PROJ_ASPECT_TOL = 0.20
+# 라벨 anchor 위치 sanity — 검출 라벨이 좌상귀에서 너무 멀면 H 미스매핑 의심.
+# src 외삽(SRC_EXPAND_*_FRAC) 위에 추가 마진. 임계 = 외삽 비율 + 이 마진.
+PROJ_LABEL_OFFSET_EXTRA = 0.03
+# Inlier 공간 분포 가드 — RANSAC inlier 가 body template 의 작은 영역에 몰리면
+# 빈 본문(섬만 산재) 케이스. H 가 그 영역 밖으로 over-extrapolate 위험 → 거부.
+# 임계: inlier bbox area / template area
+INLIER_COVERAGE_MIN = 0.30
+# 4-corner quadrilateral sanity — 마주보는 변 길이 비율, 인접 변 직각도.
+# 정상 perspective warp 는 거의 사각형. 사다리꼴/평행사변형 변형 거부.
+QUAD_OPP_SIDE_TOL = 0.10        # 마주보는 변 길이 차이 비율
+QUAD_ANGLE_COS_TOL = 0.20       # 인접 변 cos(각도) — 0=직각, ±0.20 ≈ ±11.5°
+# 본문 크기 sanity — 추출 본문(out_w, out_h)/scan 크기 비율.
+# 정상 시트는 본문이 paper 의 ~85~88% 차지 (헤더+푸터 제외). 벗어나면 H 거부.
+PROJ_BODY_RATIO_MIN = 0.78
+PROJ_BODY_RATIO_MAX = 0.92
+# 데이터 기반 절대 픽셀 임계 — 헐겁게 (HSV 폴백 outlier 도 통과)
+# ORB median: w 9329, h 12097. 운영 데이터 누적 후 좁힐 수 있음.
+EXPECTED_BODY_W = (8200, 9800)
+EXPECTED_BODY_H = (11500, 12900)
+# Post-warp label anchor trim (빈 본문 케이스에서 시트번호 보존)
+TRIM_LABEL_QUADRANT = 0.20       # 좌상단 분석 영역 비율
+TRIM_LABEL_V_MAX = 100           # 검은 잉크 임계 (밝기)
+TRIM_LABEL_S_MAX = 60            # 검은 잉크 임계 (채도)
+TRIM_LABEL_EROSION_FRAC = 0.001  # warped 폭 대비 erosion 커널 (라벨 두께 필터)
+TRIM_LABEL_MIN_AREA_FRAC = 1e-5  # 검출 글리프 최소 면적 (warped 전체 대비)
+TRIM_LABEL_MIN_H_FRAC = 0.005    # 라벨 글리프 최소 height (warped 높이 대비)
+TRIM_LABEL_MARGIN_FRAC = 0.25    # 라벨 height 대비 좌·상 padding 비율
+# src_quad 외삽 — body 좌상귀를 위·왼쪽으로 확장해 라벨 영역까지 sampling
+# (라벨은 body template 의 (0,0) 보다 위·왼쪽에 위치하므로 H 외삽으로 흡수)
+SRC_EXPAND_TOP_FRAC = 0.05
+SRC_EXPAND_LEFT_FRAC = 0.05
+# 라벨 미검출 시 적응 padding (src 외삽 후에도 ECC 가 더 잘라낸 코너 케이스 보강)
+TRIM_LABEL_FALLBACK_STEP_FRAC = 0.01   # 시도당 padding 증가량 (warped 높이 대비)
+TRIM_LABEL_FALLBACK_MAX_FRAC = 0.04    # 최대 padding cap (src 외삽으로 대부분 흡수)
 
 
 def _refine_homography_ecc(body, scan_g, H_init):
@@ -85,13 +125,15 @@ def _refine_homography_ecc(body, scan_g, H_init):
     ECC 가 모든 픽셀 intensity correlation 을 최대화하도록 H 를 iterative
     refine. 코너 외삽 오차를 직접 보정 (sparse feature 한계 우회).
 
+    발산 가드: ECC 후 4-corner 가 ORB 추정에서 ECC_MAX_DRIFT_FRAC 이상 벗어나면
+    빈 본문(섬만 산재) 케이스에서 발산한 것으로 보고 ORB H 사용.
+
     Returns:
-        H_refined (np.float64) or H_init on failure.
+        H_refined (np.float64) or H_init on failure/divergence.
     """
     try:
         body_f = body.astype(np.float32) / 255.0
         scan_f = scan_g.astype(np.float32) / 255.0
-        # ECC 의 warpMatrix 는 float32 필요
         warp = H_init.astype(np.float32)
         criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
                     ECC_MAX_ITER, ECC_EPS)
@@ -101,9 +143,131 @@ def _refine_homography_ecc(body, scan_g, H_init):
             criteria=criteria,
             inputMask=None,
             gaussFiltSize=ECC_GAUSS_FILT)
-        return warp.astype(np.float64)
+        H_refined = warp.astype(np.float64)
+        th, tw = body.shape
+        corners = np.float32(
+            [[0, 0], [tw, 0], [tw, th], [0, th]]).reshape(-1, 1, 2)
+        proj_orb = cv2.perspectiveTransform(corners, H_init).reshape(-1, 2)
+        proj_ecc = cv2.perspectiveTransform(corners, H_refined).reshape(-1, 2)
+        drift = float(np.linalg.norm(proj_ecc - proj_orb, axis=1).mean())
+        if drift > tw * ECC_MAX_DRIFT_FRAC:
+            return H_init
+        return H_refined
     except cv2.error:
         return H_init
+
+
+def _trim_via_label(warped):
+    """좌상단 시트라벨 ('4-1', '7-3' 등) 글리프를 anchor 로 본문 좌상단 정밀 검출.
+
+    PDF body 템플릿은 본문 좌상단이 (0,0). 시트라벨은 코너 안쪽 ~수십 px 에
+    위치하는 굵은 검정 글리프. 두께 필터 + 좌상단에 가까운 큰 CC.
+
+    빈 본문 케이스(섬만 산재) 에서 ECC 가 좌상귀를 안쪽으로 외삽시켜 라벨이
+    잘리는 회귀를 보정.
+
+    Returns:
+        (label_top, label_left, label_h, label_w) — 검출 성공
+        None — 실패 (라벨 미검출)
+    """
+    h, w = warped.shape[:2]
+    qh = int(h * TRIM_LABEL_QUADRANT)
+    qw = int(w * TRIM_LABEL_QUADRANT)
+    region = warped[:qh, :qw]
+    if region.size == 0:
+        return None
+    if region.ndim == 3:
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        v = hsv[:, :, 2]
+        sat = hsv[:, :, 1]
+        black = ((v <= TRIM_LABEL_V_MAX) &
+                 (sat <= TRIM_LABEL_S_MAX)).astype(np.uint8) * 255
+    else:
+        black = (region <= TRIM_LABEL_V_MAX).astype(np.uint8) * 255
+    er = max(5, int(w * TRIM_LABEL_EROSION_FRAC))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                   (er * 2 + 1, er * 2 + 1))
+    thick = cv2.morphologyEx(black, cv2.MORPH_OPEN, k)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(thick)
+    if n <= 1:
+        return None
+    min_area = int(qh * qw * TRIM_LABEL_MIN_AREA_FRAC)
+    min_h = int(h * TRIM_LABEL_MIN_H_FRAC)
+    cands = [i for i in range(1, n)
+             if stats[i, cv2.CC_STAT_AREA] >= min_area
+             and stats[i, cv2.CC_STAT_HEIGHT] >= min_h]
+    if not cands:
+        return None
+    label_idx = min(cands, key=lambda i: (stats[i, cv2.CC_STAT_LEFT] +
+                                           stats[i, cv2.CC_STAT_TOP]))
+    return (int(stats[label_idx, cv2.CC_STAT_TOP]),
+            int(stats[label_idx, cv2.CC_STAT_LEFT]),
+            int(stats[label_idx, cv2.CC_STAT_HEIGHT]),
+            int(stats[label_idx, cv2.CC_STAT_WIDTH]))
+
+
+def check_body_size(w, h):
+    """추출 본문 크기가 데이터 기반 절대 임계 [EXPECTED_BODY_W/H] 안인지 검사.
+
+    Returns: (ok, reason) — 실패 시 reason 에 어떤 축에서 어떻게 벗어났는지 표기.
+    """
+    if not (EXPECTED_BODY_W[0] <= w <= EXPECTED_BODY_W[1]):
+        return False, f'width {w} ∉ {EXPECTED_BODY_W}'
+    if not (EXPECTED_BODY_H[0] <= h <= EXPECTED_BODY_H[1]):
+        return False, f'height {h} ∉ {EXPECTED_BODY_H}'
+    return True, ''
+
+
+def _pad_top_left(img, pad_top, pad_left):
+    """좌·상 흰색 padding 추가 (라벨이 잘리지 않도록 캔버스 확장)."""
+    if pad_top == 0 and pad_left == 0:
+        return img
+    h, w = img.shape[:2]
+    canvas_shape = ((h + pad_top, w + pad_left, 3)
+                    if img.ndim == 3 else (h + pad_top, w + pad_left))
+    canvas = np.full(canvas_shape, 255, img.dtype)
+    canvas[pad_top:, pad_left:] = img
+    return canvas
+
+
+def _normalize_to_label(img, label):
+    """라벨 위치 기준 좌·상을 margin 만큼만 남기고 trim/pad — 헤더 영역 제거."""
+    h, w = img.shape[:2]
+    lt, ll, lh, _ = label
+    margin = int(lh * TRIM_LABEL_MARGIN_FRAC)
+    # 라벨이 좌상귀에서 margin 보다 멀면 잉여 영역 trim
+    cut_top = max(0, lt - margin)
+    cut_left = max(0, ll - margin)
+    if cut_top or cut_left:
+        img = img[cut_top:, cut_left:]
+        lt -= cut_top
+        ll -= cut_left
+    # 라벨이 margin 안쪽에 너무 붙어있으면 padding 확장
+    pad_top = max(0, margin - lt)
+    pad_left = max(0, margin - ll)
+    return _pad_top_left(img, pad_top, pad_left)
+
+
+def _trim_to_label_anchor(warped):
+    """라벨 anchor 정규화 — 좌상귀를 라벨 기준 일정 margin 으로 통일.
+
+    1) 라벨 검출 → margin 안쪽이면 pad, 바깥이면 trim (헤더 잉여 제거)
+    2) 라벨 미검출 → 적응 padding 으로 재검출, 검출되면 (1) 적용
+    """
+    label = _trim_via_label(warped)
+    if label is not None:
+        return _normalize_to_label(warped, label), label
+    h = warped.shape[0]
+    step = max(1, int(h * TRIM_LABEL_FALLBACK_STEP_FRAC))
+    cap = max(step, int(h * TRIM_LABEL_FALLBACK_MAX_FRAC))
+    pad = step
+    while pad <= cap:
+        padded = _pad_top_left(warped, pad, pad)
+        lab = _trim_via_label(padded)
+        if lab is not None:
+            return _normalize_to_label(padded, lab), lab
+        pad += step
+    return _pad_top_left(warped, cap, cap), None
 
 
 def orb_extract_body(scan, body_template_path):
@@ -150,6 +314,17 @@ def orb_extract_body(scan, body_template_path):
     if inliers < ORB_MIN_INLIERS:
         return None
 
+    # Inlier 공간 분포 가드 — body template 내에서 inlier 가 차지하는 bbox 비율.
+    # 빈 본문(섬·작은 마을만) 케이스에서 inlier 가 한 영역에 몰려 H 가 그 영역
+    # 밖으로 over-extrapolate 하는 케이스 차단. coverage 낮으면 거부.
+    inlier_src = src[mask.ravel() == 1].reshape(-1, 2)
+    if len(inlier_src) >= 2:
+        ix_min, iy_min = inlier_src.min(axis=0)
+        ix_max, iy_max = inlier_src.max(axis=0)
+        coverage = ((ix_max - ix_min) * (iy_max - iy_min)) / (tw * th)
+        if coverage < INLIER_COVERAGE_MIN:
+            return None
+
     # ECC dense refinement — ORB sparse 한계 극복, 코너 외삽 오차 픽셀 단위 보정
     H = _refine_homography_ecc(body, scan_g, H)
 
@@ -174,12 +349,93 @@ def orb_extract_body(scan, body_template_path):
     if out_w <= 0 or out_h <= 0:
         return None
 
+    # 본문 크기 sanity — 추출 영역이 paper 의 정상 비율(~85~88%) 범위 밖이면
+    # 헤더 포함(과대) 또는 ECC 과도 축소(과소) 케이스로 보고 거부
+    body_ratio_w = out_w / sw
+    body_ratio_h = out_h / sh
+    if not (PROJ_BODY_RATIO_MIN <= body_ratio_w <= PROJ_BODY_RATIO_MAX and
+            PROJ_BODY_RATIO_MIN <= body_ratio_h <= PROJ_BODY_RATIO_MAX):
+        return None
+
+    # 4-corner quadrilateral sanity — 마주보는 변 길이 비율 + 인접 변 직각도.
+    # 약한 perspective skew (사다리꼴) 거부. 정상 ORB warp 는 거의 사각형.
+    edges = [proj[(i + 1) % 4] - proj[i] for i in range(4)]
+    lens = [float(np.linalg.norm(e)) for e in edges]
+    if min(lens) <= 0:
+        return None
+    # 마주보는 변 (0↔2, 1↔3) 길이 차이
+    opp_diff_h = abs(lens[0] - lens[2]) / max(lens[0], lens[2])
+    opp_diff_v = abs(lens[1] - lens[3]) / max(lens[1], lens[3])
+    if opp_diff_h > QUAD_OPP_SIDE_TOL or opp_diff_v > QUAD_OPP_SIDE_TOL:
+        return None
+    # 인접 변 직각도 — cos(각도) 가 0 에 가까워야 직각
+    for i in range(4):
+        e_in = -edges[(i - 1) % 4]
+        e_out = edges[i]
+        cos_a = float(np.dot(e_in, e_out) / (lens[(i - 1) % 4] * lens[i]))
+        if abs(cos_a) > QUAD_ANGLE_COS_TOL:
+            return None
+
+    # quad sanity guard — inlier 가 한 영역에 몰린 케이스(빈 본문) 에서
+    # H 가 사방으로 발산하여 quad 가 scan 밖으로 튀거나 종횡비가 깨지면
+    # ORB 결과 거부 → HSV 폴백 위임
+    oob = np.maximum.reduce([
+        np.maximum(0, -proj[:, 0]).max() / sw,
+        np.maximum(0, proj[:, 0] - sw).max() / sw,
+        np.maximum(0, -proj[:, 1]).max() / sh,
+        np.maximum(0, proj[:, 1] - sh).max() / sh,
+    ])
+    if oob > PROJ_MAX_OOB_FRAC:
+        return None
+    template_aspect = tw / th
+    proj_aspect = width / height if height > 0 else 0
+    if proj_aspect <= 0 or abs(proj_aspect - template_aspect) / template_aspect > PROJ_ASPECT_TOL:
+        return None
+
+    # src_quad 외삽 — body template 좌상귀 위·왼쪽 영역까지 sampling 해야
+    # 시트번호 라벨이 결과에 포함됨. perspective 일관성 유지 위해 dst 코너를
+    # 음수 좌표로 확장한 뒤 H_inv 로 src 외삽 위치를 역산.
+    base_dst = np.float32([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]])
     src_quad = proj.astype(np.float32)
-    dst_quad = np.float32([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]])
-    M = cv2.getPerspectiveTransform(src_quad, dst_quad)
-    warped = cv2.warpPerspective(scan, M, (out_w, out_h),
-                                  flags=cv2.INTER_LINEAR)
-    aspect = out_w / out_h
+    H_dst_to_src = cv2.getPerspectiveTransform(base_dst, src_quad)
+    ext_top = int(round(out_h * SRC_EXPAND_TOP_FRAC))
+    ext_left = int(round(out_w * SRC_EXPAND_LEFT_FRAC))
+    ext_dst = np.float32([
+        [-ext_left, -ext_top], [out_w, -ext_top],
+        [out_w, out_h], [-ext_left, out_h]
+    ]).reshape(-1, 1, 2)
+    ext_src = cv2.perspectiveTransform(ext_dst, H_dst_to_src).reshape(-1, 2)
+    new_out_w = out_w + ext_left
+    new_out_h = out_h + ext_top
+    final_dst = np.float32([
+        [0, 0], [new_out_w, 0],
+        [new_out_w, new_out_h], [0, new_out_h]
+    ])
+    M = cv2.getPerspectiveTransform(ext_src.astype(np.float32), final_dst)
+    warped = cv2.warpPerspective(scan, M, (new_out_w, new_out_h),
+                                  flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_CONSTANT,
+                                  borderValue=(255, 255, 255))
+    out_w, out_h = new_out_w, new_out_h
+
+    # 라벨 위치 기반 H sanity — 라벨이 좌상귀에서 너무 멀면 H 가 body→scan 을
+    # 위·왼쪽으로 끌어올려 헤더까지 포함시킨 케이스 (빈 본문 + 한쪽 inlier 편향).
+    # src 외삽으로 라벨이 ext_top 부근에 위치하는 게 정상 → 외삽 + extra 마진 허용.
+    label = _trim_via_label(warped)
+    if label is not None:
+        lt, ll, _, _ = label
+        top_thr = SRC_EXPAND_TOP_FRAC + PROJ_LABEL_OFFSET_EXTRA
+        left_thr = SRC_EXPAND_LEFT_FRAC + PROJ_LABEL_OFFSET_EXTRA
+        if lt / out_h > top_thr or ll / out_w > left_thr:
+            return None
+
+    # 라벨 anchor 후처리 — ECC 좌상귀 외삽으로 시트번호가 잘린 경우 padding 복원
+    warped, _ = _trim_to_label_anchor(warped)
+    # 절대 픽셀 사이즈 검증 — 데이터 기반 임계 (median ±3%) 벗어나면 거부
+    ok, _reason = check_body_size(warped.shape[1], warped.shape[0])
+    if not ok:
+        return None
+    aspect = warped.shape[1] / warped.shape[0]
     return warped, ax_bbox, inliers, aspect, proj
 
 
@@ -388,6 +644,18 @@ def main():
                     deviation = (det - exp_aspect) / exp_aspect
             ch, cw = cropped.shape[:2]
             det_aspect = cw / ch if ch > 0 else 0
+
+            # 절대 픽셀 사이즈 검증 — 데이터 기반 임계 (median ±3%)
+            size_ok, size_reason = check_body_size(cw, ch)
+            if not size_ok:
+                w.writerow([scan_path, '', 'FAIL', admin, sid,
+                            f'{scan.shape[1]}x{scan.shape[0]}',
+                            f'{cw}x{ch}', '', method, inliers,
+                            '', f'{det_aspect:.4f}', '', '',
+                            f'size 검증 실패: {size_reason}',
+                            f'{time.time()-t0:.2f}'])
+                n_err += 1
+                continue
 
             rel = os.path.relpath(scan_path, args.identified)
             out_path = os.path.join(args.out_dir, rel)
