@@ -171,6 +171,134 @@ def _largest_polygon_bbox(geom):
     return max(polys, key=lambda p: p.area).bounds
 
 
+# Vector ICP — 다도해 multi-polygon 정합용 (commit 0944f28 복구)
+ICP_MAX_POINTS = 5000           # PDF/SHP 점군 상한 (perf 가드)
+ICP_MAX_ITER = 20               # 수렴 최대 반복
+ICP_CONV_THRESHOLD = 0.01       # cost 변화 임계 (m)
+ICP_MAD_K = 3.0                 # outlier 거부 임계 (median + K*MAD)
+ICP_MIN_INLIER_RATIO = 0.3      # 정합 신뢰 임계
+ICP_MAX_PS_CHANGE_PCT = 5.0     # ps 변화 안전 임계 (PDF text 매우 정확)
+
+
+def _sample_shp_polygon_points(geom, max_points=ICP_MAX_POINTS):
+    """SHP multi-polygon 의 외곽 + 내부 ring 점들 샘플링.
+
+    다도해 다수 polygon 케이스 — 모든 polygon 의 점을 합쳐 ICP 입력으로 사용.
+    max_points 초과 시 균등 random 샘플 (재현 가능 seed).
+    """
+    from shapely.geometry import MultiPolygon
+    polys = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    pts = []
+    for p in polys:
+        pts.extend(p.exterior.coords)
+        for h in p.interiors:
+            pts.extend(h.coords)
+    pts = np.array(pts, dtype=np.float64)
+    if len(pts) > max_points:
+        idx = np.random.RandomState(42).choice(
+            len(pts), max_points, replace=False)
+        pts = pts[idx]
+    return pts
+
+
+def _collect_pdf_points(paths, max_points=ICP_MAX_POINTS):
+    """주황 path 의 모든 점을 합쳐 ICP 입력으로 사용. 상한 초과 시 random 샘플."""
+    if not paths:
+        return None
+    pts_list = [p['pts'] for p in paths]
+    pts = np.vstack(pts_list)
+    if len(pts) > max_points:
+        idx = np.random.RandomState(42).choice(
+            len(pts), max_points, replace=False)
+        pts = pts[idx]
+    return pts
+
+
+def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
+                   init_tl_x, init_tl_y,
+                   max_iter=ICP_MAX_ITER,
+                   conv_threshold=ICP_CONV_THRESHOLD,
+                   max_shift_m=None):
+    """Vector ICP — PDF 주황 점군 ↔ SHP 경계 점군 매칭으로 scale + TL 추정.
+
+    회전 0 가정 (지도 종이는 N-up). 자유도: (ps_mpt, tl_x, tl_y) = 3.
+    각 iter:
+      1. 현 affine 으로 PDF→world 변환
+      2. 각 변환 점에 대해 SHP 에서 nearest 찾기 (cKDTree, O(N log N))
+      3. MAD 기반 outlier 거부 (median + K*MAD)
+      4. inlier 쌍으로 isotropic scale + translation 재추정 (closed-form)
+      5. cost 변화 < threshold 면 수렴
+
+    부분 일치(다도해 등): outlier 거부로 자동 처리. 다수 polygon 점군 사용.
+
+    Perf:
+      · cKDTree 빌드 O(N log N), iter 당 query O(M log N)
+      · 점군 상한 ICP_MAX_POINTS (5000) 로 최악 시간 < 1s
+
+    Returns:
+        (ps, tl_x, tl_y, final_cost, niter, inlier_ratio, accepted,
+         ps_change_pct, moved_m)
+    """
+    from scipy.spatial import cKDTree
+    Q_tree = cKDTree(shp_pts_world)
+    P = pdf_pts_pt.astype(np.float64)
+    ps, tx, ty = init_ps_mpt, init_tl_x, init_tl_y
+    prev_cost = float('inf')
+    final_cost = float('inf')
+    niter = 0
+    inlier_ratio = 1.0
+
+    for it in range(max_iter):
+        niter = it + 1
+        wx = tx + P[:, 0] * ps
+        wy = ty - P[:, 1] * ps
+        P_world = np.column_stack([wx, wy])
+
+        dists, indices = Q_tree.query(P_world, k=1)
+        med = float(np.median(dists))
+        mad = float(np.median(np.abs(dists - med)))
+        thresh = med + ICP_MAD_K * mad
+        mask = dists < thresh
+        inlier_ratio = float(mask.sum()) / len(P)
+        if inlier_ratio < ICP_MIN_INLIER_RATIO:
+            break
+
+        P_in = np.column_stack([P[mask, 0], -P[mask, 1]])  # y 부호 반전
+        Q_in = shp_pts_world[indices[mask]]
+        P_mean = P_in.mean(axis=0)
+        Q_mean = Q_in.mean(axis=0)
+        Pc = P_in - P_mean
+        Qc = Q_in - Q_mean
+        num = float(np.sum(Pc * Qc))
+        den = float(np.sum(Pc * Pc))
+        if den <= 0:
+            break
+        new_ps = num / den
+        new_tx = Q_mean[0] - new_ps * P_mean[0]
+        new_ty = Q_mean[1] - new_ps * P_mean[1]
+
+        ps, tx, ty = new_ps, new_tx, new_ty
+        cost = float(np.median(dists[mask]))
+        final_cost = cost
+        if abs(prev_cost - cost) < conv_threshold:
+            break
+        prev_cost = cost
+
+    moved = float(np.hypot(tx - init_tl_x, ty - init_tl_y))
+    ps_change_pct = abs(ps - init_ps_mpt) / max(init_ps_mpt, 1e-9) * 100
+
+    accepted = True
+    if ps_change_pct > ICP_MAX_PS_CHANGE_PCT:
+        accepted = False
+    if max_shift_m is not None and moved > max_shift_m:
+        accepted = False
+    if inlier_ratio < ICP_MIN_INLIER_RATIO:
+        accepted = False
+
+    return (ps, tx, ty, final_cost, niter, inlier_ratio, accepted,
+            ps_change_pct, moved)
+
+
 # ============================================================
 # GeoTIFF 쓰기
 # ============================================================
@@ -275,6 +403,46 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
         method = 'grid_center'
         method_info = dict(fill_ratio=round(fill_ratio, 3),
                             reason='largest_polygon_bbox 미적용')
+
+    # 6b. 다도해 (fill_ratio<0.3) — Vector ICP refinement
+    #     largest_polygon_bbox 가 ratio_mismatch 통과해도 single-polygon 매칭이라
+    #     wrong island 매칭 위험. grid_center 폴백은 centroid 정렬이라 paper
+    #     center 와 어긋남. ICP 로 모든 PDF 주황 점 ↔ SHP 모든 polygon 점 정합.
+    if fill_ratio < 0.3 and paths:
+        pdf_pts_pt = _collect_pdf_points(paths)
+        shp_pts_world = _sample_shp_polygon_points(geom)
+        if pdf_pts_pt is not None and len(pdf_pts_pt) >= 50 \
+                and len(shp_pts_world) >= 50:
+            init_ps_mpt = ps * px_per_pt
+            # 최대 이동 한계: admin bbox 크기의 30% (centroid 폴백 큰 오차 대응)
+            admin_w = swx1 - swx0
+            admin_h = swy1 - swy0
+            max_shift = max(admin_w, admin_h) * 0.3
+            (icp_ps_mpt, icp_tl_x, icp_tl_y, icp_cost, icp_niter,
+             icp_inl, icp_ok, icp_ps_change, icp_moved) = _icp_scale_tl(
+                pdf_pts_pt, shp_pts_world, init_ps_mpt, tl_x, tl_y,
+                max_shift_m=max_shift)
+            if icp_ok:
+                ps = icp_ps_mpt / px_per_pt
+                tl_x = icp_tl_x
+                tl_y = icp_tl_y
+                method = f'icp_multipoly (prev:{method})'
+                method_info.update(
+                    icp_cost_m=round(icp_cost, 2),
+                    icp_niter=icp_niter,
+                    icp_inlier_ratio=round(icp_inl, 3),
+                    icp_ps_change_pct=round(icp_ps_change, 3),
+                    icp_moved_m=round(icp_moved, 1),
+                    icp_n_pdf_pts=int(len(pdf_pts_pt)),
+                    icp_n_shp_pts=int(len(shp_pts_world)),
+                )
+            else:
+                method_info.update(
+                    icp_rejected=True,
+                    icp_inlier_ratio=round(icp_inl, 3),
+                    icp_ps_change_pct=round(icp_ps_change, 3),
+                    icp_moved_m=round(icp_moved, 1),
+                )
 
     # 7. GeoTIFF 쓰기 (파싱한 pixmap 재사용)
     base = base_name or code
