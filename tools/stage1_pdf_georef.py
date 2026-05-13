@@ -214,30 +214,122 @@ def _collect_pdf_points(paths, max_points=ICP_MAX_POINTS):
     return pts
 
 
+ICP_MAX_THETA_RAD = 0.05        # 회전 안전 임계 (~2.86°) — 초과 시 reject
+
+
+def _icp_similarity(pdf_pts_pt, shp_pts_world, init_ps_mpt,
+                     init_tl_x, init_tl_y, init_theta=0.0,
+                     max_iter=ICP_MAX_ITER,
+                     conv_threshold=ICP_CONV_THRESHOLD,
+                     max_shift_m=None):
+    """4 DoF Vector ICP — scale + rotation + tx + ty 동시 추정 (similarity).
+
+    PDF pt → world 변환 (회전 + 스케일 + 이동, y 축 부호 반전):
+        world = s · R(θ) · (x_pdf, -y_pdf) + (tx, ty)
+
+    각 iter:
+      1. 현 transform 으로 PDF→world 변환
+      2. cKDTree nearest neighbor (O(M log N))
+      3. MAD 기반 outlier 거부 (median + K*MAD)
+      4. inlier 쌍으로 Umeyama closed-form 재추정 (similarity transform)
+         - 무게중심 정렬 → SVD → R, s 동시 산출
+      5. cost 변화 < threshold 면 수렴
+
+    회전이 있는 인쇄/스캔 케이스에서 3 DoF 대비 정합 정확도 ↑.
+
+    Returns:
+        (ps, theta, tl_x, tl_y, final_cost, niter, inlier_ratio, accepted,
+         ps_change_pct, moved_m)
+    """
+    from scipy.spatial import cKDTree
+    Q_tree = cKDTree(shp_pts_world)
+    P = pdf_pts_pt.astype(np.float64)
+    s = init_ps_mpt
+    theta = init_theta
+    tx, ty = init_tl_x, init_tl_y
+    prev_cost = float('inf')
+    final_cost = float('inf')
+    niter = 0
+    inlier_ratio = 1.0
+
+    for it in range(max_iter):
+        niter = it + 1
+        cos_t, sin_t = float(np.cos(theta)), float(np.sin(theta))
+        Px = P[:, 0]
+        Py_flipped = -P[:, 1]
+        wx = s * (cos_t * Px - sin_t * Py_flipped) + tx
+        wy = s * (sin_t * Px + cos_t * Py_flipped) + ty
+        P_world = np.column_stack([wx, wy])
+
+        dists, indices = Q_tree.query(P_world, k=1)
+        med = float(np.median(dists))
+        mad = float(np.median(np.abs(dists - med)))
+        thresh = med + ICP_MAD_K * mad
+        mask = dists < thresh
+        inlier_ratio = float(mask.sum()) / len(P)
+        if inlier_ratio < ICP_MIN_INLIER_RATIO:
+            break
+
+        # Umeyama similarity transform — P_in (PDF y-flipped) → Q_in (world)
+        P_in = np.column_stack([P[mask, 0], -P[mask, 1]])
+        Q_in = shp_pts_world[indices[mask]]
+        muP = P_in.mean(axis=0)
+        muQ = Q_in.mean(axis=0)
+        Pc = P_in - muP
+        Qc = Q_in - muQ
+        # Covariance H = Pc^T @ Qc  (2x2)
+        H = Pc.T @ Qc
+        try:
+            U, D_sing, Vt = np.linalg.svd(H)
+        except np.linalg.LinAlgError:
+            break
+        # det 보정 (rotation 만 허용, reflection 거부)
+        sign = float(np.sign(np.linalg.det(U) * np.linalg.det(Vt)))
+        if sign == 0:
+            sign = 1.0
+        S_diag = np.diag([1.0, sign])
+        R = Vt.T @ S_diag @ U.T
+        var_P = float(np.sum(Pc * Pc) / len(Pc))
+        if var_P <= 0:
+            break
+        new_s = float(np.trace(np.diag(D_sing) @ S_diag) / (len(Pc) * var_P))
+        new_t = muQ - new_s * (R @ muP)
+        new_theta = float(np.arctan2(R[1, 0], R[0, 0]))
+
+        s, theta = new_s, new_theta
+        tx, ty = float(new_t[0]), float(new_t[1])
+        cost = float(np.median(dists[mask]))
+        final_cost = cost
+        if abs(prev_cost - cost) < conv_threshold:
+            break
+        prev_cost = cost
+
+    moved = float(np.hypot(tx - init_tl_x, ty - init_tl_y))
+    ps_change_pct = abs(s - init_ps_mpt) / max(init_ps_mpt, 1e-9) * 100
+
+    accepted = True
+    if ps_change_pct > ICP_MAX_PS_CHANGE_PCT:
+        accepted = False
+    if max_shift_m is not None and moved > max_shift_m:
+        accepted = False
+    if inlier_ratio < ICP_MIN_INLIER_RATIO:
+        accepted = False
+    if abs(theta) > ICP_MAX_THETA_RAD:
+        accepted = False
+
+    return (s, theta, tx, ty, final_cost, niter, inlier_ratio, accepted,
+            ps_change_pct, moved)
+
+
 def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
                    init_tl_x, init_tl_y,
                    max_iter=ICP_MAX_ITER,
                    conv_threshold=ICP_CONV_THRESHOLD,
                    max_shift_m=None):
-    """Vector ICP — PDF 주황 점군 ↔ SHP 경계 점군 매칭으로 scale + TL 추정.
+    """3 DoF Vector ICP — scale + tx + ty (rotation=0 강제).
 
-    회전 0 가정 (지도 종이는 N-up). 자유도: (ps_mpt, tl_x, tl_y) = 3.
-    각 iter:
-      1. 현 affine 으로 PDF→world 변환
-      2. 각 변환 점에 대해 SHP 에서 nearest 찾기 (cKDTree, O(N log N))
-      3. MAD 기반 outlier 거부 (median + K*MAD)
-      4. inlier 쌍으로 isotropic scale + translation 재추정 (closed-form)
-      5. cost 변화 < threshold 면 수렴
-
-    부분 일치(다도해 등): outlier 거부로 자동 처리. 다수 polygon 점군 사용.
-
-    Perf:
-      · cKDTree 빌드 O(N log N), iter 당 query O(M log N)
-      · 점군 상한 ICP_MAX_POINTS (5000) 로 최악 시간 < 1s
-
-    Returns:
-        (ps, tl_x, tl_y, final_cost, niter, inlier_ratio, accepted,
-         ps_change_pct, moved_m)
+    먼 시작점에서 robust 한 coarse alignment 용. 4 DoF refinement 의 전 단계.
+    각 iter: NN → MAD outlier 거부 → isotropic scale + translation 재추정.
     """
     from scipy.spatial import cKDTree
     Q_tree = cKDTree(shp_pts_world)
@@ -253,7 +345,6 @@ def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
         wx = tx + P[:, 0] * ps
         wy = ty - P[:, 1] * ps
         P_world = np.column_stack([wx, wy])
-
         dists, indices = Q_tree.query(P_world, k=1)
         med = float(np.median(dists))
         mad = float(np.median(np.abs(dists - med)))
@@ -262,8 +353,7 @@ def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
         inlier_ratio = float(mask.sum()) / len(P)
         if inlier_ratio < ICP_MIN_INLIER_RATIO:
             break
-
-        P_in = np.column_stack([P[mask, 0], -P[mask, 1]])  # y 부호 반전
+        P_in = np.column_stack([P[mask, 0], -P[mask, 1]])
         Q_in = shp_pts_world[indices[mask]]
         P_mean = P_in.mean(axis=0)
         Q_mean = Q_in.mean(axis=0)
@@ -276,7 +366,6 @@ def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
         new_ps = num / den
         new_tx = Q_mean[0] - new_ps * P_mean[0]
         new_ty = Q_mean[1] - new_ps * P_mean[1]
-
         ps, tx, ty = new_ps, new_tx, new_ty
         cost = float(np.median(dists[mask]))
         final_cost = cost
@@ -286,7 +375,6 @@ def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
 
     moved = float(np.hypot(tx - init_tl_x, ty - init_tl_y))
     ps_change_pct = abs(ps - init_ps_mpt) / max(init_ps_mpt, 1e-9) * 100
-
     accepted = True
     if ps_change_pct > ICP_MAX_PS_CHANGE_PCT:
         accepted = False
@@ -294,7 +382,6 @@ def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
         accepted = False
     if inlier_ratio < ICP_MIN_INLIER_RATIO:
         accepted = False
-
     return (ps, tx, ty, final_cost, niter, inlier_ratio, accepted,
             ps_change_pct, moved)
 
@@ -303,15 +390,23 @@ def _icp_scale_tl(pdf_pts_pt, shp_pts_world, init_ps_mpt,
 # GeoTIFF 쓰기
 # ============================================================
 
-def _write_geotiff(arr, out_tif, tl_x, tl_y, ps, crs='EPSG:5179'):
+def _write_geotiff(arr, out_tif, tl_x, tl_y, ps, theta=0.0,
+                    crs='EPSG:5179'):
     """RGB (H,W,3) numpy 배열 → GeoTIFF (LZW + 타일 + affine 내장).
 
-    band별 write로 moveaxis 메모리 복사 회피.
+    theta (rad) — 회전 각도. similarity transform:
+        world = s · R(θ) · (col, -row) + (tl_x, tl_y)
+    Affine [A B C; D E F]:
+        A = s·cos(θ), B = s·sin(θ), C = tl_x
+        D = s·sin(θ), E = -s·cos(θ), F = tl_y
     """
     import rasterio
     from rasterio.transform import Affine
     h, w = arr.shape[:2]
-    transform = Affine(ps, 0, tl_x, 0, -ps, tl_y)
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
+    transform = Affine(ps * cos_t, ps * sin_t, tl_x,
+                        ps * sin_t, -ps * cos_t, tl_y)
     with rasterio.open(
         out_tif, 'w', driver='GTiff',
         height=h, width=w, count=3, dtype='uint8',
@@ -408,53 +503,95 @@ def georef_from_pdf_meta(pdf_path, gdf, out_dir, base_name=None,
     #     largest_polygon_bbox 가 ratio_mismatch 통과해도 single-polygon 매칭이라
     #     wrong island 매칭 위험. grid_center 폴백은 centroid 정렬이라 paper
     #     center 와 어긋남. ICP 로 모든 PDF 주황 점 ↔ SHP 모든 polygon 점 정합.
+    theta = 0.0   # 회전 (rad). 2-stage ICP 가 추정.
     if fill_ratio < 0.3 and paths:
         pdf_pts_pt = _collect_pdf_points(paths)
         shp_pts_world = _sample_shp_polygon_points(geom)
         if pdf_pts_pt is not None and len(pdf_pts_pt) >= 50 \
                 and len(shp_pts_world) >= 50:
             init_ps_mpt = ps * px_per_pt
-            # 최대 이동 한계: admin bbox 크기의 30% (centroid 폴백 큰 오차 대응)
             admin_w = swx1 - swx0
             admin_h = swy1 - swy0
             max_shift = max(admin_w, admin_h) * 0.3
-            (icp_ps_mpt, icp_tl_x, icp_tl_y, icp_cost, icp_niter,
-             icp_inl, icp_ok, icp_ps_change, icp_moved) = _icp_scale_tl(
+
+            # Stage A — 3 DoF coarse alignment (회전 0 가정)
+            # 먼 시작점에서 회전 자유도 주면 wrong minimum 으로 발산 → 단계 분리
+            (a_ps_mpt, a_tl_x, a_tl_y, a_cost, a_niter, a_inl, a_ok,
+             a_ps_change, a_moved) = _icp_scale_tl(
                 pdf_pts_pt, shp_pts_world, init_ps_mpt, tl_x, tl_y,
                 max_shift_m=max_shift)
-            if icp_ok:
-                ps = icp_ps_mpt / px_per_pt
-                tl_x = icp_tl_x
-                tl_y = icp_tl_y
-                method = f'icp_multipoly (prev:{method})'
-                method_info.update(
-                    icp_cost_m=round(icp_cost, 2),
-                    icp_niter=icp_niter,
-                    icp_inlier_ratio=round(icp_inl, 3),
-                    icp_ps_change_pct=round(icp_ps_change, 3),
-                    icp_moved_m=round(icp_moved, 1),
-                    icp_n_pdf_pts=int(len(pdf_pts_pt)),
-                    icp_n_shp_pts=int(len(shp_pts_world)),
-                )
+            if a_ok:
+                # Stage B — 4 DoF refinement (rotation 추가)
+                # coarse 결과를 init 으로 → 가까운 위치에서 회전 자유도 안전
+                (b_ps_mpt, b_theta, b_tl_x, b_tl_y, b_cost, b_niter,
+                 b_inl, b_ok, b_ps_change, b_moved) = _icp_similarity(
+                    pdf_pts_pt, shp_pts_world, a_ps_mpt, a_tl_x, a_tl_y,
+                    init_theta=0.0, max_shift_m=admin_w * 0.02)
+                if b_ok:
+                    ps = b_ps_mpt / px_per_pt
+                    theta = b_theta
+                    tl_x = b_tl_x
+                    tl_y = b_tl_y
+                    # 초기 tl 저장은 분기 진입 직전 값 (grid_center 또는 largest_polygon_bbox 결과)
+                    method = f'icp_multipoly_2stage (prev:{method})'
+                    method_info.update(
+                        icp_cost_m=round(b_cost, 2),
+                        icp_stage_a_niter=a_niter,
+                        icp_stage_a_moved_m=round(a_moved, 1),
+                        icp_stage_b_niter=b_niter,
+                        icp_stage_b_moved_m=round(
+                            float(np.hypot(b_tl_x - a_tl_x,
+                                            b_tl_y - a_tl_y)), 1),
+                        icp_inlier_ratio=round(b_inl, 3),
+                        icp_ps_change_pct=round(
+                            abs(b_ps_mpt - init_ps_mpt) / init_ps_mpt * 100, 3),
+                        icp_theta_rad=round(b_theta, 6),
+                        icp_theta_deg=round(np.degrees(b_theta), 4),
+                        icp_n_pdf_pts=int(len(pdf_pts_pt)),
+                        icp_n_shp_pts=int(len(shp_pts_world)),
+                    )
+                else:
+                    # B 단계 거부 시 A 단계 결과만 사용 (회전 없이 적용)
+                    ps = a_ps_mpt / px_per_pt
+                    tl_x = a_tl_x
+                    tl_y = a_tl_y
+                    method = f'icp_multipoly_3dof (prev:{method})'
+                    method_info.update(
+                        icp_cost_m=round(a_cost, 2),
+                        icp_stage_a_niter=a_niter,
+                        icp_inlier_ratio=round(a_inl, 3),
+                        icp_ps_change_pct=round(a_ps_change, 3),
+                        icp_moved_m=round(a_moved, 1),
+                        icp_stage_b_rejected=True,
+                        icp_n_pdf_pts=int(len(pdf_pts_pt)),
+                        icp_n_shp_pts=int(len(shp_pts_world)),
+                    )
             else:
                 method_info.update(
-                    icp_rejected=True,
-                    icp_inlier_ratio=round(icp_inl, 3),
-                    icp_ps_change_pct=round(icp_ps_change, 3),
-                    icp_moved_m=round(icp_moved, 1),
+                    icp_stage_a_rejected=True,
+                    icp_inlier_ratio=round(a_inl, 3),
+                    icp_ps_change_pct=round(a_ps_change, 3),
+                    icp_moved_m=round(a_moved, 1),
                 )
 
     # 7. GeoTIFF 쓰기 (파싱한 pixmap 재사용)
     base = base_name or code
     out_tif = os.path.join(out_dir, f'{base}.tif')
-    _write_geotiff(pdf['pixmap'], out_tif, tl_x, tl_y, ps, crs='EPSG:5179')
+    _write_geotiff(pdf['pixmap'], out_tif, tl_x, tl_y, ps,
+                    theta=theta, crs='EPSG:5179')
 
     # 8. JGW + PRJ 사이드카 (downstream 호환)
+    # rotation 적용 형식: world = s·R(θ)·(col, -row) + (tl_x, tl_y)
     out_jgw = os.path.join(out_dir, f'{base}.jgw')
     out_prj = os.path.join(out_dir, f'{base}.prj')
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
     write_jgw(out_jgw, JGWParams(
-        pixel_size_x=ps, rotation_x=0.0, rotation_y=0.0,
-        pixel_size_y=-ps, top_left_x=tl_x, top_left_y=tl_y))
+        pixel_size_x=ps * cos_t,
+        rotation_x=ps * sin_t,
+        rotation_y=ps * sin_t,
+        pixel_size_y=-ps * cos_t,
+        top_left_x=tl_x, top_left_y=tl_y))
     with open(out_prj, 'w') as f:
         f.write(PRJ_5179)
 
