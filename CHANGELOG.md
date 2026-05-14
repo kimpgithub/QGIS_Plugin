@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-05-14 — Stage 4 PDF-less 자동 virtual merge 통합
+
+Stage 4 가 PDF 없는 admin 만나면 자동으로 stage_virtual_merge 폴백 호출 →
+SKIPPED 사라지고 모든 admin 이 동일한 출력 경로 (`{시도}/{시군구}/{admin}_scan_merged.{jpg,jgw,prj}`) 에 병합됨.
+
+- Stage 4 신규 인자: `--extract-dir`, `--shp`, `--extract-csv`, `--auto-scale`,
+  `--paper-w`, `--tile-gap`, `--center-mode`
+- 인자 다 주면 PDF-less admin 도 자동 가상 병합 (status=`OK_VIRTUAL`)
+- 안 주면 기존대로 SKIPPED (회귀 0)
+- `merge_admin_virtual` 에 `flat_layout` + `basename` 옵션 추가 → Stage 4 와
+  경로/파일명 통일
+
+CLI:
+```
+python -m gis_scan_tools.tools.stage4_merge \\
+    --warped warped/ --sheet-bboxes scan_id/sheet_bboxes.json \\
+    --pdf-main pdf_main_geo/ --out merged/ \\
+    --extract-dir extract/ --shp data/bnd_adm_pg.shp \\
+    --extract-csv extract/_status.csv --auto-scale
+```
+
 ## 2026-05-14 — PDF-less 분할 스캔 파이프라인
 
 PDF 가 없는 분할 스캔 (admin 분할 N×N 시트만 보유) 도 같은 파이프라인으로

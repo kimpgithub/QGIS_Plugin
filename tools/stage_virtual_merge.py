@@ -146,7 +146,8 @@ def _save_canvas_bbox_shp(out_path, admin_code, center_mode, world_bbox):
 
 
 def merge_admin_virtual(admin_code, sheets_dict, admin_geom, center_mode,
-                         out_dir, ps=None, tile_gap=3):
+                         out_dir, ps=None, tile_gap=3,
+                         flat_layout=False, basename=None):
     """admin 1개의 가상 메인 georef 합성.
 
     Args:
@@ -218,10 +219,13 @@ def merge_admin_virtual(admin_code, sheets_dict, admin_geom, center_mode,
     world_bbox = (top_left_x, top_left_y - canvas_h * ps_y,
                   top_left_x + canvas_w * ps_x, top_left_y)
 
-    sub_out = os.path.join(out_dir, center_mode,
-                            admin_code[:2], admin_code[:5])
+    if flat_layout:
+        sub_out = os.path.join(out_dir, admin_code[:2], admin_code[:5])
+    else:
+        sub_out = os.path.join(out_dir, center_mode,
+                                admin_code[:2], admin_code[:5])
     os.makedirs(sub_out, exist_ok=True)
-    base = f'{admin_code}_virtual_merged'
+    base = basename or f'{admin_code}_virtual_merged'
     jpg_p = os.path.join(sub_out, f'{base}.jpg')
     jgw_p = os.path.join(sub_out, f'{base}.jgw')
     prj_p = os.path.join(sub_out, f'{base}.prj')
