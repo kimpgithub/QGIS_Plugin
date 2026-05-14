@@ -1,91 +1,94 @@
-"""DB 작업 플러그인 진입점 — 화면정의서 Part 3 (S10-S14).
+"""DB 작업 플러그인 진입점 — 서울 서버 연동 (HTTPS 배치 동기화).
 
-툴바 두 번째 아이콘에서 열리는 다이얼로그. 당장은 PG 연결 UI만 있고,
-이후 Phase 3~6에서 엑셀 탑재 / 작업리스트 / 편집 툴바 / Simplify를 추가.
+툴바 두 번째 아이콘에서 열리는 다이얼로그.
+
+데이터 흐름: 대전은 로컬에서 경계를 디지타이징하고, 결과만 HTTPS로 서버에
+제출한다. 발주자 마크업은 HTTPS로 회수한다. PostGIS/MinIO 직접 접속 없음.
 
 구조:
 - DBEditorDialog: 탭 컨테이너
-  - [1] PG 연결 (이번 Phase 2)
-  - [2] 엑셀 탑재 (Phase 3)
-  - [3] 행정리 작업 (Phase 4~6)
-  - [4] 경량화 (Phase 6)
+  - [1] 서버 연결 (URL/토큰/S3 키)
+  - [2] 행정리 작업 (명부 + 로컬 GeoPackage 편집 + 제출 + 마크업 회수)
 """
 import os
 
 from qgis.PyQt.QtWidgets import (
-    QAction, QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
-    QLabel, QLineEdit, QPushButton, QFormLayout, QComboBox, QSpinBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
+    QLabel, QLineEdit, QPushButton, QFormLayout,
     QTextEdit, QMessageBox, QGroupBox, QApplication, QFileDialog,
     QTableWidget, QTableWidgetItem,
 )
-from qgis.PyQt.QtCore import Qt
 
-from .db_tools.pg_connection import (
-    PGProfile, save_profile, load_profile, list_profiles, delete_profile,
-    test_connection, SETTINGS_PREFIX,
-)
-from .db_tools import (
-    excel_loader, admin_list, layer_control, job_table, ri_list,
-)
+from .db_tools import api_client, excel_loader, layer_control
+from .db_tools.api_client import ServerConfig, save_config, load_config
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
 
 
 # ============================================================
-# Tab: PG 연결
+# Tab: 서버 연결
 # ============================================================
 
-class PGConnectionTab(QWidget):
+class ServerConnectionTab(QWidget):
+    """서울 서버 연결 설정 — API URL/토큰 + S3(MinIO) 키.
+
+    설정은 QSettings에 저장. 연결 테스트는 API(read-only)와 S3 각각 확인.
+    """
+
     def __init__(self, parent_dialog):
         super().__init__()
         self.parent_dialog = parent_dialog
         self._build()
-        self._refresh_profile_list()
+        self._load_into_form()
 
     def _build(self):
         layout = QVBoxLayout(self)
 
-        # 프로파일 선택
-        prof_box = QGroupBox('연결 프로파일')
-        prof_layout = QHBoxLayout(prof_box)
-        self.profile_cb = QComboBox()
-        self.profile_cb.setEditable(True)
-        self.profile_cb.currentTextChanged.connect(self._on_profile_changed)
-        prof_layout.addWidget(QLabel('프로파일:'))
-        prof_layout.addWidget(self.profile_cb, 1)
-        self.btn_load = QPushButton('로드')
-        self.btn_load.clicked.connect(self._on_load)
-        self.btn_delete = QPushButton('삭제')
-        self.btn_delete.clicked.connect(self._on_delete)
-        prof_layout.addWidget(self.btn_load)
-        prof_layout.addWidget(self.btn_delete)
-        layout.addWidget(prof_box)
+        help_label = QLabel(
+            '<i>서울 서버 접속 설정입니다. 대전은 PostGIS/MinIO에 직접 붙지 않고 '
+            'HTTPS로만 통신합니다 — 경계 제출/마크업 회수는 API, 이미지 업로드는 S3.'
+            '<br>설정은 QGIS 설정(QSettings)에 저장되어 다음 실행 시 복원됩니다.</i>')
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet(
+            'QLabel { padding: 6px; background: #f0f0f0; border-radius: 3px; }')
+        layout.addWidget(help_label)
 
-        # 접속 정보
-        form_box = QGroupBox('접속 정보 (PostgreSQL + PostGIS)')
-        form = QFormLayout(form_box)
-        self.host = QLineEdit('localhost')
-        self.port = QSpinBox(); self.port.setRange(1, 65535); self.port.setValue(5432)
-        self.database = QLineEdit('')
-        self.schema = QLineEdit('public')
-        self.username = QLineEdit('postgres')
-        self.password = QLineEdit(''); self.password.setEchoMode(QLineEdit.Password)
-        form.addRow('Host:', self.host)
-        form.addRow('Port:', self.port)
-        form.addRow('Database:', self.database)
-        form.addRow('Schema (기본):', self.schema)
-        form.addRow('User:', self.username)
-        form.addRow('Password:', self.password)
-        layout.addWidget(form_box)
+        # API
+        api_box = QGroupBox('API (경계 제출 / 마크업 회수 / COG 등록)')
+        api_form = QFormLayout(api_box)
+        self.base_url = QLineEdit()
+        self.base_url.setPlaceholderText('https://<funnel-host>')
+        self.api_token = QLineEdit()
+        self.api_token.setEchoMode(QLineEdit.Password)
+        self.api_token.setPlaceholderText('서버에서 발급한 플러그인 API 토큰')
+        api_form.addRow('서버 URL:', self.base_url)
+        api_form.addRow('API 토큰:', self.api_token)
+        layout.addWidget(api_box)
+
+        # S3
+        s3_box = QGroupBox('S3 (MinIO — COG / 원본 이미지 업로드)')
+        s3_form = QFormLayout(s3_box)
+        self.s3_access = QLineEdit()
+        self.s3_access.setPlaceholderText('MinIO write 액세스키')
+        self.s3_secret = QLineEdit()
+        self.s3_secret.setEchoMode(QLineEdit.Password)
+        self.bucket = QLineEdit()
+        s3_form.addRow('Access Key:', self.s3_access)
+        s3_form.addRow('Secret Key:', self.s3_secret)
+        s3_form.addRow('Bucket:', self.bucket)
+        layout.addWidget(s3_box)
 
         # 버튼
         btn_row = QHBoxLayout()
-        self.btn_test = QPushButton('연결 테스트')
-        self.btn_test.clicked.connect(self._on_test)
-        self.btn_save = QPushButton('프로파일 저장')
+        self.btn_test_api = QPushButton('API 테스트')
+        self.btn_test_api.clicked.connect(self._on_test_api)
+        self.btn_test_s3 = QPushButton('S3 테스트')
+        self.btn_test_s3.clicked.connect(self._on_test_s3)
+        self.btn_save = QPushButton('설정 저장')
         self.btn_save.clicked.connect(self._on_save)
-        btn_row.addWidget(self.btn_test)
+        btn_row.addWidget(self.btn_test_api)
+        btn_row.addWidget(self.btn_test_s3)
         btn_row.addWidget(self.btn_save)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -96,564 +99,344 @@ class PGConnectionTab(QWidget):
         self.log.setStyleSheet('QTextEdit { font-family: monospace; }')
         layout.addWidget(QLabel('상태:'))
         layout.addWidget(self.log)
-
-        # 도움말
-        help_label = QLabel(
-            '<i>ℹ 프로파일은 QGIS 설정(QSettings)에 저장됩니다. '
-            '연결 테스트 후 저장하면 다음 실행 시 자동 복원. '
-            '비밀번호는 평문 저장되니 개인 PC에서만 사용 권장.</i>')
-        help_label.setWordWrap(True)
-        layout.addWidget(help_label)
         layout.addStretch()
 
-    def _refresh_profile_list(self):
-        current = self.profile_cb.currentText()
-        self.profile_cb.blockSignals(True)
-        self.profile_cb.clear()
-        for name in list_profiles():
-            self.profile_cb.addItem(name)
-        if current:
-            idx = self.profile_cb.findText(current)
-            if idx >= 0:
-                self.profile_cb.setCurrentIndex(idx)
-        self.profile_cb.blockSignals(False)
-        # 초기 로드
-        self._on_load()
-
-    def _on_profile_changed(self, _name):
-        pass  # 수동 로드 버튼 사용 (실수 방지)
-
-    def _current_profile(self):
-        return PGProfile(
-            host=self.host.text().strip() or 'localhost',
-            port=self.port.value(),
-            database=self.database.text().strip(),
-            schema=self.schema.text().strip() or 'public',
-            username=self.username.text().strip(),
-            password=self.password.text(),
+    def current_config(self):
+        return ServerConfig(
+            base_url=self.base_url.text().strip(),
+            api_token=self.api_token.text().strip(),
+            s3_access_key=self.s3_access.text().strip(),
+            s3_secret_key=self.s3_secret.text().strip(),
+            bucket=self.bucket.text().strip() or api_client.DEFAULT_BUCKET,
         )
 
-    def _set_form(self, p: PGProfile):
-        self.host.setText(p.host)
-        self.port.setValue(p.port)
-        self.database.setText(p.database)
-        self.schema.setText(p.schema)
-        self.username.setText(p.username)
-        self.password.setText(p.password)
-
-    def _on_load(self):
-        name = self.profile_cb.currentText().strip() or 'default'
-        p = load_profile(name)
-        self._set_form(p)
-        self.log.append(f'[로드] "{name}" 프로파일 불러옴')
+    def _load_into_form(self):
+        cfg = load_config()
+        self.base_url.setText(cfg.base_url)
+        self.api_token.setText(cfg.api_token)
+        self.s3_access.setText(cfg.s3_access_key)
+        self.s3_secret.setText(cfg.s3_secret_key)
+        self.bucket.setText(cfg.bucket)
+        self.parent_dialog.server_config = cfg
 
     def _on_save(self):
-        name = self.profile_cb.currentText().strip() or 'default'
-        save_profile(name, self._current_profile())
-        self.log.append(f'[저장] "{name}" 프로파일 저장')
-        self._refresh_profile_list()
+        cfg = self.current_config()
+        save_config(cfg)
+        self.parent_dialog.server_config = cfg
+        self.log.append('[저장] 서버 설정 저장됨')
 
-    def _on_delete(self):
-        name = self.profile_cb.currentText().strip()
-        if not name or name == 'default':
-            QMessageBox.warning(self, '삭제 불가', 'default 프로파일은 삭제 불가')
-            return
-        if QMessageBox.question(
-                self, '삭제 확인', f'"{name}" 프로파일을 삭제할까요?',
-                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
-            delete_profile(name)
-            self.log.append(f'[삭제] "{name}"')
-            self._refresh_profile_list()
-
-    def _on_test(self):
-        p = self._current_profile()
-        self.log.append(f'[테스트] {p.host}:{p.port} dbname={p.database or "(default)"}'
-                        f' user={p.username}')
+    def _on_test_api(self):
+        cfg = self.current_config()
+        self.log.append(f'[API 테스트] {cfg.api_base}')
         QApplication.processEvents()
-        ok, msg = test_connection(p, timeout_s=5)
+        ok, msg = api_client.test_connection(cfg)
+        self.log.append(f'  {"✅" if ok else "❌"} {msg}')
         if ok:
-            self.log.append(f'  ✅ 연결 성공\n{msg}')
-            # parent_dialog가 활성 프로파일 알도록 저장
-            self.parent_dialog.active_profile = p
-        else:
-            self.log.append(f'  ❌ 실패: {msg}')
+            self.parent_dialog.server_config = cfg
 
-
-# ============================================================
-# Tab: 엑셀 → PostGIS 탑재 (행정리현황)
-# ============================================================
-
-class ExcelLoadTab(QWidget):
-    """행정리현황 엑셀 업로드 → ri_status 테이블에 업서트.
-
-    화면정의서 S12 요구사항. image5 스키마 기준.
-    """
-
-    def __init__(self, parent_dialog):
-        super().__init__()
-        self.parent_dialog = parent_dialog
-        self._excel_path = None
-        self._cached_rows = None
-        self._build()
-
-    def _build(self):
-        layout = QVBoxLayout(self)
-
-        help_label = QLabel(
-            '<i>행정리현황 엑셀 파일을 선택하면 컬럼이 자동 인식됩니다.'
-            '<br>필수 컬럼: <b>ADM_CD, ADM_NM, RI_CD, RI_NM</b> '
-            '(한글명·공백·대소문자 관용).'
-            '<br>대상 테이블이 없으면 자동 생성, 있으면 (adm_cd, ri_cd) 기준 '
-            '업서트됩니다.</i>')
-        help_label.setWordWrap(True)
-        help_label.setStyleSheet(
-            'QLabel { padding: 6px; background: #f0f0f0; border-radius: 3px; }')
-        layout.addWidget(help_label)
-
-        # 1) 파일 선택
-        path_box = QHBoxLayout()
-        self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText('행정리현황 엑셀 파일 선택 (.xlsx)')
-        self.btn_browse = QPushButton('파일 선택')
-        self.btn_browse.clicked.connect(self._on_browse)
-        path_box.addWidget(QLabel('엑셀:'))
-        path_box.addWidget(self.path_edit, 1)
-        path_box.addWidget(self.btn_browse)
-        layout.addLayout(path_box)
-
-        # 2) 대상 테이블 설정
-        form = QFormLayout()
-        self.schema_edit = QLineEdit('public')
-        self.table_edit = QLineEdit('ri_status')
-        form.addRow('Schema:', self.schema_edit)
-        form.addRow('Table:', self.table_edit)
-        layout.addLayout(form)
-
-        # 3) 미리보기
-        preview_box = QGroupBox('미리보기 (첫 10행)')
-        pv_layout = QVBoxLayout(preview_box)
-        self.preview = QTableWidget()
-        self.preview.setMinimumHeight(200)
-        pv_layout.addWidget(self.preview)
-        self.column_info = QLabel('파일 미선택')
-        self.column_info.setWordWrap(True)
-        pv_layout.addWidget(self.column_info)
-        layout.addWidget(preview_box)
-
-        # 4) 실행
-        btn_row = QHBoxLayout()
-        self.btn_load = QPushButton('PostGIS에 탑재')
-        self.btn_load.clicked.connect(self._on_load)
-        self.btn_load.setEnabled(False)
-        btn_row.addWidget(self.btn_load)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
-        # 로그
-        self.log = QTextEdit(); self.log.setReadOnly(True)
-        self.log.setMinimumHeight(100)
-        self.log.setStyleSheet('QTextEdit { font-family: monospace; }')
-        layout.addWidget(self.log)
-
-    def _on_browse(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, '행정리현황 엑셀 선택', '',
-            '엑셀 (*.xlsx *.xlsm);;모든 파일 (*)')
-        if not p:
-            return
-        self.path_edit.setText(p)
-        self._load_preview(p)
-
-    def _load_preview(self, path):
-        try:
-            headers, rows, mapping, missing = excel_loader.read_excel(
-                path, limit=500)
-        except Exception as e:
-            self.log.append(f'[오류] 엑셀 읽기 실패: {e}')
-            return
-
-        self._excel_path = path
-        self._cached_rows = rows
-
-        # 컬럼 매핑 상태
-        mapped = [f'{orig}→{canon}' for orig, canon in mapping.items()]
-        info = f'<b>총 유효행:</b> {len(rows)}건 (첫 500행까지 스캔)<br>'
-        info += f'<b>매핑된 컬럼:</b> {", ".join(mapped) or "없음"}<br>'
-        if missing:
-            info += f'<b style="color:red">누락 필수 컬럼:</b> {", ".join(missing)}'
-            self.btn_load.setEnabled(False)
-        else:
-            info += '<b style="color:green">✓ 모든 필수 컬럼 OK</b>'
-            self.btn_load.setEnabled(True)
-        self.column_info.setText(info)
-
-        # 미리보기 테이블
-        cols = ['sido_cd', 'sido_nm', 'sigungu_cd', 'sigungu_nm',
-                'adm_cd', 'adm_nm', 'li_nm', 'ri_nm', 'ri_cd', 'remark']
-        self.preview.setColumnCount(len(cols))
-        self.preview.setHorizontalHeaderLabels(cols)
-        show = rows[:10]
-        self.preview.setRowCount(len(show))
-        for i, r in enumerate(show):
-            for j, c in enumerate(cols):
-                self.preview.setItem(i, j, QTableWidgetItem(r.get(c, '')))
-        self.preview.resizeColumnsToContents()
-
-    def _on_load(self):
-        profile = self.parent_dialog.active_profile
-        if profile is None or not profile.database:
-            # 프로파일 탭에서 현재 폼 값을 사용
-            # (사용자가 테스트 누르지 않고 바로 탑재 시도 케이스)
-            tab_pg = self.parent_dialog.tabs.widget(0)
-            profile = tab_pg._current_profile()
-            if not profile.database:
-                QMessageBox.warning(self, '경고',
-                                    '먼저 [1. PG 연결] 탭에서 연결 설정 필요')
-                return
-        if not self._cached_rows:
-            QMessageBox.warning(self, '경고', '엑셀 파일을 먼저 선택하세요')
-            return
-        schema = self.schema_edit.text().strip() or 'public'
-        table = self.table_edit.text().strip() or 'ri_status'
-        self.log.append(f'[탑재 시작] {len(self._cached_rows)}행 → '
-                        f'{profile.host}:{profile.port}/{profile.database} '
-                        f'{schema}.{table}')
+    def _on_test_s3(self):
+        cfg = self.current_config()
+        self.log.append(f'[S3 테스트] {cfg.s3_endpoint}')
         QApplication.processEvents()
-        try:
-            result = excel_loader.upsert(
-                profile, self._cached_rows,
-                schema=schema, table=table)
-            self.log.append(f'  ✅ 완료: affected={result["affected"]}행')
-            if result.get('errors'):
-                for e in result['errors']:
-                    self.log.append(f'  ⚠ {e}')
-        except Exception as e:
-            self.log.append(f'  ❌ 실패: {e}')
+        ok, msg = api_client.check_s3(cfg)
+        self.log.append(f'  {"✅" if ok else "❌"} {msg}')
 
 
 # ============================================================
-# Tab: 행정리 작업 (읍면동 리스트 + 더블클릭 줌 + 작업 시작/종료)
+# Tab: 행정리 작업
 # ============================================================
 
 class WorkListTab(QWidget):
-    """화면정의서 S11-S13 대응 — 읍면동 작업리스트 + 지도 이동 + 레이어 제어.
+    """행정리 작업 — 명부(엑셀) 체크리스트 + 로컬 GeoPackage 편집 + 제출/마크업.
 
-    - bnd_adm_pg에서 읍면동 리스트 로드 (PG 쿼리)
-    - 검색 + 더블클릭 = 맵 캔버스 줌
-    - [작업 시작]: bnd_job_pg만 편집 가능, 나머지 readOnly
-    - [작업 종료]: 편집 내역 저장 + 잠금 해제
-    - (옵션) 워프 스캔 자동 로드 — admin 선택 시 해당 시트 레이어 추가
+    데이터 흐름:
+    1. 명부 엑셀 로드 → 행정리 리스트 표시 (검색·선택)
+    2. 행정리 선택 → split/추가 시 자동 부여될 RI 속성 준비
+    3. 작업 GeoPackage 를 편집 레이어로 추가 → [작업 시작] 으로 편집 활성
+    4. QGIS 편집 툴바로 경계 디지타이징
+    5. [마크업 받기] — 발주자 수정요청을 readOnly 레이어로 회수
+    6. [제출] — GeoPackage → 서버 boundary 테이블 (PUT /api/boundary)
     """
 
     def __init__(self, parent_dialog):
         super().__init__()
         self.parent_dialog = parent_dialog
         self.iface = parent_dialog.iface
-        self._bboxes = {}      # adm_cd → (xmin, ymin, xmax, ymax)
-        self._current_admin = None
+        self._roster = []           # 명부 행 dict 리스트
+        self._work_layer = None     # 로컬 GeoPackage 레이어
         self._work_snapshot = None  # 작업 시작 시 저장, 종료 시 복원
+        self._current_admin = ''
+        self._current_admin_nm = ''
         self._build()
 
     def _build(self):
         layout = QVBoxLayout(self)
 
         help_label = QLabel(
-            '<i>읍면동 리스트 로드 후 <b>더블클릭</b>하면 맵이 해당 영역으로 이동합니다. '
-            '<b>[작업 시작]</b>을 누르면 bnd_job_pg만 편집 가능, 나머지 레이어는 '
-            '자동 잠금. <b>[작업 종료]</b>로 변경사항 저장+잠금 해제.</i>')
+            '<i>경계는 <b>로컬 GeoPackage</b>에서 디지타이징하고 <b>[제출]</b>로 '
+            '서버에 업로드합니다. 명부(행정리현황 엑셀)에서 행정리를 선택하면 '
+            'split/추가 시 RI 속성이 자동 부여됩니다. '
+            '<b>[마크업 받기]</b>로 발주자 수정요청을 회수합니다.</i>')
         help_label.setWordWrap(True)
         help_label.setStyleSheet(
             'QLabel { padding: 6px; background: #f0f0f0; border-radius: 3px; }')
         layout.addWidget(help_label)
 
-        # 소스 테이블 + 워프 폴더
-        src_box = QGroupBox('데이터 소스')
-        src_form = QFormLayout(src_box)
-        self.src_schema = QLineEdit('census_23p')
-        self.src_table = QLineEdit('bnd_adm_pg')
-        self.warped_dir = QLineEdit('')
-        self.warped_dir.setPlaceholderText(
-            '(선택) 워프 스캔 루트 폴더. admin 선택 시 시트 레이어 자동 로드')
-        btn_browse = QPushButton('찾기')
-        btn_browse.clicked.connect(self._browse_warped)
+        # 작업 데이터
+        src_box = QGroupBox('작업 데이터')
+        form = QFormLayout(src_box)
 
-        src_form.addRow('bnd_adm_pg 스키마:', self.src_schema)
-        src_form.addRow('bnd_adm_pg 테이블:', self.src_table)
+        self.gpkg_edit = QLineEdit()
+        self.gpkg_edit.setPlaceholderText('작업 GeoPackage (.gpkg) — 경계 디지타이징 대상')
+        btn_gpkg = QPushButton('찾기')
+        btn_gpkg.clicked.connect(self._browse_gpkg)
+        btn_gpkg_new = QPushButton('새로 만들기')
+        btn_gpkg_new.clicked.connect(self._create_gpkg)
+        grow = QHBoxLayout()
+        grow.addWidget(self.gpkg_edit, 1)
+        grow.addWidget(btn_gpkg)
+        grow.addWidget(btn_gpkg_new)
+        gw = QWidget(); gw.setLayout(grow)
+        form.addRow('작업 GeoPackage:', gw)
+
+        self.roster_edit = QLineEdit()
+        self.roster_edit.setPlaceholderText('명부(행정리현황) 엑셀 (.xlsx)')
+        btn_roster = QPushButton('찾기')
+        btn_roster.clicked.connect(self._browse_roster)
+        rrow = QHBoxLayout()
+        rrow.addWidget(self.roster_edit, 1)
+        rrow.addWidget(btn_roster)
+        rw = QWidget(); rw.setLayout(rrow)
+        form.addRow('명부 엑셀:', rw)
+
+        self.warped_edit = QLineEdit()
+        self.warped_edit.setPlaceholderText(
+            '(선택) 워프 스캔 루트 폴더 — 행정리 더블클릭 시 시트 자동 로드')
+        btn_warped = QPushButton('찾기')
+        btn_warped.clicked.connect(self._browse_warped)
         wrow = QHBoxLayout()
-        wrow.addWidget(self.warped_dir, 1); wrow.addWidget(btn_browse)
-        warp_w = QWidget(); warp_w.setLayout(wrow)
-        src_form.addRow('워프 폴더:', warp_w)
+        wrow.addWidget(self.warped_edit, 1)
+        wrow.addWidget(btn_warped)
+        ww = QWidget(); ww.setLayout(wrow)
+        form.addRow('워프 폴더:', ww)
 
-        btn_refresh = QPushButton('리스트 로드')
-        btn_refresh.clicked.connect(self._refresh)
-        src_form.addRow(btn_refresh)
+        btn_add = QPushButton('작업 GeoPackage를 QGIS 레이어로 추가')
+        btn_add.clicked.connect(self._on_add_layer)
+        form.addRow(btn_add)
         layout.addWidget(src_box)
 
-        # bnd_job_pg 설정
-        job_box = QGroupBox('작업 테이블 (bnd_job_pg)')
-        job_form = QFormLayout(job_box)
-        self.job_schema = QLineEdit('public')
-        self.job_table = QLineEdit('bnd_job_pg')
-        job_form.addRow('Schema:', self.job_schema)
-        job_form.addRow('Table:', self.job_table)
-        jrow = QHBoxLayout()
-        self.btn_ensure = QPushButton('테이블 생성/확인')
-        self.btn_ensure.clicked.connect(self._on_ensure_job_table)
-        self.btn_load_layer = QPushButton('QGIS 레이어로 추가')
-        self.btn_load_layer.clicked.connect(self._on_load_job_layer)
-        jrow.addWidget(self.btn_ensure)
-        jrow.addWidget(self.btn_load_layer)
-        jrow.addStretch()
-        job_w = QWidget(); job_w.setLayout(jrow)
-        job_form.addRow(job_w)
-        self.job_info = QLabel('<i>아직 확인 안 함</i>')
-        self.job_info.setWordWrap(True)
-        job_form.addRow(self.job_info)
-        layout.addWidget(job_box)
-
-        # 검색 + 리스트
-        search_row = QHBoxLayout()
-        search_row.addWidget(QLabel('검색:'))
-        self.search = QLineEdit()
-        self.search.setPlaceholderText('읍면동 코드/명칭/시군구 (예: 21510110 / 기장읍)')
-        self.search.textChanged.connect(self._on_search)
-        search_row.addWidget(self.search)
-        layout.addLayout(search_row)
-
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(
-            ['읍면동 코드', '읍면동명', '시군구', '시도'])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.doubleClicked.connect(self._on_double_click)
-        self.table.currentCellChanged.connect(
-            lambda r, *_: self._on_row_selected(r))
-        self.table.setMinimumHeight(250)
-        layout.addWidget(self.table, 1)
-
-        # 작업 시작/종료
+        # 작업 제어
         btn_row = QHBoxLayout()
-        self.btn_start = QPushButton(
-            '작업 시작 (bnd_job_pg 편집 활성, 기타 잠금)')
+        self.btn_start = QPushButton('작업 시작 (편집 활성, 기타 잠금)')
         self.btn_start.clicked.connect(self._on_start)
         self.btn_end = QPushButton('작업 종료 (저장 + 잠금 해제)')
         self.btn_end.clicked.connect(self._on_end)
         self.btn_end.setEnabled(False)
-        btn_row.addWidget(self.btn_start); btn_row.addWidget(self.btn_end)
+        self.btn_markup = QPushButton('마크업 받기')
+        self.btn_markup.clicked.connect(self._on_get_markup)
+        self.btn_submit = QPushButton('제출')
+        self.btn_submit.clicked.connect(self._on_submit)
+        btn_row.addWidget(self.btn_start)
+        btn_row.addWidget(self.btn_end)
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn_markup)
+        btn_row.addWidget(self.btn_submit)
         layout.addLayout(btn_row)
 
-        # RI 선택 — 선택된 admin의 ri_status 행 리스트
-        ri_box = QGroupBox('행정리 선택 (Split 시 자동 부여)')
-        ri_layout = QVBoxLayout(ri_box)
-        ri_info = QLabel(
-            '<i>맵 위에서 bnd_job_pg 폴리곤을 split하면 새 피처에 '
-            '여기서 선택한 행정리의 adm_cd/adm_nm/ri_cd/ri_nm이 '
-            '자동 기록됩니다.</i>')
-        ri_info.setWordWrap(True)
-        ri_layout.addWidget(ri_info)
-        self.ri_table = QTableWidget(0, 3)
-        self.ri_table.setHorizontalHeaderLabels(['ri_cd', 'ri_nm', 'li_nm'])
-        self.ri_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.ri_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.ri_table.setMinimumHeight(120)
-        self.ri_table.currentCellChanged.connect(
-            lambda r, *_: self._on_ri_selected(r))
-        ri_layout.addWidget(self.ri_table)
-        self.ri_status = QLabel('<i>admin 더블클릭 시 RI 리스트 로드</i>')
-        ri_layout.addWidget(self.ri_status)
-        layout.addWidget(ri_box)
+        # 검색 + 명부 리스트
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel('검색:'))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('읍면동 코드/명칭, 행정리 코드/명칭')
+        self.search.textChanged.connect(self._on_search)
+        search_row.addWidget(self.search)
+        layout.addLayout(search_row)
 
-        self.status = QLabel('리스트 미로드')
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ['읍면동 코드', '읍면동명', '행정리 코드', '행정리명', '비고'])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.currentCellChanged.connect(
+            lambda r, *_: self._on_row_selected(r))
+        self.table.doubleClicked.connect(self._on_double_click)
+        self.table.setMinimumHeight(260)
+        layout.addWidget(self.table, 1)
+
+        self.status = QLabel('명부 미로드')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
 
-    # --- 데이터 로드 ---
+    # --- 설정/소스 ---
 
-    def _get_profile(self):
-        tab_pg = self.parent_dialog.tabs.widget(0)
-        p = tab_pg._current_profile()
-        return p if p.database else None
+    def _get_config(self):
+        cfg = self.parent_dialog.server_config
+        if cfg is None:
+            cfg = self.parent_dialog.tabs.widget(0).current_config()
+        return cfg
+
+    def _browse_gpkg(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, '작업 GeoPackage 선택', self.gpkg_edit.text(),
+            'GeoPackage (*.gpkg)')
+        if p:
+            self.gpkg_edit.setText(p)
+
+    def _create_gpkg(self):
+        p, _ = QFileDialog.getSaveFileName(
+            self, '작업 GeoPackage 생성', self.gpkg_edit.text(),
+            'GeoPackage (*.gpkg)')
+        if not p:
+            return
+        if not p.lower().endswith('.gpkg'):
+            p += '.gpkg'
+        try:
+            lyr = layer_control.ensure_work_geopackage(p)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'GeoPackage 생성 실패: {e}')
+            return
+        if lyr is None:
+            QMessageBox.critical(self, '오류', 'GeoPackage 생성 실패')
+            return
+        self.gpkg_edit.setText(p)
+        self.status.setText(f'GeoPackage 생성: {os.path.basename(p)}')
+
+    def _browse_roster(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, '명부(행정리현황) 엑셀 선택', self.roster_edit.text(),
+            '엑셀 (*.xlsx *.xlsm)')
+        if p:
+            self.roster_edit.setText(p)
+            self._load_roster(p)
 
     def _browse_warped(self):
         d = QFileDialog.getExistingDirectory(
-            self, '워프 스캔 루트 폴더 선택', self.warped_dir.text())
+            self, '워프 스캔 루트 폴더 선택', self.warped_edit.text())
         if d:
-            self.warped_dir.setText(d)
+            self.warped_edit.setText(d)
 
-    def _refresh(self):
-        profile = self._get_profile()
-        if profile is None:
-            QMessageBox.warning(self, '경고',
-                                '[1. PG 연결] 탭에서 연결 설정 필요')
-            return
-        schema = self.src_schema.text().strip() or 'census_23p'
-        table = self.src_table.text().strip() or 'bnd_adm_pg'
+    # --- 명부 로드 ---
+
+    def _load_roster(self, path):
         try:
-            admins = admin_list.load_admin_list(profile, schema, table)
+            _headers, rows, _mapping, missing = excel_loader.read_excel(path)
         except Exception as e:
-            QMessageBox.critical(self, '오류', f'리스트 로드 실패: {e}')
+            QMessageBox.critical(self, '오류', f'명부 엑셀 읽기 실패: {e}')
             return
-        self._bboxes = {}
-        self.table.setRowCount(len(admins))
-        for i, a in enumerate(admins):
-            self.table.setItem(i, 0, QTableWidgetItem(a['adm_cd']))
-            self.table.setItem(i, 1, QTableWidgetItem(a['adm_nm']))
-            self.table.setItem(i, 2, QTableWidgetItem(a['sigungu_nm']))
-            self.table.setItem(i, 3, QTableWidgetItem(a['sido_nm']))
-            self._bboxes[a['adm_cd']] = (
-                a['xmin'], a['ymin'], a['xmax'], a['ymax'])
+        if missing:
+            QMessageBox.warning(
+                self, '경고',
+                f'필수 컬럼 누락: {", ".join(missing)}\n'
+                f'(ADM_CD, ADM_NM, RI_CD, RI_NM 필요 — 한글명 관용)')
+            return
+        self._roster = rows
+        self.table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            self.table.setItem(i, 0, QTableWidgetItem(r.get('adm_cd', '')))
+            self.table.setItem(i, 1, QTableWidgetItem(r.get('adm_nm', '')))
+            self.table.setItem(i, 2, QTableWidgetItem(r.get('ri_cd', '')))
+            self.table.setItem(i, 3, QTableWidgetItem(r.get('ri_nm', '')))
+            self.table.setItem(i, 4, QTableWidgetItem(r.get('remark', '')))
         self.table.resizeColumnsToContents()
-        self.status.setText(f'로드: {len(admins)}개 읍면동')
-
-    # --- 검색 ---
+        self.status.setText(f'명부 로드: {len(rows)}개 행정리')
 
     def _on_search(self, text):
         text = text.strip().lower()
         for r in range(self.table.rowCount()):
             if not text:
-                self.table.setRowHidden(r, False); continue
+                self.table.setRowHidden(r, False)
+                continue
             vals = ' '.join(
-                self.table.item(r, c).text().lower() for c in range(4))
+                (self.table.item(r, c).text().lower()
+                 if self.table.item(r, c) else '')
+                for c in range(5))
             self.table.setRowHidden(r, text not in vals)
 
-    # --- 선택/맵 이동 ---
+    # --- 행정리 선택 → 자동부여 준비 ---
 
     def _on_row_selected(self, row):
-        """싱글클릭 — 행 하이라이트만 (맵 이동 안 함)."""
-        if row < 0:
+        if row < 0 or row >= len(self._roster):
             return
-        item = self.table.item(row, 0)
-        if item:
-            self._current_admin = item.text()
+        r = self._roster[row]
+        self._current_admin = r.get('adm_cd', '')
+        self._current_admin_nm = r.get('adm_nm', '')
+        layer_control.set_current_ri(
+            adm_cd=r.get('adm_cd', ''), adm_nm=r.get('adm_nm', ''),
+            ri_cd=r.get('ri_cd', ''), ri_nm=r.get('ri_nm', ''))
+        self.status.setText(
+            f"활성 행정리: {r.get('ri_cd','')} {r.get('ri_nm','')} "
+            f"({r.get('adm_cd','')} {r.get('adm_nm','')}) — "
+            f"split/추가 시 자동 부여")
 
     def _on_double_click(self, index):
-        """더블클릭 — 맵 줌 + 워프 스캔 로드 + RI 리스트 로드."""
+        """더블클릭 — 워프 스캔 로드 + 해당 영역으로 줌."""
         row = index.row()
-        cd = self.table.item(row, 0).text()
-        nm = self.table.item(row, 1).text()
-        bbox = self._bboxes.get(cd)
-        if not bbox:
+        if row < 0 or row >= len(self._roster):
+            return
+        self._on_row_selected(row)
+        cd = self._current_admin
+        warp_root = self.warped_edit.text().strip()
+        if not warp_root or not cd:
             return
         try:
-            from qgis.core import QgsRectangle
-            rect = QgsRectangle(bbox[0], bbox[1], bbox[2], bbox[3])
-            canvas = self.iface.mapCanvas()
-            canvas.setExtent(rect)
-            canvas.refresh()
-            self._current_admin = cd
-            self._current_admin_nm = nm
-            # 초기 상태: adm_cd/adm_nm만 저장 (ri 없음)
-            layer_control.set_current_ri(adm_cd=cd, adm_nm=nm)
-            msg = f'맵 이동: {cd} ({nm})'
-            # 워프 스캔 로드
-            warp_root = self.warped_dir.text().strip()
-            if warp_root:
-                try:
-                    layer_control.clear_warped_scans(
-                        self.iface, exclude_admin=cd)
-                    added = layer_control.load_warped_scans(
-                        self.iface, cd, warp_root)
-                    if added:
-                        msg += f' | 워프 스캔 {len(added)}개 로드'
-                except Exception as e:
-                    msg += f' | 스캔 로드 오류: {e}'
-            self._load_ri_list(cd)
-            self.status.setText(msg)
-        except Exception as e:
-            self.status.setText(f'맵 이동 실패: {e}')
-
-    def _load_ri_list(self, admin_code):
-        """선택된 admin의 RI 목록을 ri_table에 채움."""
-        profile = self._get_profile()
-        if profile is None:
-            self.ri_status.setText('<i>PG 연결 필요</i>')
-            return
-        schema = 'public'     # ri_status 위치 — 엑셀 탑재 탭의 기본값과 동일
-        try:
-            rows = ri_list.load_ri_for_admin(profile, admin_code, schema)
-        except Exception as e:
-            self.ri_status.setText(f'RI 리스트 로드 실패: {e}')
-            return
-        self.ri_table.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            self.ri_table.setItem(i, 0, QTableWidgetItem(r['ri_cd']))
-            self.ri_table.setItem(i, 1, QTableWidgetItem(r['ri_nm']))
-            self.ri_table.setItem(i, 2, QTableWidgetItem(r['li_nm']))
-        self.ri_table.resizeColumnsToContents()
-        if rows:
-            self.ri_status.setText(
-                f'{len(rows)}개 RI 로드 — 행 선택 시 Split 자동 부여 준비')
-        else:
-            self.ri_status.setText(
-                'RI 없음. 엑셀 탑재(2번 탭)로 ri_status 채우거나 '
-                '직접 속성 입력')
-
-    def _on_ri_selected(self, row):
-        if row < 0:
-            return
-        ri_cd = self.ri_table.item(row, 0).text() if self.ri_table.item(row, 0) else ''
-        ri_nm = self.ri_table.item(row, 1).text() if self.ri_table.item(row, 1) else ''
-        layer_control.set_current_ri(
-            adm_cd=self._current_admin or '',
-            adm_nm=getattr(self, '_current_admin_nm', ''),
-            ri_cd=ri_cd, ri_nm=ri_nm)
-        self.ri_status.setText(
-            f'<b>활성 RI:</b> {ri_cd} {ri_nm} — Split 후 새 피처에 자동 기록')
-
-    # --- bnd_job_pg 관리 ---
-
-    def _on_ensure_job_table(self):
-        profile = self._get_profile()
-        if profile is None:
-            QMessageBox.warning(self, '경고',
-                                '[1. PG 연결] 탭에서 연결 설정 필요')
-            return
-        schema = self.job_schema.text().strip() or 'public'
-        table = self.job_table.text().strip() or 'bnd_job_pg'
-        try:
-            existed_before = job_table.table_exists(profile, schema, table)
-            cols, n = job_table.ensure_table(profile, schema, table)
-            state = '확인' if existed_before else '신규 생성'
-            col_list = ', '.join(c[0] for c in cols)
-            self.job_info.setText(
-                f'<b style="color:green">✓ {state}</b>  '
-                f'{schema}.{table} (행 {n}개)<br>'
-                f'<small>컬럼: {col_list}</small>')
-        except Exception as e:
-            self.job_info.setText(
-                f'<b style="color:red">✗ 오류:</b> {e}')
-
-    def _on_load_job_layer(self):
-        profile = self._get_profile()
-        if profile is None:
-            QMessageBox.warning(self, '경고',
-                                '[1. PG 연결] 탭에서 연결 설정 필요')
-            return
-        schema = self.job_schema.text().strip() or 'public'
-        table = self.job_table.text().strip() or 'bnd_job_pg'
-        try:
-            # 존재 확인 먼저
-            if not job_table.table_exists(profile, schema, table):
-                QMessageBox.warning(
-                    self, '경고',
-                    f'{schema}.{table} 테이블이 없습니다. '
-                    f'먼저 [테이블 생성/확인]을 눌러주세요.')
-                return
-            layer = layer_control.add_postgis_layer(
-                profile, schema, table, layer_name=table)
-            if layer is None:
-                self.job_info.setText(
-                    '<b style="color:red">✗ QGIS 레이어 로드 실패</b> '
-                    '(연결 설정 확인)')
+            from qgis.core import QgsProject, QgsRectangle
+            layer_control.clear_warped_scans(self.iface, exclude_admin=cd)
+            added = layer_control.load_warped_scans(self.iface, cd, warp_root)
+            if added:
+                rect = QgsRectangle()
+                rect.setMinimal()
+                for lyr in QgsProject.instance().mapLayers().values():
+                    if lyr.name() in added:
+                        rect.combineExtentWith(lyr.extent())
+                if not rect.isEmpty():
+                    self.iface.mapCanvas().setExtent(rect)
+                    self.iface.mapCanvas().refresh()
+                self.status.setText(
+                    f'{cd} — 워프 스캔 {len(added)}개 로드 + 줌')
             else:
-                self.job_info.setText(
-                    f'<b style="color:green">✓ QGIS 레이어 추가:</b> '
-                    f'{layer.name()} ({layer.featureCount()}개 피처)')
+                self.status.setText(f'{cd} — 워프 스캔 없음')
         except Exception as e:
-            self.job_info.setText(
-                f'<b style="color:red">✗ 오류:</b> {e}')
+            self.status.setText(f'워프 스캔 로드 오류: {e}')
 
-    # --- 작업 시작/종료 ---
+    # --- 레이어 추가 / 작업 시작·종료 ---
+
+    def _on_add_layer(self):
+        path = self.gpkg_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, '경고', '작업 GeoPackage를 먼저 지정하세요')
+            return
+        if not os.path.exists(path):
+            QMessageBox.warning(
+                self, '경고',
+                'GeoPackage 파일이 없습니다. [새로 만들기]로 생성하세요.')
+            return
+        try:
+            lyr = layer_control.add_geopackage_layer(path)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'레이어 추가 실패: {e}')
+            return
+        if lyr is None:
+            QMessageBox.critical(self, '오류', 'GeoPackage 레이어 로드 실패')
+            return
+        self._work_layer = lyr
+        self.status.setText(
+            f'작업 레이어 추가: {lyr.name()} ({lyr.featureCount()}개 피처)')
+
+    def _find_work_layer(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+        if self._work_layer is not None:
+            try:
+                if self._work_layer.isValid():
+                    return self._work_layer
+            except RuntimeError:
+                self._work_layer = None
+        for lyr in QgsProject.instance().mapLayers().values():
+            if isinstance(lyr, QgsVectorLayer) and any(
+                    t in lyr.name().lower()
+                    for t in layer_control.EDIT_LAYER_NAMES):
+                self._work_layer = lyr
+                return lyr
+        return None
 
     def _on_start(self):
         try:
@@ -661,7 +444,7 @@ class WorkListTab(QWidget):
             self.btn_start.setEnabled(False)
             self.btn_end.setEnabled(True)
             self.status.setText(
-                '작업 시작 — bnd_job_pg 편집 가능, 나머지 readOnly')
+                '작업 시작 — 작업 레이어 편집 가능, 나머지 readOnly')
         except Exception as e:
             QMessageBox.critical(self, '오류', f'작업 시작 실패: {e}')
 
@@ -674,28 +457,75 @@ class WorkListTab(QWidget):
             self.btn_end.setEnabled(False)
             msg = f'작업 종료 — {saved}개 레이어 저장'
             if errors:
-                msg += f' | 오류: {len(errors)}건'
+                msg += f' | 오류 {len(errors)}건: {"; ".join(errors)}'
             self.status.setText(msg)
         except Exception as e:
             QMessageBox.critical(self, '오류', f'작업 종료 실패: {e}')
 
+    # --- 마크업 회수 ---
 
-# ============================================================
-# Tab: 플레이스홀더 — Phase 6에서 채워짐
-# ============================================================
+    def _on_get_markup(self):
+        cfg = self._get_config()
+        adm = self._current_admin or None
+        self.status.setText(
+            f'마크업 회수 중... ({adm or "전체"})')
+        QApplication.processEvents()
+        try:
+            geojson = api_client.get_markup(cfg, adm)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'마크업 회수 실패: {e}')
+            self.status.setText(f'마크업 회수 실패: {e}')
+            return
+        lyr, n = layer_control.load_markup_layer(geojson)
+        if lyr is None:
+            self.status.setText('마크업 0건 (또는 로드 실패)')
+        else:
+            self.status.setText(
+                f'마크업 {n}건 회수 — "{lyr.name()}" 레이어로 표시')
 
-class PlaceholderTab(QWidget):
-    def __init__(self, title, description):
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f'<h3>{title}</h3>'))
-        lbl = QLabel(description)
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet(
-            'QLabel { padding: 16px; color: #666; background: #f8f8f8; '
-            'border-radius: 4px; }')
-        layout.addWidget(lbl)
-        layout.addStretch()
+    # --- 제출 ---
+
+    def _on_submit(self):
+        layer = self._find_work_layer()
+        if layer is None:
+            QMessageBox.warning(
+                self, '경고',
+                '작업 레이어가 없습니다. [작업 GeoPackage를 QGIS 레이어로 추가] 먼저.')
+            return
+        # 편집 중이면 먼저 저장 (provider 에 반영돼야 추출됨)
+        if layer.isEditable():
+            if not layer.commitChanges():
+                QMessageBox.critical(self, '오류', '편집 내역 저장 실패 — 제출 중단')
+                return
+            layer.startEditing()
+        try:
+            geojson = layer_control.layer_to_geojson(layer)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'GeoJSON 추출 실패: {e}')
+            return
+        n = len(geojson.get('features', []))
+        if n == 0:
+            QMessageBox.warning(self, '경고', '제출할 경계(geom)가 없습니다.')
+            return
+        if QMessageBox.question(
+                self, '제출 확인',
+                f'경계 {n}건을 서버에 제출합니다. 계속할까요?',
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        cfg = self._get_config()
+        updated_by = (os.environ.get('USERNAME')
+                      or os.environ.get('USER') or '')
+        self.status.setText(f'제출 중... ({n}건)')
+        QApplication.processEvents()
+        try:
+            affected, msg = api_client.submit_boundary(
+                cfg, geojson, updated_by=updated_by)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'제출 실패: {e}')
+            self.status.setText(f'제출 실패: {e}')
+            return
+        self.status.setText(f'✅ 제출 완료 — {msg}')
+        QMessageBox.information(self, '제출 완료', msg)
 
 
 # ============================================================
@@ -706,22 +536,16 @@ class DBEditorDialog(QDialog):
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
-        self.active_profile = None
+        self.server_config = None
         self.setWindowTitle('GIS Scan Tools — DB 작업')
-        self.resize(760, 620)
+        self.resize(820, 680)
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
-        self.tabs.addTab(PGConnectionTab(self), '1. PG 연결')
-        self.tabs.addTab(ExcelLoadTab(self), '2. 엑셀 탑재')
-        self.tabs.addTab(WorkListTab(self), '3. 행정리 작업')
-        self.tabs.addTab(PlaceholderTab(
-            '데이터 경량화 (Phase 6)',
-            'QGIS simplify 래퍼. 구현 예정.'),
-            '4. 경량화')
+        self.tabs.addTab(ServerConnectionTab(self), '1. 서버 연결')
+        self.tabs.addTab(WorkListTab(self), '2. 행정리 작업')
         layout.addWidget(self.tabs)
 
-        # 닫기 버튼
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         btn_close = QPushButton('닫기')

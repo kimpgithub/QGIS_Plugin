@@ -1,12 +1,13 @@
 [general]
 name=GIS Scan Tools
 qgisMinimumVersion=3.22
-description=스캔 지도 → 좌표 부여 + PostGIS 행정리 경계 편집 도구
-version=2.0.0
+description=스캔 지도 → 좌표 부여 + 행정리 경계 디지타이징 + 서버 게시
+version=3.0.0
 author=GIS Team
 email=gis@example.com
 about=스캔된 종이 지도에 좌표를 부여해 GIS 데이터로 변환하고,
-    PostGIS에 행정리 경계를 편집/저장하는 종합 플러그인.
+    행정리 경계를 로컬에서 디지타이징한 뒤 서울 서버에 HTTPS로 제출하는
+    종합 플러그인. 발주자 검수는 웹에서 이루어진다.
 
     파이프라인 (자동화):
     - Stage 1: 메인 PDF 좌표 자동 생성 (PDF 메타 기반, SIFT 폴백)
@@ -14,14 +15,16 @@ about=스캔된 종이 지도에 좌표를 부여해 GIS 데이터로 변환하�
     - Stage 3: 분할 PDF 매칭 + TPS 워핑
     - Stage 4: 시트 모자이크 병합
     - Stage 5: 경계 검수
+    - Stage 6: 병합 결과 COG 변환 + 서버(MinIO) 업로드 + cog_catalog 등록
     - 미식별 보강 UI + 외부 JGW 가져오기 (수동 복구 지원)
 
-    DB 작업 (PostGIS):
-    - PG 연결 프로파일 관리
-    - 행정리현황 엑셀 → ri_status 업서트
-    - 전국 읍면동 리스트 + 더블클릭 맵 줌 + 워프 스캔 자동 로드
-    - bnd_job_pg 자동 생성 + 편집 모드 제어
+    DB 작업 (서버 연동 — HTTPS 배치 동기화):
+    - 서버 연결 설정 (API URL/토큰 + S3 키)
+    - 명부(행정리현황 엑셀) 로컬 로드 — 작업 체크리스트
+    - 로컬 GeoPackage 에 행정리 경계 디지타이징
     - Split 시 새 피처에 adm_cd/ri_cd/ri_nm 자동 부여
+    - 제출 → 서버 boundary 테이블 (PUT /api/boundary)
+    - 마크업 받기 → 발주자 수정요청 회수
 
     편집 툴바 (QGIS 3.40 호환):
     - Toggle Editing / Save / Split Features / Simplify
@@ -29,7 +32,7 @@ about=스캔된 종이 지도에 좌표를 부여해 GIS 데이터로 변환하�
 tracker=https://github.com/kimpgithub/QGIS_Plugin/issues
 repository=https://github.com/kimpgithub/QGIS_Plugin
 hasProcessingProvider=no
-tags=scan, georeferencing, ocr, postgis, korean, administrative-boundary
+tags=scan, georeferencing, ocr, korean, administrative-boundary
 homepage=https://github.com/kimpgithub/QGIS_Plugin
 category=Raster
 icon=resources/icon.png

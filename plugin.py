@@ -35,6 +35,7 @@ SUB_MAP_EXTRACTED = '3_map_extracted'   # 참조 템플릿 매칭 기반 지도�
 SUB_WARPED = '4_warped'
 SUB_MERGED = '5_merged'
 SUB_VALIDATION = '6_validation'
+SUB_PUBLISHED = '7_published'
 
 
 # ============================================================
@@ -1030,6 +1031,36 @@ class Stage5Tab(StageTab):
 
 
 # ============================================================
+# Stage 6 — COG 게시 (서버 업로드)
+# ============================================================
+
+class Stage6Tab(StageTab):
+    stage_name = '[7] COG 게시'
+
+    def __init__(self, common):
+        from .tools import stage6_publish
+        self.stage_module = stage6_publish
+        super().__init__(common)
+
+    def io_summary(self):
+        proj = self.common.project_dir.text()
+        return ([('Stage 4 병합 출력',
+                  self.common.sub(SUB_MERGED) if proj else ''),
+                 ('서버 설정',
+                  'DB 작업 > 서버 연결 탭에서 저장한 URL/토큰/S3 키 사용')],
+                self.get_out_dir())
+
+    def get_out_dir(self):
+        p = self.common.project_dir.text()
+        return os.path.join(p, SUB_PUBLISHED) if p else ''
+
+    def get_argv(self):
+        self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
+        return ['--merged', self.common.sub(SUB_MERGED),
+                '--out', self.get_out_dir()]
+
+
+# ============================================================
 # 메인 다이얼로그
 # ============================================================
 
@@ -1058,6 +1089,7 @@ class GISScanToolsDialog(QDialog):
         self.tabs.addTab(Stage3Tab(self.common), '3. 매칭+워핑')
         self.tabs.addTab(Stage4Tab(self.common), '4. 사분면 병합')
         self.tabs.addTab(Stage5Tab(self.common), '5. 경계 검수')
+        self.tabs.addTab(Stage6Tab(self.common), '6. COG 게시')
         layout.addWidget(self.tabs, 1)
 
 

@@ -1,15 +1,14 @@
-"""행정리현황 엑셀 → PostGIS 업서트.
+"""명부(행정리현황) 엑셀 파서.
 
-화면정의서 S12 "행정리현황 엑셀 파일을 post에 넣어 놓고" 대응.
+대전 작업자의 로컬 작업목록. 발주처가 엑셀로 제공 — 어떤 행정리를 그려야
+하는지의 마스터 리스트. 행정리 작업 탭에서 read_excel 로 읽어 표시한다.
 
-엑셀 스키마 (image5, 10컬럼):
+엑셀 스키마 (10컬럼):
     SIDO_CD, SIDO_NM, SIGUNGU_CD, SIGUNGU_NM, ADM_CD, ADM_NM,
     LI_NM, RI_NM, RI_CD, REMARK
 
 컬럼명 변형 관용 (대소문자/공백/한글 별칭):
     "SIDO_CD" == "sido_cd" == "시도코드" == "SIDO CD"
-
-업서트 키: (adm_cd, ri_cd) — 같은 행정리는 덮어씀.
 """
 import re
 
@@ -29,45 +28,6 @@ COLUMN_ALIASES = {
 }
 
 REQUIRED_COLS = ['adm_cd', 'adm_nm', 'ri_cd', 'ri_nm']
-
-
-CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS {schema}.{table} (
-    id          SERIAL PRIMARY KEY,
-    sido_cd     VARCHAR(2),
-    sido_nm     VARCHAR(100),
-    sigungu_cd  VARCHAR(5),
-    sigungu_nm  VARCHAR(100),
-    adm_cd      VARCHAR(8)  NOT NULL,
-    adm_nm      VARCHAR(100),
-    li_nm       VARCHAR(100),
-    ri_nm       VARCHAR(100) NOT NULL,
-    ri_cd       VARCHAR(10)  NOT NULL,
-    remark      TEXT,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (adm_cd, ri_cd)
-);
-CREATE INDEX IF NOT EXISTS idx_{table}_adm_cd ON {schema}.{table} (adm_cd);
-CREATE INDEX IF NOT EXISTS idx_{table}_sigungu_cd ON {schema}.{table} (sigungu_cd);
-"""
-
-UPSERT_SQL = """
-INSERT INTO {schema}.{table}
-    (sido_cd, sido_nm, sigungu_cd, sigungu_nm, adm_cd, adm_nm,
-     li_nm, ri_nm, ri_cd, remark)
-VALUES %s
-ON CONFLICT (adm_cd, ri_cd) DO UPDATE SET
-    sido_cd    = EXCLUDED.sido_cd,
-    sido_nm    = EXCLUDED.sido_nm,
-    sigungu_cd = EXCLUDED.sigungu_cd,
-    sigungu_nm = EXCLUDED.sigungu_nm,
-    adm_nm     = EXCLUDED.adm_nm,
-    li_nm      = EXCLUDED.li_nm,
-    ri_nm      = EXCLUDED.ri_nm,
-    remark     = EXCLUDED.remark,
-    updated_at = now();
-"""
 
 
 def _normalize(s):
@@ -144,44 +104,3 @@ def read_excel(path, sheet=None, limit=None):
             break
     wb.close()
     return headers, rows, mapping, missing
-
-
-def upsert(profile, rows, schema='public', table='ri_status'):
-    """행 리스트를 PostGIS에 업서트.
-
-    Args:
-        profile: PGProfile
-        rows: [{sido_cd, sido_nm, ..., ri_cd, remark}, ...]
-        schema, table: 대상
-
-    Returns:
-        {'inserted': n, 'updated': n, 'errors': []}  — 실제로 PG가
-        INSERT/UPDATE 구분 안 알려줘서 합산(affected)만 반환. 여기선
-        총 처리 건수 'affected' 로 보고.
-    """
-    import psycopg2
-    from psycopg2.extras import execute_values
-    if not rows:
-        return {'affected': 0, 'errors': ['탑재 행 0건']}
-    values = [
-        (r['sido_cd'], r['sido_nm'], r['sigungu_cd'], r['sigungu_nm'],
-         r['adm_cd'], r['adm_nm'], r['li_nm'], r['ri_nm'], r['ri_cd'],
-         r['remark'])
-        for r in rows
-    ]
-    conn = psycopg2.connect(
-        host=profile.host, port=profile.port,
-        dbname=profile.database, user=profile.username,
-        password=profile.password or None)
-    try:
-        with conn, conn.cursor() as cur:
-            cur.execute(CREATE_TABLE_SQL.format(schema=schema, table=table))
-            execute_values(
-                cur,
-                UPSERT_SQL.format(schema=schema, table=table),
-                values, page_size=500)
-            # row count — UPDATE도 포함
-            affected = cur.rowcount
-        return {'affected': affected, 'errors': []}
-    finally:
-        conn.close()

@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-05-14 — v3.0.0: 서버 연동 (HTTPS 배치 동기화)
+
+PostGIS 직접 접속을 폐기하고 서울 서버와 HTTPS로만 통신하는 구조로 전환.
+대전은 로컬 GeoPackage에서 디지타이징하고 결과만 제출, 발주자 검수는 웹.
+
+- **신규 `db_tools/api_client.py`** — `ServerConfig`(QSettings) + REST/S3 클라이언트:
+  `submit_boundary` / `get_markup` / `register_cog` / `upload_s3` / 연결 테스트
+- **`db_editor.py` 재작성** — 2탭(서버 연결 / 행정리 작업):
+  - "PG 연결" → "서버 연결" (API URL·토큰·S3 키)
+  - "행정리 작업" — 명부 엑셀 로컬 로드 + 로컬 GeoPackage 편집 +
+    [제출](PUT /api/boundary) + [마크업 받기](GET /api/markup)
+- **`layer_control.py` 재작성** — `ensure_work_geopackage` / `add_geopackage_layer` /
+  `layer_to_geojson` / `load_markup_layer` 추가, PostGIS 직결 제거
+- **신규 Stage 6 (`tools/stage6_publish.py` + Stage6Tab)** — 병합 결과 →
+  COG(GDAL) 변환 → MinIO 업로드 → `cog_catalog` 등록
+- 제거: `db_tools/{pg_connection,admin_list,ri_list,job_table}.py` (PostGIS 직결 모듈)
+- `requirements.txt`: `requests`, `boto3` 추가 / `psycopg2-binary` 는 파이프라인 잔존
+
 ## 2026-05-14 — Stage 4 PDF-less 자동 virtual merge 통합
 
 Stage 4 가 PDF 없는 admin 만나면 자동으로 stage_virtual_merge 폴백 호출 →
