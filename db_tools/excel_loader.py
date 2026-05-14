@@ -3,31 +3,42 @@
 대전 작업자의 로컬 작업목록. 발주처가 엑셀로 제공 — 어떤 행정리를 그려야
 하는지의 마스터 리스트. 행정리 작업 탭에서 read_excel 로 읽어 표시한다.
 
-엑셀 스키마 (10컬럼):
-    SIDO_CD, SIDO_NM, SIGUNGU_CD, SIGUNGU_NM, ADM_CD, ADM_NM,
-    LI_NM, RI_NM, RI_CD, REMARK
+정본 엑셀 스키마 — (2025농총) 행정리현황 명부, 11컬럼:
+    CTPV_CD, CTPV_NM, SGG_CD, SGG_NM, EMD_CD, EMD_NM,
+    RI_NM, LI_NM, LI_CD, WORK_YN, REMARK
 
-컬럼명 변형 관용 (대소문자/공백/한글 별칭):
-    "SIDO_CD" == "sido_cd" == "시도코드" == "SIDO CD"
+주의 — 이 명부는 RI_/LI_ 의미가 플러그인 내부 표준과 뒤바뀌어 있다:
+    엑셀 RI_NM = 법정리명  → 내부 li_nm
+    엑셀 LI_NM = 행정리명  → 내부 ri_nm
+    엑셀 LI_CD = 행정리코드 → 내부 ri_cd
+내부 표준(adm=읍면동, ri=행정리)에 맞춰 매핑한다.
 """
 import re
 
 
-# 엑셀 컬럼명 → 정식 컬럼명 매핑 (alias 관용)
+# 엑셀 헤더 → 내부 표준 컬럼명 매핑.
+# 정본은 (2025농총) 명부 — CTPV_CD/EMD_CD/LI_CD 계열. 헤더는 _normalize 로
+# 비교(대소문자/공백/언더바 무시)한다.
 COLUMN_ALIASES = {
-    'sido_cd':    ['sido_cd', 'sidocd', '시도코드', 'sd_cd'],
-    'sido_nm':    ['sido_nm', 'sidonm', '시도명', '시도명칭', 'sd_nm'],
-    'sigungu_cd': ['sigungu_cd', 'sgg_cd', '시군구코드', 'sigungucd'],
-    'sigungu_nm': ['sigungu_nm', 'sgg_nm', '시군구명', '시군구명칭'],
-    'adm_cd':     ['adm_cd', 'admcd', '읍면동코드', '행정동코드'],
-    'adm_nm':     ['adm_nm', 'admnm', '읍면동명', '행정동명', '행정동명칭'],
-    'li_nm':      ['li_nm', 'linm', '법정리명', '리명'],
-    'ri_nm':      ['ri_nm', 'rinm', '행정리명', '행정리명칭'],
-    'ri_cd':      ['ri_cd', 'ricd', '행정리코드'],
+    'sido_cd':    ['ctpv_cd', 'sido_cd', '시도코드'],
+    'sido_nm':    ['ctpv_nm', 'sido_nm', '시도명', '시도명칭'],
+    'sigungu_cd': ['sgg_cd', 'sigungu_cd', '시군구코드'],
+    'sigungu_nm': ['sgg_nm', 'sigungu_nm', '시군구명', '시군구명칭'],
+    'adm_cd':     ['emd_cd', 'adm_cd', '읍면동코드', '행정동코드'],
+    'adm_nm':     ['emd_nm', 'adm_nm', '읍면동명', '행정동명', '행정동명칭'],
+    'li_nm':      ['ri_nm', '법정리명', '리명'],          # 명부 RI_NM = 법정리명
+    'ri_nm':      ['li_nm', '행정리명', '행정리명칭'],     # 명부 LI_NM = 행정리명
+    'ri_cd':      ['li_cd', '행정리코드'],                # 명부 LI_CD = 행정리코드
+    'work_yn':    ['work_yn', '작업여부', '작업완료여부'],
     'remark':     ['remark', 'rmk', '비고', '특이사항'],
 }
 
 REQUIRED_COLS = ['adm_cd', 'adm_nm', 'ri_cd', 'ri_nm']
+
+# read_excel 결과 row dict 에 항상 존재하는 키 (없으면 '')
+ALL_COLS = ['sido_cd', 'sido_nm', 'sigungu_cd', 'sigungu_nm',
+            'adm_cd', 'adm_nm', 'li_nm', 'ri_nm', 'ri_cd',
+            'work_yn', 'remark']
 
 
 def _normalize(s):
@@ -57,6 +68,23 @@ def detect_columns(header_row):
     return mapping, missing
 
 
+def _pick_sheet(wb):
+    """헤더에 required 컬럼이 다 있는 시트를 고른다.
+
+    명부 엑셀은 '행정리현황' + '테이블정의' 두 시트가 있고 active 가 후자를
+    가리킬 수 있어 wb.active 를 믿지 않는다. 매칭 시트가 없으면 첫 시트.
+    """
+    for ws in wb.worksheets:
+        first = next(ws.iter_rows(values_only=True), None)
+        if not first:
+            continue
+        hdr = [str(h) if h is not None else '' for h in first]
+        _mapping, missing = detect_columns(hdr)
+        if not missing:
+            return ws
+    return wb.worksheets[0] if wb.worksheets else None
+
+
 def read_excel(path, sheet=None, limit=None):
     """엑셀 파일 → (headers, rows, mapping, missing).
 
@@ -67,7 +95,10 @@ def read_excel(path, sheet=None, limit=None):
     """
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb[sheet] if sheet else wb.active
+    ws = wb[sheet] if sheet else _pick_sheet(wb)
+    if ws is None:
+        wb.close()
+        return [], [], {}, REQUIRED_COLS.copy()
     rows_iter = ws.iter_rows(values_only=True)
     try:
         header_row = next(rows_iter)
@@ -93,8 +124,7 @@ def read_excel(path, sheet=None, limit=None):
                 else:
                     rec[col_to_canon[i]] = str(v).strip()
         # 빈 키 보정
-        for c in ['sido_cd', 'sido_nm', 'sigungu_cd', 'sigungu_nm',
-                  'adm_cd', 'adm_nm', 'li_nm', 'ri_nm', 'ri_cd', 'remark']:
+        for c in ALL_COLS:
             rec.setdefault(c, '')
         # 필수 값 체크
         if not rec['adm_cd'] or not rec['ri_cd'] or not rec['ri_nm']:

@@ -252,9 +252,10 @@ class WorkListTab(QWidget):
         search_row.addWidget(self.search)
         layout.addLayout(search_row)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ['읍면동 코드', '읍면동명', '행정리 코드', '행정리명', '비고'])
+            ['읍면동 코드', '읍면동명', '행정리 코드', '행정리명',
+             '작업여부', '비고'])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.currentCellChanged.connect(
@@ -336,9 +337,12 @@ class WorkListTab(QWidget):
             self.table.setItem(i, 1, QTableWidgetItem(r.get('adm_nm', '')))
             self.table.setItem(i, 2, QTableWidgetItem(r.get('ri_cd', '')))
             self.table.setItem(i, 3, QTableWidgetItem(r.get('ri_nm', '')))
-            self.table.setItem(i, 4, QTableWidgetItem(r.get('remark', '')))
+            self.table.setItem(i, 4, QTableWidgetItem(r.get('work_yn', '')))
+            self.table.setItem(i, 5, QTableWidgetItem(r.get('remark', '')))
         self.table.resizeColumnsToContents()
-        self.status.setText(f'명부 로드: {len(rows)}개 행정리')
+        done = sum(1 for r in rows if (r.get('work_yn', '') or '').upper() == 'Y')
+        self.status.setText(
+            f'명부 로드: {len(rows)}개 행정리 (작업완료 {done})')
 
     def _on_search(self, text):
         text = text.strip().lower()
@@ -349,7 +353,7 @@ class WorkListTab(QWidget):
             vals = ' '.join(
                 (self.table.item(r, c).text().lower()
                  if self.table.item(r, c) else '')
-                for c in range(5))
+                for c in range(6))
             self.table.setRowHidden(r, text not in vals)
 
     # --- 행정리 선택 → 자동부여 준비 ---
