@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 import cv2
 import numpy as np
@@ -66,7 +67,8 @@ def ocr_scale_from_scan(scan_path, debug_dir=None):
     crop = img[int(H * 0.025):int(H * 0.060), int(W * 0.30):int(W * 0.40)]
     g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     _, bw = cv2.threshold(g, 180, 255, cv2.THRESH_BINARY)
-    tmp = os.path.join('/tmp', f'_scale_{os.getpid()}.jpg')
+    # 크로스플랫폼 임시 파일 (Windows /tmp 부재 회피)
+    tmp = os.path.join(tempfile.gettempdir(), f'_scale_{os.getpid()}.jpg')
     _imwrite(tmp, bw)
     if debug_dir:
         os.makedirs(debug_dir, exist_ok=True)
@@ -74,10 +76,21 @@ def ocr_scale_from_scan(scan_path, debug_dir=None):
                                os.path.splitext(os.path.basename(scan_path))[0]
                                + '_scale.jpg'),
                  bw)
+    # Stage 2 의 tesseract 자동 탐색 재사용 (Windows 표준 설치 경로 포함)
+    try:
+        from .stage2_scan_identify import check_tesseract
+    except ImportError:
+        from gis_scan_tools.tools.stage2_scan_identify import check_tesseract
+    tess_cmd, _ = check_tesseract()
+    if not tess_cmd:
+        return None
+    sub_kw = {}
+    if sys.platform == 'win32':
+        sub_kw['creationflags'] = 0x08000000  # CREATE_NO_WINDOW
     try:
         res = subprocess.run(
-            ['tesseract', tmp, '-', '--psm', '6', '-l', 'kor+eng'],
-            capture_output=True, text=True, timeout=15)
+            [tess_cmd, tmp, '-', '--psm', '6', '-l', 'kor+eng'],
+            capture_output=True, text=True, timeout=15, **sub_kw)
         text = res.stdout.replace(' ', '').replace('\n', ' ')
         m = re.search(r'1[:.]?(\d{1,2},?\d{3,4})', text.replace(',', ''))
         if m:
