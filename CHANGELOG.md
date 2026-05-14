@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-05-14 — PDF-less 분할 스캔 파이프라인
+
+PDF 가 없는 분할 스캔 (admin 분할 N×N 시트만 보유) 도 같은 파이프라인으로
+흘러가도록 정비. SHP 행정경계만 있으면 가상 메인 georef 합성까지 자동.
+
+**분기 정책 (per-scan)**:
+
+| 단계 | PDF 있을 때 | PDF 없을 때 |
+|---|---|---|
+| Stage 2 | 기존 OCR + valid_sheets 필터 | SHP fuzzy + 무필터 OCR, status=`OK_NO_PDF` |
+| Stage 3 | SIFT ↔ sheet PDF 워핑 | passthrough (원본 복사, status=`PASSTHROUGH`) |
+| stage_extract_map | ORB matching + HSV | HSV 단독 (기존 폴백 그대로) |
+| Stage 4 | sheet_bboxes 기반 mosaic | SKIPPED (병합 불가, virtual merge 로 우회) |
+| **stage_virtual_merge (NEW)** | — | admin 폴리곤 중심 + OCR scale → 가상 메인 georef |
+
+**stage_virtual_merge.py** — 신규 stage:
+- 입력: stage_extract_map 산출 body crop 들 + admin SHP
+- N→grid: N=4→2x2, N=9→3x3 (그 외 = 일부 누락)
+- sheet 배치: row-major top-down (1=TL, N=BR)
+- ps 결정 우선순위:
+  - `--ps <m/px>` 명시
+  - `--auto-scale` + `--extract-csv`: scan 헤더 "1:K" OCR → ps = 0.925 × K / scan_w_px
+    (한국 분할도 paper 폭 925mm 실측, EXIF DPI 명목 300의 ~1% 보정 흡수)
+  - 폴백: admin bbox/canvas anisotropic
+- canvas 중심: admin polygon centroid 또는 bbox center (`--centers`)
+- 타일 간격: `--tile-gap 3` (기본, 흰 픽셀)
+- 출력: `{admin}_virtual_merged.{jpg,jgw,prj}` + `_bbox.shp` (canvas 영역)
+
+**검증 사례**:
+- 36060320 옥룡면 (N=4): PDF 메타 1:7727 → ps=0.6542. SHP polygon 정확히 본문 외곽 일치
+- 36570111 화순읍 (N=9, PDF 없음): scan 헤더 OCR K=1:5566 → ps=0.4765 (925mm 가정).
+  육안 검증, polygon ↔ admin 동리 외곽 정합
+
+**OCR 위치 (한국 분할도 헤더 표준)**:
+- 헤더 좌측 "출력 축척" 셀, scan 좌표 (y=2.5~6%, x=30~40%)
+- grayscale + threshold(180) + tesseract psm=6 kor+eng
+- regex `r'1[:.]?(\d{1,2},?\d{3,4})'`
+
+**산출 파일 흐름** (PDF-less):
+```
+scan/ → Stage2 → identified/ → Stage3 → passthrough copy
+                            ↘ stage_extract_map → body crops
+                                                ↓
+                            stage_virtual_merge ← admin SHP
+                                                ↓
+                            {admin}_virtual_merged.{jpg,jgw}
+```
+
 ## 2026-04-27 — S7 zone 분리 검출 + 폴백 strength filter
 
 극단적으로 약한 시트 (39020120_4-4: 본문 거의 비고 헤더 약함, row max=0.158)

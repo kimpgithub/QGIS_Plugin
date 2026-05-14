@@ -33,13 +33,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 try:
     from .common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179,
-        build_admin_polygon_mask,
+        build_admin_polygon_mask, extract_map_region_scan,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 except ImportError:
     from gis_scan_tools.tools.common import (
         parse_jgw, write_jgw, JGWParams, PRJ_5179,
-        build_admin_polygon_mask,
+        build_admin_polygon_mask, extract_map_region_scan,
         imread_unicode as _imread, imwrite_unicode as _imwrite,
     )
 
@@ -103,8 +103,9 @@ class SheetSiftCache:
         jgw_p = os.path.join(
             self.sheets_geo_dir, f'{admin_code}_{sheet_id}.jgw')
         if not os.path.exists(jpg) or not os.path.exists(jgw_p):
-            raise RuntimeError(
-                f'sheet geo 없음: {jpg} (Stage 2를 최신 버전으로 재실행 필요)')
+            # PDF-less 통과 — 호출자가 None 받으면 SHP 폴백으로 분기
+            self.cache[key] = None
+            return None
 
         sheet_img = _imread(jpg)
         sheet_jgw = parse_jgw(jgw_p)
@@ -204,6 +205,39 @@ def _axis_aligned_fallback(scan_img, sheet_img, sheet_jgw, out_dir, base,
                          method='AXIS_ALIGNED_FALLBACK', t_total=t_total)
 
 
+def _passthrough(scan_img, scan_jpg, out_dir, base, result, t_total):
+    """PDF-less passthrough — 스캔 원본 그대로 복사. JGW 없음.
+
+    sheets_geo 가 없는 (admin, sheet) 일 때 호출. 워핑/georef 시도 안 함.
+    이후 stage_extract_map 이 HSV 폴백으로 본문 영역 추출. JGW 부여는
+    사용자가 QGIS 에서 수동 처리.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    out_jpg = os.path.join(out_dir, f'{base}.jpg')
+    _imwrite(out_jpg, scan_img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    sh, sw = scan_img.shape[:2]
+    result.update(
+        status='PASSTHROUGH',
+        message='PDF 없음 — 원본 복사 (stage_extract_map → 수동 georef)',
+        output_size=[sw, sh],
+        warped_jpg=out_jpg,
+    )
+    result['method'] = 'NO_PDF_PASSTHROUGH'
+    result['elapsed'] = time.time() - t_total
+    with open(os.path.join(out_dir, 'status.json'), 'w') as f:
+        json.dump(result, f, indent=2)
+    return result
+
+
+def _save_status(out_dir, result, t_total, method):
+    result['method'] = method
+    result['elapsed'] = time.time() - t_total
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, 'status.json'), 'w') as f:
+        json.dump(result, f, indent=2)
+    return result
+
+
 def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
                    target_ps=None, scan_scale=0.5,
                    save_intermediates=True, output_basename=None,
@@ -211,6 +245,7 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     """단일 스캔 처리 — scan ↔ sheet PDF 매칭 + 호모그래피 워핑.
 
     SIFT 매칭 실패 (희박 본문 등) 시 axis-aligned 4-corner 매핑 폴백.
+    sheets_geo 자체가 없으면 (PDF-less) passthrough (원본 복사).
     """
     os.makedirs(out_dir, exist_ok=True)
     t_total = time.time()
@@ -219,27 +254,30 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
         'status': 'OK', 'message': '',
     }
 
-    # 1) 스캔 로드 + 빨강 마스킹 + 전처리
+    # 1) 스캔 로드
     scan_img = _imread(scan_jpg)
     if scan_img is None:
         result.update(status='ERROR', message='scan 로드 실패')
         return result
     sh, sw = scan_img.shape[:2]
 
+    # 2) sheet PDF SIFT (캐시) — None 이면 PDF-less → passthrough
+    base = output_basename or f'{admin_code}_{sheet_id}'
+    cached = sheet_cache.get(admin_code, sheet_id)
+    if cached is None:
+        return _passthrough(scan_img, scan_jpg, out_dir, base, result, t_total)
+    g_sheet, kp_p, des_p, sheet_img, sheet_jgw = cached
+
     if save_intermediates:
         save_thumb(os.path.join(out_dir, '02_scan_raw.jpg'), scan_img)
 
+    # 3) 전처리 (SIFT 경로용)
     g_scan = preprocess(scan_img, scale=scan_scale)
     if save_intermediates:
         _imwrite(os.path.join(out_dir, '03_scan_prep.jpg'), g_scan,
                  [cv2.IMWRITE_JPEG_QUALITY, 85])
-
-    # 2) sheet PDF SIFT (캐시) — fallback 시에도 sheet_img/jgw 필요해서 먼저 로드
-    g_sheet, kp_p, des_p, sheet_img, sheet_jgw = sheet_cache.get(
-        admin_code, sheet_id)
     if target_ps is None:
         target_ps = abs(sheet_jgw.pixel_size_x)
-    base = output_basename or f'{admin_code}_{sheet_id}'
 
     sift = cv2.SIFT_create(nfeatures=30000, contrastThreshold=0.025,
                            edgeThreshold=20, sigma=1.6)
@@ -423,7 +461,8 @@ def main():
     elif args.identification and os.path.exists(args.identification):
         with open(args.identification, encoding='utf-8') as f:
             for row in csv.DictReader(f):
-                if row['status'] == 'OK' and row['admin_code'] and row.get('sheet_id'):
+                if (row['status'] in ('OK', 'OK_NO_PDF')
+                        and row['admin_code'] and row.get('sheet_id')):
                     targets.append((row['scan_path'], row['admin_code'],
                                     row['sheet_id']))
         print(f'[Stage 3] CSV 폴백: {len(targets)}장 '
@@ -447,7 +486,7 @@ def main():
                     'n_inliers', 'n_good', 'inlier_pct',
                     'output_w', 'output_h', 'message', 'elapsed_s'])
 
-        n_ok = n_fail = 0
+        n_ok = n_pass = n_fail = 0
         for i, (scan, code, sid) in enumerate(targets, 1):
             label = f'{code}_{sid}'
             print(f'\n[{i}/{len(targets)}] {label} | {os.path.basename(scan)}')
@@ -475,6 +514,8 @@ def main():
                 ])
                 if r['status'] == 'OK':
                     n_ok += 1
+                elif r['status'] == 'PASSTHROUGH':
+                    n_pass += 1
                 else:
                     n_fail += 1
             except Exception as e:
@@ -483,7 +524,7 @@ def main():
                 n_fail += 1
                 print(f'  ERROR: {e}')
 
-    print(f'\n[Stage 3] 완료: OK={n_ok}, FAIL/ERROR={n_fail}')
+    print(f'\n[Stage 3] 완료: OK={n_ok}, PASSTHROUGH={n_pass}, FAIL/ERROR={n_fail}')
     print(f'  결과: {csv_path}')
 
 

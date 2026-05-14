@@ -74,24 +74,34 @@ def crop_to_world_bbox(img, jgw, world_bbox, inner_margin_px=0):
 
 def merge_admin(admin_code, warped_dir, pdf_main_dir, sheet_bboxes,
                 out_dir, inner_margin_px=0):
-    """단일 행정코드 병합 — 시트별 world bbox로 크롭 후 모자이크."""
+    """단일 행정코드 병합 — 시트별 world bbox로 크롭 후 모자이크.
+
+    PDF-less 케이스 (sheet_bboxes 없음 + pdf_main 없음) 는 SKIPPED 로 처리
+    (이후 사용자 수동 georef → 별도 병합 도구 사용).
+    """
     result = {'admin_code': admin_code, 'status': 'OK',
               'message': '', 'sheets': []}
 
-    pdf_jpg = find_main_image(pdf_main_dir, admin_code)
-    pdf_jgw_path = os.path.join(pdf_main_dir, f'{admin_code}.jgw')
+    bboxes = sheet_bboxes.get(admin_code, {})
+    pdf_jpg = find_main_image(pdf_main_dir, admin_code) if os.path.isdir(pdf_main_dir or '') else None
+
+    # PDF-less passthrough: bbox 없고 PDF 메인도 없으면 admin 스킵
+    if not bboxes and pdf_jpg is None:
+        result.update(status='SKIPPED',
+                       message='PDF 없음 (Stage 3 PASSTHROUGH) — 병합 skip')
+        return result
+
     if pdf_jpg is None:
         result.update(status='ERROR',
                       message=f'PDF 메인 없음: {admin_code}.{{tif,jpg}}')
         return result
-
-    map_bbox = main_map_world_bbox(pdf_jpg, pdf_jgw_path)
-    minx, miny, maxx, maxy = map_bbox
-
-    bboxes = sheet_bboxes.get(admin_code, {})
     if not bboxes:
         result.update(status='ERROR', message='sheet_bboxes에 admin 없음')
         return result
+
+    pdf_jgw_path = os.path.join(pdf_main_dir, f'{admin_code}.jgw')
+    map_bbox = main_map_world_bbox(pdf_jpg, pdf_jgw_path)
+    minx, miny, maxx, maxy = map_bbox
 
     # 워핑 시트 수집: warped/{code}/{code}_{sheet_id}/{code}_{sheet_id}.jpg
     # (구버전 warped_scan.jpg도 폴백으로 지원)
@@ -182,8 +192,9 @@ def main():
     ap = argparse.ArgumentParser(description='Stage 4: sheet bbox 기반 병합')
     ap.add_argument('--warped', required=True)
     ap.add_argument('--sheet-bboxes', required=True,
-                    help='Stage 2 산출 sheet_bboxes.json')
-    ap.add_argument('--pdf-main', required=True)
+                    help='Stage 2 산출 sheet_bboxes.json (PDF-less 면 빈 dict)')
+    ap.add_argument('--pdf-main', default='',
+                    help='Stage 1 산출 폴더. PDF-less 면 미지정 → 해당 admin SKIPPED')
     ap.add_argument('--out', dest='out_dir', required=True)
     ap.add_argument('--inner-margin', type=int, default=0,
                     help='시트 안쪽 여유 (px). 시트 경계 부정확 영역 제거. 기본 0')
@@ -216,7 +227,7 @@ def main():
         w = csv.writer(f)
         w.writerow(['admin_code', 'status', 'n_sheets', 'canvas_w',
                     'canvas_h', 'message', 'output', 'elapsed_s'])
-        n_ok = n_fail = 0
+        n_ok = n_skip = n_fail = 0
         for i, code in enumerate(admin_codes, 1):
             t0 = time.time()
             print(f'\n[{i}/{len(admin_codes)}] {code}')
@@ -232,6 +243,8 @@ def main():
                             r.get('output', ''), f'{time.time()-t0:.1f}'])
                 if r['status'] == 'OK':
                     n_ok += 1
+                elif r['status'] == 'SKIPPED':
+                    n_skip += 1
                 else:
                     n_fail += 1
                 with open(os.path.join(args.out_dir,
@@ -243,7 +256,7 @@ def main():
                 n_fail += 1
                 print(f'  ERROR: {e}')
 
-    print(f'\n[Stage 4] 완료: OK={n_ok}, FAIL/ERROR={n_fail}')
+    print(f'\n[Stage 4] 완료: OK={n_ok}, SKIPPED={n_skip}, FAIL/ERROR={n_fail}')
 
 
 if __name__ == '__main__':

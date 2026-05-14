@@ -703,8 +703,8 @@ class SheetCache:
     def __init__(self, pdf_input_dir, pdf_main_dir,
                  cache_dir=None, bbox_cache_path=None,
                  render_dpi=200):
-        self.pdf_input_dir = pdf_input_dir
-        self.pdf_main_dir = pdf_main_dir
+        self.pdf_input_dir = pdf_input_dir or None
+        self.pdf_main_dir = pdf_main_dir or None
         self.cache_dir = cache_dir or '/tmp/_sheet_cache'
         self.render_dpi = render_dpi        # split PDF 렌더 DPI
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -714,7 +714,8 @@ class SheetCache:
         self._label_bboxes = {}    # admin_code → {sheet_id: bbox} 계산 캐시
         self._label_logged = set() # 로그 1회/admin
         self._main_body_world = None  # admin → (minx, miny, maxx, maxy) — 메모리+디스크 캐시
-        self._scan_index_pdfs()
+        if self.pdf_input_dir and os.path.isdir(self.pdf_input_dir):
+            self._scan_index_pdfs()
 
         # 기존 sheet_bboxes.json 로드 — SIFT 재계산 회피
         if bbox_cache_path and os.path.exists(bbox_cache_path):
@@ -1067,12 +1068,14 @@ class SheetCache:
 # 통합 식별 (OCR admin + Visual sheet 하이브리드)
 # ============================================================
 
-def identify_scan(scan_jpg, sheet_cache, valid_codes, shp_index=None):
+def identify_scan(scan_jpg, sheet_cache, valid_codes, shp_index=None,
+                  allow_no_pdf=False):
     """OCR 기반 식별:
       - admin_code: 헤더 OCR (SHP fuzzy/한글명 + valid_codes 2-sub 회수)
       - sheet_id  : 좌상단 대형 'N-i' 라벨 OCR (valid_sheets 필터)
 
-    SIFT 없음 → split PDF SIFT 캐시 불필요. scan당 OCR 2회로 확정.
+    allow_no_pdf=True 면 admin에 분할 PDF 없어도 무필터 OCR로 통과
+    (status='OK_NO_PDF'). Stage 3 가 SHPGeoreferencer 폴백으로 처리.
     """
     img = _imread(scan_jpg)
     if img is None:
@@ -1099,6 +1102,16 @@ def identify_scan(scan_jpg, sheet_cache, valid_codes, shp_index=None):
     # sheet_id OCR — admin의 valid 시트 집합으로 필터
     valid_sheets = sheet_cache.get_valid_sheet_ids(code)
     if not valid_sheets:
+        if allow_no_pdf:
+            # PDF 없음 → 무필터 OCR. None 이어도 통과 시키되 표시.
+            sheet = ocr_sheet_id(img, valid_sheets=None)
+            if sheet is None:
+                return {'status': 'FAIL', 'admin_code': code, 'sheet_id': None,
+                        'method': 'OCR_SHEET_NO_PDF', 'confidence': conf,
+                        'message': '분할 PDF 없음 — sheet_id OCR 실패 (CSV 수동 입력 후 재실행)'}
+            return {'status': 'OK_NO_PDF', 'admin_code': code, 'sheet_id': sheet,
+                    'method': 'OCR_NO_PDF', 'confidence': conf,
+                    'message': '분할 PDF 없음 — OCR 통과'}
         return {'status': 'FAIL', 'admin_code': code, 'sheet_id': None,
                 'method': 'OCR_SHEET', 'confidence': conf,
                 'message': f'admin {code}의 분할 PDF 없음'}
@@ -1122,10 +1135,10 @@ def main():
     ap = argparse.ArgumentParser(description='Stage 2: 스캔 식별 (admin+sheet)')
     ap.add_argument('--in', dest='in_dir', required=True,
                     help='스캔 폴더 (재귀)')
-    ap.add_argument('--pdf-input', required=True,
-                    help='원본 PDF 폴더 (메인+분할 함께)')
-    ap.add_argument('--pdf-main', required=True,
-                    help='Stage 1 산출 폴더 (pdf_main_geo)')
+    ap.add_argument('--pdf-input', default='',
+                    help='원본 PDF 폴더 (메인+분할). 미지정 시 PDF-less 통과 모드 (--shp 필수)')
+    ap.add_argument('--pdf-main', default='',
+                    help='Stage 1 산출 폴더 (pdf_main_geo). 미지정 시 PDF-less 통과 모드')
     ap.add_argument('--out', dest='out_dir', required=True)
     ap.add_argument('--no-rename', action='store_true',
                     help='성공 스캔을 표준명으로 복사 안 함 (기본: identified/에 복사)')
@@ -1138,9 +1151,19 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
+    # PDF-less 통과 모드 자동 감지: pdf-input/pdf-main 둘 중 하나라도 없으면 ON
+    has_pdf_input = bool(args.pdf_input) and os.path.isdir(args.pdf_input)
+    has_pdf_main = bool(args.pdf_main) and os.path.isdir(args.pdf_main)
+    allow_no_pdf = not (has_pdf_input and has_pdf_main)
+    if allow_no_pdf:
+        print('[Stage 2] PDF-less 통과 모드 (분할 PDF 없는 admin/sheet 도 OK_NO_PDF 로 통과)')
+        if not args.shp:
+            print('ERROR: PDF-less 모드는 --shp 필수 (admin_code valid 집합 공급)')
+            sys.exit(1)
+
     print(f'[Stage 2] 시트 캐시 초기화')
     bbox_path = os.path.join(args.out_dir, 'sheet_bboxes.json')
-    cache = SheetCache(args.pdf_input, args.pdf_main,
+    cache = SheetCache(args.pdf_input or None, args.pdf_main or None,
                        cache_dir=os.path.join(args.out_dir, '_sheet_cache'),
                        bbox_cache_path=bbox_path)
     # Stage 3 매칭 템플릿용 sheet geo 출력 경로
@@ -1148,9 +1171,6 @@ def main():
     os.makedirs(cache.sheets_geo_dir, exist_ok=True)
     valid_codes = set(cache.admins_with_sheets())
     print(f'  → {len(valid_codes)}개 admin 코드 (분할 PDF 보유)')
-    if not valid_codes:
-        print('ERROR: 분할 PDF가 없음 (filename: {8자리}_{N}-{i}.pdf)')
-        sys.exit(1)
 
     shp_index = None
     if args.shp:
@@ -1161,6 +1181,19 @@ def main():
             shp_index = None
     else:
         print('  [SHP 미지정 → 기존 OCR 동작]')
+
+    # PDF-less 모드: SHP 전체 코드를 valid_codes 로 합산 (Tier 4.5 fuzzy 는 ≤100 가드로 자동 비활성)
+    if allow_no_pdf:
+        if shp_index:
+            n_before = len(valid_codes)
+            valid_codes |= set(shp_index['codes'])
+            print(f'  [PDF-less] SHP 코드 합산: {n_before} → {len(valid_codes)}개')
+        elif not valid_codes:
+            print('ERROR: PDF 도 SHP 도 없음 — valid_codes 공급원 없음')
+            sys.exit(1)
+    elif not valid_codes:
+        print('ERROR: 분할 PDF가 없음 (filename: {8자리}_{N}-{i}.pdf)')
+        sys.exit(1)
 
     scans = sorted(set(
         glob.glob(os.path.join(args.in_dir, '**/*.jpg'), recursive=True)
@@ -1178,7 +1211,8 @@ def main():
     t0 = time.time()
     for i, scan in enumerate(scans, 1):
         ti = time.time()
-        r = identify_scan(scan, cache, valid_codes, shp_index=shp_index)
+        r = identify_scan(scan, cache, valid_codes, shp_index=shp_index,
+                          allow_no_pdf=allow_no_pdf)
         dt = time.time() - ti
         rows.append({
             'scan_path': scan,
@@ -1200,10 +1234,10 @@ def main():
 
     # === Pass 1.5: CONFLICT 격리 — 동일 (admin, sheet_id) 다중 OK는 양쪽 모두 FAIL ===
     key_counts = Counter((r['admin_code'], r['sheet_id']) for r in rows
-                          if r['status'] == 'OK')
+                          if r['status'] in ('OK', 'OK_NO_PDF'))
     n_conflict = 0
     for r in rows:
-        if r['status'] != 'OK':
+        if r['status'] not in ('OK', 'OK_NO_PDF'):
             continue
         key = (r['admin_code'], r['sheet_id'])
         if key_counts[key] > 1:
@@ -1243,17 +1277,18 @@ def main():
 
     for row in rows:
         scan = row['scan_path']
-        if row['status'] == 'OK':
+        if row['status'] in ('OK', 'OK_NO_PDF'):
             code, sid = row['admin_code'], row['sheet_id']
-            # bbox + sheets_geo
-            bbox = cache.compute_sheet_world_bbox(code, sid)
-            if bbox is None:
-                row['status'] = 'FAIL'
-                row['message'] = 'sheet bbox 계산 실패'
-                _move_to_unmatched(scan)
-                continue
-            cache.export_sheet_geo(code, sid, cache.sheets_geo_dir)
-            # identified/ 복사
+            # bbox + sheets_geo 는 PDF 있는 OK 만 수행 (OK_NO_PDF 는 Stage 3 SHP 폴백)
+            if row['status'] == 'OK':
+                bbox = cache.compute_sheet_world_bbox(code, sid)
+                if bbox is None:
+                    row['status'] = 'FAIL'
+                    row['message'] = 'sheet bbox 계산 실패'
+                    _move_to_unmatched(scan)
+                    continue
+                cache.export_sheet_geo(code, sid, cache.sheets_geo_dir)
+            # identified/ 복사 (양쪽 다)
             if not args.no_rename:
                 sub_dir = os.path.join(identified_dir, code[:2], code[:5])
                 os.makedirs(sub_dir, exist_ok=True)
@@ -1287,9 +1322,10 @@ def main():
         json.dump(cache._sheet_world_bbox, f, indent=2)
 
     n_ok = sum(1 for r in rows if r['status'] == 'OK')
+    n_nopdf = sum(1 for r in rows if r['status'] == 'OK_NO_PDF')
     n_fail = sum(1 for r in rows if r['status'] == 'FAIL')
     n_err = sum(1 for r in rows if r['status'] == 'ERROR')
-    print(f'\n[Stage 2] 완료: OK={n_ok}, FAIL={n_fail}, ERROR={n_err}')
+    print(f'\n[Stage 2] 완료: OK={n_ok}, OK_NO_PDF={n_nopdf}, FAIL={n_fail}, ERROR={n_err}')
     print(f'  CSV: {csv_path}')
     print(f'  bbox: {bbox_path}')
 
