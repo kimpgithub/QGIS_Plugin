@@ -957,7 +957,11 @@ class Stage4Tab(StageTab):
                     self.common.sub(SUB_SCAN_ID),
                     'sheet_bboxes.json') if proj else ''),
                  ('Stage 1 출력', self.common.sub(SUB_PDF_GEO)
-                  if proj else '')],
+                  if proj else ''),
+                 ('지도영역 추출 (PDF-less 폴백용)',
+                  self.common.sub(SUB_MAP_EXTRACTED) if proj else ''),
+                 ('SHP (PDF-less 폴백용)',
+                  self.common.shp.text() or '(미지정 → PDF-less admin SKIPPED)')],
                 self.get_out_dir())
 
     def get_out_dir(self):
@@ -974,6 +978,16 @@ class Stage4Tab(StageTab):
                 '--out', self.get_out_dir()]
         if self.inner_margin.value() > 0:
             argv += ['--inner-margin', str(self.inner_margin.value())]
+        # PDF-less virtual merge 자동 활성화 — extract 디렉토리 + SHP 가 있으면 추가
+        extract_dir = self.common.sub(SUB_MAP_EXTRACTED)
+        shp_path = self.common.shp.text()
+        if extract_dir and os.path.isdir(extract_dir) and shp_path:
+            argv += ['--extract-dir', extract_dir,
+                     '--shp', shp_path,
+                     '--auto-scale']
+            extract_csv = os.path.join(extract_dir, '_status.csv')
+            if os.path.exists(extract_csv):
+                argv += ['--extract-csv', extract_csv]
         return argv
 
 
