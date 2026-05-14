@@ -1281,16 +1281,14 @@ def main():
             shutil.copy2(scan_path, dst)
 
     # OK_NO_PDF 는 PDF 가 없어 valid_sheets 교차검증 불가 → OCR 오류 가능성 있음
-    # → identified/ 가 아닌 _unmatched/ 로 보내 사람 검수 후 수동 이동 유도
-    no_pdf_review_dir = os.path.join(args.out_dir, '_no_pdf_review')
-
-    def _copy_no_pdf_review(scan_path, code, sid):
-        """OCR 결과 admin/sheet 로 rename 해 검수 폴더에 복사."""
+    # → identified/ 가 아닌 _unmatched/ 로 보내 2a.미식별보강 탭에서 검수
+    def _copy_unmatched_renamed(scan_path, code, sid):
+        """OCR 결과 admin/sheet 로 rename 해 _unmatched/ 에 복사."""
         if args.no_unmatched:
             return None
-        os.makedirs(no_pdf_review_dir, exist_ok=True)
+        os.makedirs(unmatched_dir, exist_ok=True)
         ext = os.path.splitext(scan_path)[1]
-        dst = os.path.join(no_pdf_review_dir, f'{code}_{sid}{ext}')
+        dst = os.path.join(unmatched_dir, f'{code}_{sid}{ext}')
         if os.path.exists(dst):
             base = os.path.splitext(dst)[0]
             k = 2
@@ -1326,9 +1324,9 @@ def main():
                 shutil.copy2(scan, renamed)
                 row['renamed_path'] = renamed
         elif row['status'] == 'OK_NO_PDF':
-            # 검수용 폴더로 복사. 사람이 확인 후 identified/{시도}/{시군구}/ 로 이동
-            renamed = _copy_no_pdf_review(scan, row['admin_code'],
-                                           row['sheet_id'])
+            # _unmatched/ 로 복사 (OCR 결과 admin/sheet 로 rename) — 2a 검수 대상
+            renamed = _copy_unmatched_renamed(scan, row['admin_code'],
+                                                row['sheet_id'])
             if renamed:
                 row['renamed_path'] = renamed
         elif row['status'] == 'FAIL':
@@ -1358,8 +1356,8 @@ def main():
     print(f'  CSV: {csv_path}')
     print(f'  bbox: {bbox_path}')
     if n_nopdf:
-        print(f'  [검수 필요] OK_NO_PDF {n_nopdf}장 → {no_pdf_review_dir}')
-        print(f'             OCR 결과 검수 후 identified/{{시도}}/{{시군구}}/ 로 이동')
+        print(f'  [검수 필요] OK_NO_PDF {n_nopdf}장 → {unmatched_dir}')
+        print(f'             2a.미식별보강 탭에서 OCR 결과 확인 후 정정/이동')
 
 
 if __name__ == '__main__':
