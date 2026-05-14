@@ -1151,15 +1151,20 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # PDF-less 통과 모드 자동 감지: pdf-input/pdf-main 둘 중 하나라도 없으면 ON
+    # PDF-less 폴백 — SHP 만 있으면 항상 ON (mixed 입력에서 admin 별 PDF 유무 자동 분기)
+    # PDF 있는 admin → 정규 OCR + valid_sheets 필터
+    # PDF 없는 admin → 무필터 OCR + status=OK_NO_PDF
     has_pdf_input = bool(args.pdf_input) and os.path.isdir(args.pdf_input)
     has_pdf_main = bool(args.pdf_main) and os.path.isdir(args.pdf_main)
-    allow_no_pdf = not (has_pdf_input and has_pdf_main)
+    allow_no_pdf = bool(args.shp)
     if allow_no_pdf:
-        print('[Stage 2] PDF-less 통과 모드 (분할 PDF 없는 admin/sheet 도 OK_NO_PDF 로 통과)')
-        if not args.shp:
-            print('ERROR: PDF-less 모드는 --shp 필수 (admin_code valid 집합 공급)')
-            sys.exit(1)
+        if has_pdf_input and has_pdf_main:
+            print('[Stage 2] mixed 모드 — admin 별로 PDF 있으면 정규 OCR, 없으면 OK_NO_PDF')
+        else:
+            print('[Stage 2] PDF-less 모드 — 모든 admin 무필터 OCR (OK_NO_PDF)')
+    elif not (has_pdf_input and has_pdf_main):
+        print('ERROR: --pdf-input/--pdf-main 누락 시 --shp 필수 (no-pdf 폴백용)')
+        sys.exit(1)
 
     print(f'[Stage 2] 시트 캐시 초기화')
     bbox_path = os.path.join(args.out_dir, 'sheet_bboxes.json')
