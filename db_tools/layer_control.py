@@ -1,99 +1,163 @@
-"""QGIS 레이어 제어 + 로컬 GeoPackage 작업 데이터 관리.
+"""QGIS 작업 환경 구성 + 레이어 제어.
 
-데이터 흐름: 대전은 PostGIS에 직접 붙지 않는다. 경계는 로컬 GeoPackage 에서
-디지타이징하고, 결과만 HTTPS 로 서버에 제출한다 (화면정의서 슬11:
-"데이터를 postDB에 넣지 않고 QGIS 환경에서 작업").
+화면정의서 슬11~12: 작업 폴더의 하위 폴더 규칙(01_~13_)으로 13개 슬롯을
+자동 인식해 QGIS 에 로드하고, 작업데이터 레이어만 편집 가능하게 한다.
+데이터는 postDB 에 넣지 않고 로컬 파일로 작업, 결과만 HTTPS 로 제출한다.
 
-- ensure_work_geopackage / add_geopackage_layer : 로컬 작업 데이터
-- start_work_mode / end_work_mode               : 편집 대상만 활성, 나머지 잠금
-- attach_autofill                               : split/추가 시 RI 속성 자동 부여
-- layer_to_geojson                              : 제출용 GeoJSON 추출
-- load_markup_layer                             : 발주자 마크업 readOnly 레이어
-- load_warped_scans / clear_warped_scans        : 워프 스캔 자동 로드
+- detect_work_folder / load_workspace : 작업 폴더 → 13레이어 구성
+- start_work_mode / end_work_mode     : 작업데이터만 편집 활성, 나머지 잠금
+- attach_autofill                     : split/추가 시 RI 속성 자동 부여
+- boundary_to_geojson                 : 제출용 GeoJSON 추출 (속성 정규화)
+- load_markup_layer                   : 발주자 마크업 readOnly 레이어
+- load_warped_scans / clear_warped_scans : 워프 스캔 자동 로드
 
-QGIS 실행 환경에서만 동작. 테스트에서는 import 시 qgis 모듈 부재로 실패하므로
-각 함수가 지연 import 한다.
+QGIS 실행 환경에서만 동작 — 각 함수가 qgis 모듈을 지연 import 한다.
 """
+import glob
 import os
+import re
 
 
-# 편집 대상 레이어 이름 키워드 — 이 키워드를 포함하면 편집 활성, 나머지는 readOnly
-EDIT_LAYER_NAMES = ('boundary', 'bnd_job')
-WORK_LAYER_NAME = 'boundary'   # 작업 GeoPackage 안의 레이어 이름
+# 편집 대상 레이어 이름 키워드 — 포함하면 편집 활성, 나머지는 readOnly
+EDIT_LAYER_NAMES = ('작업데이터', 'bnd_job')
+
+# 작업 폴더 슬롯 정의 — (하위폴더 번호, 키, 표시명, 종류, 기본표시, 필수)
+#   종류: 'shp' | 'xlsx' | 'raster_dir'
+WORK_SLOTS = [
+    ('01', 'building',     '건물',            'shp',        False, False),
+    ('02', 'building_grp', '건물군',          'shp',        False, False),
+    ('03', 'road',         '도로구간',        'shp',        False, False),
+    ('04', 'road_real',    '실폭도로',        'shp',        False, False),
+    ('05', 'rail',         '철도',            'shp',        False, False),
+    ('06', 'river',        '하천',            'shp',        False, False),
+    ('07', 'li_bnd',       '법정리경계',      'shp',        False, False),
+    ('08', 'cadastral',    '지적도',          'shp',        False, False),
+    ('09', 'adm_bnd',      '행정경계',        'shp',        True,  True),
+    ('10', 'work_data',    '작업데이터',      'shp',        True,  True),
+    ('11', 'merged_img',   '병합이미지',      'raster_dir', True,  True),
+    ('12', 'roster',       '명부',            'xlsx',       False, True),
+    ('13', 'ri_2021',      '21년 행정리경계', 'shp',        False, False),
+]
 
 
 # ============================================================
-# 로컬 GeoPackage 작업 데이터
+# 작업 폴더 → 13레이어 구성
 # ============================================================
 
-def _boundary_fields():
-    """작업 GeoPackage 의 속성 필드 — 서버 boundary 테이블과 정합."""
-    from qgis.core import QgsField, QgsFields
-    from qgis.PyQt.QtCore import QVariant
-    fields = QgsFields()
-    fields.append(QgsField('adm_cd', QVariant.String, len=8))
-    fields.append(QgsField('adm_nm', QVariant.String, len=100))
-    fields.append(QgsField('ri_cd', QVariant.String, len=10))
-    fields.append(QgsField('ri_nm', QVariant.String, len=100))
-    fields.append(QgsField('remark', QVariant.String))
-    fields.append(QgsField('status', QVariant.String, len=20))
-    return fields
+def detect_work_folder(root):
+    """작업 폴더의 하위 폴더 규칙(01_~13_)으로 슬롯별 파일 자동 인식.
 
-
-def ensure_work_geopackage(path, layer_name=WORK_LAYER_NAME):
-    """작업 GeoPackage 를 보장 — 없으면 boundary 스키마로 생성. 레이어 반환.
-
-    Returns QgsVectorLayer (유효) or None.
+    Returns {slot_key: path or None}. raster_dir 슬롯은 폴더 경로를 값으로.
     """
-    from qgis.core import (QgsVectorLayer, QgsVectorFileWriter, QgsWkbTypes,
-                           QgsCoordinateReferenceSystem, QgsProject)
-    uri = f'{path}|layername={layer_name}'
-    if os.path.exists(path):
-        lyr = QgsVectorLayer(uri, layer_name, 'ogr')
-        return lyr if lyr.isValid() else None
+    result = {key: None for _n, key, *_ in WORK_SLOTS}
+    if not root or not os.path.isdir(root):
+        return result
+    # 하위 폴더 → 번호 매칭 (예: "09_행정경계" → "09")
+    subdirs = {}
+    for name in os.listdir(root):
+        full = os.path.join(root, name)
+        if not os.path.isdir(full):
+            continue
+        m = re.match(r'(\d{2})', name)
+        if m:
+            subdirs[m.group(1)] = full
+    for num, key, _label, kind, _on, _req in WORK_SLOTS:
+        folder = subdirs.get(num)
+        if not folder:
+            continue
+        if kind == 'shp':
+            hits = glob.glob(os.path.join(folder, '*.shp'))
+            if hits:
+                result[key] = hits[0]
+        elif kind == 'xlsx':
+            hits = (glob.glob(os.path.join(folder, '*.xlsx'))
+                    + glob.glob(os.path.join(folder, '*.xlsm')))
+            if hits:
+                result[key] = hits[0]
+        elif kind == 'raster_dir':
+            if glob.glob(os.path.join(folder, '*.jpg')):
+                result[key] = folder
+    return result
 
-    crs = QgsCoordinateReferenceSystem('EPSG:5179')
-    opts = QgsVectorFileWriter.SaveVectorOptions()
-    opts.driverName = 'GPKG'
-    opts.layerName = layer_name
-    writer = QgsVectorFileWriter.create(
-        path, _boundary_fields(), QgsWkbTypes.MultiPolygon, crs,
-        QgsProject.instance().transformContext(), opts)
-    ok = writer is not None and writer.hasError() == QgsVectorFileWriter.NoError
-    del writer   # flush
-    if not ok:
-        return None
-    lyr = QgsVectorLayer(uri, layer_name, 'ogr')
-    return lyr if lyr.isValid() else None
 
-
-def add_geopackage_layer(path, layer_name=WORK_LAYER_NAME):
-    """작업 GeoPackage 레이어를 QGIS 프로젝트에 추가 (중복 이름 정리). 반환 레이어."""
-    from qgis.core import QgsVectorLayer, QgsProject
-    lyr = QgsVectorLayer(f'{path}|layername={layer_name}', layer_name, 'ogr')
-    if not lyr.isValid():
-        return None
-    for lid, existing in list(QgsProject.instance().mapLayers().items()):
-        if existing.name() == layer_name:
+def _remove_by_name(name):
+    from qgis.core import QgsProject
+    for lid, lyr in list(QgsProject.instance().mapLayers().items()):
+        if lyr.name() == name:
             QgsProject.instance().removeMapLayer(lid)
-    QgsProject.instance().addMapLayer(lyr)
-    return lyr
 
 
-def layer_to_geojson(layer):
-    """레이어 피처를 GeoJSON FeatureCollection(dict) 으로 추출.
+def load_workspace(slots):
+    """슬롯 dict({key: path})를 QGIS 에 로드. on/off 기본값 적용.
 
-    QgsJsonExporter 가 기본적으로 EPSG:4326 으로 변환 — GeoJSON 표준.
-    geom 이 없는 피처는 제외 (미완성 행은 제출 안 함).
+    명부(xlsx)는 레이어가 아니므로 건너뜀 — 호출자가 별도 로드.
+    Returns (work_data_layer or None, summary[list of (label, status)]).
+    """
+    from qgis.core import QgsProject, QgsVectorLayer, QgsRasterLayer
+    proj = QgsProject.instance()
+    root = proj.layerTreeRoot()
+    work_layer = None
+    summary = []
+    for _num, key, label, kind, default_on, required in WORK_SLOTS:
+        path = slots.get(key)
+        if not path:
+            if required:
+                summary.append((label, '없음 (필수)'))
+            continue
+        if kind == 'shp':
+            lyr = QgsVectorLayer(path, label, 'ogr')
+            if not lyr.isValid():
+                summary.append((label, '로드 실패'))
+                continue
+            _remove_by_name(label)
+            proj.addMapLayer(lyr)
+            node = root.findLayer(lyr.id())
+            if node:
+                node.setItemVisibilityChecked(default_on)
+            if key == 'work_data':
+                work_layer = lyr
+            summary.append((label, f'OK ({lyr.featureCount()}개)'))
+        elif kind == 'raster_dir':
+            added = 0
+            for jpg in sorted(glob.glob(os.path.join(path, '*.jpg'))):
+                nm = os.path.splitext(os.path.basename(jpg))[0]
+                rl = QgsRasterLayer(jpg, nm)
+                if not rl.isValid():
+                    continue
+                _remove_by_name(nm)
+                proj.addMapLayer(rl)
+                node = root.findLayer(rl.id())
+                if node:
+                    node.setItemVisibilityChecked(default_on)
+                added += 1
+            summary.append((label, f'OK ({added}장)'))
+    return work_layer, summary
+
+
+# ============================================================
+# 제출용 GeoJSON 추출
+# ============================================================
+
+def boundary_to_geojson(layer):
+    """작업데이터 레이어 → GeoJSON FeatureCollection(dict).
+
+    QgsJsonExporter 가 EPSG:4326 으로 변환(GeoJSON 표준). 속성은 서버
+    boundary 스키마에 맞춰 {adm_cd,adm_nm,ri_cd,ri_nm,remark} 만, 소문자
+    키로 정규화 (작업 SHP 는 RI_CD/RI_NM 대문자라서). geom 없는 피처 제외.
     """
     import json
     from qgis.core import QgsJsonExporter
-    exporter = QgsJsonExporter(layer)
+    keep = ('adm_cd', 'adm_nm', 'ri_cd', 'ri_nm', 'remark')
     feats = [f for f in layer.getFeatures()
              if f.hasGeometry() and not f.geometry().isEmpty()]
     if not feats:
         return {'type': 'FeatureCollection', 'features': []}
-    return json.loads(exporter.exportFeatures(feats))
+    fc = json.loads(QgsJsonExporter(layer).exportFeatures(feats))
+    for feat in fc.get('features', []):
+        props = feat.get('properties', {}) or {}
+        feat['properties'] = {k.lower(): v for k, v in props.items()
+                              if k.lower() in keep}
+    return fc
 
 
 # ============================================================
@@ -118,15 +182,13 @@ def load_markup_layer(geojson_dict, layer_name='발주자_마크업'):
     if not lyr.isValid():
         return None, 0
     lyr.setReadOnly(True)
-    for lid, existing in list(QgsProject.instance().mapLayers().items()):
-        if existing.name() == layer_name:
-            QgsProject.instance().removeMapLayer(lid)
+    _remove_by_name(layer_name)
     QgsProject.instance().addMapLayer(lyr)
     return lyr, len(feats)
 
 
 # ============================================================
-# 작업 모드 — 편집 대상만 활성, 나머지 readOnly
+# 작업 모드 — 작업데이터만 편집 활성, 나머지 readOnly
 # ============================================================
 
 def start_work_mode(iface, edit_layer_names=EDIT_LAYER_NAMES):
@@ -212,7 +274,10 @@ _active_callbacks = {}   # layer_id → slot
 
 
 def attach_autofill(layer, target_layer_names=EDIT_LAYER_NAMES):
-    """layer.featureAdded 시 현재 선택 RI 의 adm_cd/adm_nm/ri_cd/ri_nm 자동 기록."""
+    """layer.featureAdded 시 현재 선택 RI 의 adm/ri 속성 자동 기록.
+
+    작업 SHP 는 컬럼이 대문자(RI_CD/RI_NM)일 수 있어 대소문자 무시 검색.
+    """
     nm = layer.name().lower()
     if not any(t in nm for t in target_layer_names):
         return False
@@ -225,11 +290,14 @@ def attach_autofill(layer, target_layer_names=EDIT_LAYER_NAMES):
         if not cur['ri_cd']:
             return
         fields = _layer.fields()
+        # 대소문자 무시 컬럼 인덱스
+        idx_of = {fields.at(i).name().lower(): i
+                  for i in range(fields.count())}
         for col, val in (('adm_cd', cur['adm_cd']),
                          ('adm_nm', cur['adm_nm']),
                          ('ri_cd', cur['ri_cd']),
                          ('ri_nm', cur['ri_nm'])):
-            idx = fields.indexOf(col)
+            idx = idx_of.get(col, -1)
             if idx >= 0 and val:
                 _layer.changeAttributeValue(fid, idx, val)
 
@@ -293,7 +361,6 @@ def clear_warped_scans(iface, exclude_admin=None):
 
     exclude_admin 지정 시 그 admin 은 유지. 제거 개수 반환.
     """
-    import re
     from qgis.core import QgsProject
     pat = re.compile(r'^(\d{8})_(\d+-\d+)$')
     to_remove = []

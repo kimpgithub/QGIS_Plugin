@@ -9,10 +9,14 @@ PostGIS 직접 접속을 폐기하고 서울 서버와 HTTPS로만 통신하는 
   `submit_boundary` / `get_markup` / `register_cog` / `upload_s3` / 연결 테스트
 - **`db_editor.py` 재작성** — 2탭(서버 연결 / 행정리 작업):
   - "PG 연결" → "서버 연결" (API URL·토큰·S3 키)
-  - "행정리 작업" — 명부 엑셀 로컬 로드 + 로컬 GeoPackage 편집 +
+  - "행정리 작업" — 작업 폴더 지정 시 하위 폴더 규칙(01_~13_)으로 13개
+    레이어 슬롯 자동 인식 → [화면 구성]으로 QGIS 로드(on/off 기본값) +
+    명부 로드 → [작업 시작] → 명부에서 행정리 선택 → 작업데이터 split →
     [제출](PUT /api/boundary) + [마크업 받기](GET /api/markup)
-- **`layer_control.py` 재작성** — `ensure_work_geopackage` / `add_geopackage_layer` /
-  `layer_to_geojson` / `load_markup_layer` 추가, PostGIS 직결 제거
+    (화면정의서 슬11~12 흐름)
+- **`layer_control.py` 재작성** — `detect_work_folder` / `load_workspace` /
+  `boundary_to_geojson`(속성 소문자 정규화) / `load_markup_layer` 추가,
+  PostGIS 직결 제거. 작업데이터는 미리 분할된 시군구 SHP 를 그대로 편집
 - **신규 Stage 6 (`tools/stage6_publish.py` + Stage6Tab)** — 병합 결과 →
   COG(GDAL) 변환 → MinIO 업로드 → `cog_catalog` 등록
 - 제거: `db_tools/{pg_connection,admin_list,ri_list,job_table}.py` (PostGIS 직결 모듈)

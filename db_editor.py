@@ -8,7 +8,7 @@
 구조:
 - DBEditorDialog: 탭 컨테이너
   - [1] 서버 연결 (URL/토큰/S3 키)
-  - [2] 행정리 작업 (명부 + 로컬 GeoPackage 편집 + 제출 + 마크업 회수)
+  - [2] 행정리 작업 (작업 폴더 자동인식 → 13레이어 구성 → 편집 → 제출/마크업)
 """
 import os
 
@@ -147,24 +147,24 @@ class ServerConnectionTab(QWidget):
 # ============================================================
 
 class WorkListTab(QWidget):
-    """행정리 작업 — 명부(엑셀) 체크리스트 + 로컬 GeoPackage 편집 + 제출/마크업.
+    """행정리 작업 — 작업 폴더 자동인식 → 13레이어 구성 → 편집 → 제출/마크업.
 
-    데이터 흐름:
-    1. 명부 엑셀 로드 → 행정리 리스트 표시 (검색·선택)
-    2. 행정리 선택 → split/추가 시 자동 부여될 RI 속성 준비
-    3. 작업 GeoPackage 를 편집 레이어로 추가 → [작업 시작] 으로 편집 활성
-    4. QGIS 편집 툴바로 경계 디지타이징
-    5. [마크업 받기] — 발주자 수정요청을 readOnly 레이어로 회수
-    6. [제출] — GeoPackage → 서버 boundary 테이블 (PUT /api/boundary)
+    화면정의서 슬11~12 흐름:
+    1. 작업 폴더 지정 → 하위 폴더 규칙(01_~13_)으로 슬롯 자동 인식
+    2. [화면 구성] — 13레이어를 on/off 기본값대로 QGIS 로드 + 명부 로드
+    3. [작업 시작] — 작업데이터 레이어만 편집 활성, 나머지 잠금
+    4. 명부에서 행정리 선택 → split/추가 시 RI 속성 자동 부여
+    5. [마크업 받기] — 발주자 수정요청 회수 / [제출] — 작업데이터 → 서버
     """
 
     def __init__(self, parent_dialog):
         super().__init__()
         self.parent_dialog = parent_dialog
         self.iface = parent_dialog.iface
-        self._roster = []           # 명부 행 dict 리스트
-        self._work_layer = None     # 로컬 GeoPackage 레이어
-        self._work_snapshot = None  # 작업 시작 시 저장, 종료 시 복원
+        self._slots = {}            # slot_key → path
+        self._roster = []           # 명부 행 dict
+        self._work_layer = None     # 작업데이터 레이어
+        self._work_snapshot = None
         self._current_admin = ''
         self._current_admin_nm = ''
         self._build()
@@ -173,61 +173,50 @@ class WorkListTab(QWidget):
         layout = QVBoxLayout(self)
 
         help_label = QLabel(
-            '<i>경계는 <b>로컬 GeoPackage</b>에서 디지타이징하고 <b>[제출]</b>로 '
-            '서버에 업로드합니다. 명부(행정리현황 엑셀)에서 행정리를 선택하면 '
-            'split/추가 시 RI 속성이 자동 부여됩니다. '
-            '<b>[마크업 받기]</b>로 발주자 수정요청을 회수합니다.</i>')
+            '<i><b>작업 폴더</b>를 지정하면 하위 폴더(01_~13_)에서 13개 레이어를 '
+            '자동 인식합니다. <b>[화면 구성]</b>으로 QGIS에 로드 → <b>[작업 시작]</b> → '
+            '명부에서 행정리 선택 후 작업데이터 폴리곤을 split → '
+            '<b>[제출]</b>로 서버 업로드.</i>')
         help_label.setWordWrap(True)
         help_label.setStyleSheet(
             'QLabel { padding: 6px; background: #f0f0f0; border-radius: 3px; }')
         layout.addWidget(help_label)
 
-        # 작업 데이터
-        src_box = QGroupBox('작업 데이터')
-        form = QFormLayout(src_box)
+        # --- 데이터 선택 ---
+        sel_box = QGroupBox('데이터 선택')
+        sel_layout = QVBoxLayout(sel_box)
+        frow = QHBoxLayout()
+        frow.addWidget(QLabel('작업 폴더:'))
+        self.folder_edit = QLineEdit()
+        self.folder_edit.setPlaceholderText(
+            '시군구 작업 폴더 — 하위 01_~13_ 폴더 자동 인식')
+        btn_folder = QPushButton('찾기')
+        btn_folder.clicked.connect(self._browse_folder)
+        frow.addWidget(self.folder_edit, 1)
+        frow.addWidget(btn_folder)
+        sel_layout.addLayout(frow)
 
-        self.gpkg_edit = QLineEdit()
-        self.gpkg_edit.setPlaceholderText('작업 GeoPackage (.gpkg) — 경계 디지타이징 대상')
-        btn_gpkg = QPushButton('찾기')
-        btn_gpkg.clicked.connect(self._browse_gpkg)
-        btn_gpkg_new = QPushButton('새로 만들기')
-        btn_gpkg_new.clicked.connect(self._create_gpkg)
-        grow = QHBoxLayout()
-        grow.addWidget(self.gpkg_edit, 1)
-        grow.addWidget(btn_gpkg)
-        grow.addWidget(btn_gpkg_new)
-        gw = QWidget(); gw.setLayout(grow)
-        form.addRow('작업 GeoPackage:', gw)
+        self.slot_table = QTableWidget(0, 3)
+        self.slot_table.setHorizontalHeaderLabels(['슬롯', '파일', '상태'])
+        self.slot_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.slot_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.slot_table.setMinimumHeight(180)
+        self.slot_table.doubleClicked.connect(self._on_slot_double_click)
+        sel_layout.addWidget(self.slot_table)
 
-        self.roster_edit = QLineEdit()
-        self.roster_edit.setPlaceholderText('명부(행정리현황) 엑셀 (.xlsx)')
-        btn_roster = QPushButton('찾기')
-        btn_roster.clicked.connect(self._browse_roster)
-        rrow = QHBoxLayout()
-        rrow.addWidget(self.roster_edit, 1)
-        rrow.addWidget(btn_roster)
-        rw = QWidget(); rw.setLayout(rrow)
-        form.addRow('명부 엑셀:', rw)
+        slot_hint = QLabel(
+            '<i>잘못 인식된 슬롯은 행을 더블클릭해 파일을 직접 지정하세요.</i>')
+        slot_hint.setStyleSheet('QLabel { color: #777; }')
+        sel_layout.addWidget(slot_hint)
 
-        self.warped_edit = QLineEdit()
-        self.warped_edit.setPlaceholderText(
-            '(선택) 워프 스캔 루트 폴더 — 행정리 더블클릭 시 시트 자동 로드')
-        btn_warped = QPushButton('찾기')
-        btn_warped.clicked.connect(self._browse_warped)
-        wrow = QHBoxLayout()
-        wrow.addWidget(self.warped_edit, 1)
-        wrow.addWidget(btn_warped)
-        ww = QWidget(); ww.setLayout(wrow)
-        form.addRow('워프 폴더:', ww)
+        self.btn_load_ws = QPushButton('화면 구성 (레이어 로드)')
+        self.btn_load_ws.clicked.connect(self._on_load_workspace)
+        sel_layout.addWidget(self.btn_load_ws)
+        layout.addWidget(sel_box)
 
-        btn_add = QPushButton('작업 GeoPackage를 QGIS 레이어로 추가')
-        btn_add.clicked.connect(self._on_add_layer)
-        form.addRow(btn_add)
-        layout.addWidget(src_box)
-
-        # 작업 제어
+        # --- 작업 제어 ---
         btn_row = QHBoxLayout()
-        self.btn_start = QPushButton('작업 시작 (편집 활성, 기타 잠금)')
+        self.btn_start = QPushButton('작업 시작 (작업데이터 편집 활성, 기타 잠금)')
         self.btn_start.clicked.connect(self._on_start)
         self.btn_end = QPushButton('작업 종료 (저장 + 잠금 해제)')
         self.btn_end.clicked.connect(self._on_end)
@@ -243,7 +232,7 @@ class WorkListTab(QWidget):
         btn_row.addWidget(self.btn_submit)
         layout.addLayout(btn_row)
 
-        # 검색 + 명부 리스트
+        # --- 검색 + 명부 리스트 ---
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel('검색:'))
         self.search = QLineEdit()
@@ -261,14 +250,14 @@ class WorkListTab(QWidget):
         self.table.currentCellChanged.connect(
             lambda r, *_: self._on_row_selected(r))
         self.table.doubleClicked.connect(self._on_double_click)
-        self.table.setMinimumHeight(260)
+        self.table.setMinimumHeight(220)
         layout.addWidget(self.table, 1)
 
-        self.status = QLabel('명부 미로드')
+        self.status = QLabel('작업 폴더 미지정')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
 
-    # --- 설정/소스 ---
+    # --- 설정 ---
 
     def _get_config(self):
         cfg = self.parent_dialog.server_config
@@ -276,45 +265,81 @@ class WorkListTab(QWidget):
             cfg = self.parent_dialog.tabs.widget(0).current_config()
         return cfg
 
-    def _browse_gpkg(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, '작업 GeoPackage 선택', self.gpkg_edit.text(),
-            'GeoPackage (*.gpkg)')
-        if p:
-            self.gpkg_edit.setText(p)
+    # --- 데이터 선택 ---
 
-    def _create_gpkg(self):
-        p, _ = QFileDialog.getSaveFileName(
-            self, '작업 GeoPackage 생성', self.gpkg_edit.text(),
-            'GeoPackage (*.gpkg)')
-        if not p:
-            return
-        if not p.lower().endswith('.gpkg'):
-            p += '.gpkg'
-        try:
-            lyr = layer_control.ensure_work_geopackage(p)
-        except Exception as e:
-            QMessageBox.critical(self, '오류', f'GeoPackage 생성 실패: {e}')
-            return
-        if lyr is None:
-            QMessageBox.critical(self, '오류', 'GeoPackage 생성 실패')
-            return
-        self.gpkg_edit.setText(p)
-        self.status.setText(f'GeoPackage 생성: {os.path.basename(p)}')
-
-    def _browse_roster(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, '명부(행정리현황) 엑셀 선택', self.roster_edit.text(),
-            '엑셀 (*.xlsx *.xlsm)')
-        if p:
-            self.roster_edit.setText(p)
-            self._load_roster(p)
-
-    def _browse_warped(self):
+    def _browse_folder(self):
         d = QFileDialog.getExistingDirectory(
-            self, '워프 스캔 루트 폴더 선택', self.warped_edit.text())
+            self, '작업 폴더 선택', self.folder_edit.text())
         if d:
-            self.warped_edit.setText(d)
+            self.folder_edit.setText(d)
+            self._detect()
+
+    def _detect(self):
+        root = self.folder_edit.text().strip()
+        self._slots = layer_control.detect_work_folder(root)
+        self._fill_slot_table()
+
+    def _fill_slot_table(self):
+        slots_def = layer_control.WORK_SLOTS
+        self.slot_table.setRowCount(len(slots_def))
+        for i, (num, key, label, kind, _on, required) in enumerate(slots_def):
+            path = self._slots.get(key)
+            self.slot_table.setItem(i, 0, QTableWidgetItem(f'{num} {label}'))
+            disp = os.path.basename(path.rstrip('/\\')) if path else ''
+            self.slot_table.setItem(i, 1, QTableWidgetItem(disp))
+            if path:
+                st = '✓ 필수' if required else '✓'
+            else:
+                st = '✗ 없음 (필수)' if required else '- 선택'
+            self.slot_table.setItem(i, 2, QTableWidgetItem(st))
+        self.slot_table.resizeColumnsToContents()
+        missing = [label for _n, key, label, _k, _o, req
+                   in slots_def if req and not self._slots.get(key)]
+        if missing:
+            self.status.setText(f'필수 데이터 누락: {", ".join(missing)}')
+        else:
+            self.status.setText('데이터 인식 완료 — [화면 구성] 진행 가능')
+
+    def _on_slot_double_click(self, index):
+        row = index.row()
+        slots_def = layer_control.WORK_SLOTS
+        if row < 0 or row >= len(slots_def):
+            return
+        _num, key, label, kind, _on, _req = slots_def[row]
+        if kind == 'shp':
+            p, _ = QFileDialog.getOpenFileName(
+                self, f'{label} — SHP 선택', '', 'SHP (*.shp)')
+        elif kind == 'xlsx':
+            p, _ = QFileDialog.getOpenFileName(
+                self, f'{label} — 엑셀 선택', '', '엑셀 (*.xlsx *.xlsm)')
+        elif kind == 'raster_dir':
+            p = QFileDialog.getExistingDirectory(
+                self, f'{label} — 폴더 선택', '')
+        else:
+            p = ''
+        if p:
+            self._slots[key] = p
+            self._fill_slot_table()
+
+    def _on_load_workspace(self):
+        slots_def = layer_control.WORK_SLOTS
+        missing = [label for _n, key, label, _k, _o, req
+                   in slots_def if req and not self._slots.get(key)]
+        if missing:
+            QMessageBox.warning(
+                self, '경고', f'필수 데이터 누락: {", ".join(missing)}')
+            return
+        try:
+            work_layer, summary = layer_control.load_workspace(self._slots)
+        except Exception as e:
+            QMessageBox.critical(self, '오류', f'레이어 로드 실패: {e}')
+            return
+        self._work_layer = work_layer
+        roster_path = self._slots.get('roster')
+        if roster_path:
+            self._load_roster(roster_path)
+        ok = ' / '.join(f'{lbl}:{st}' for lbl, st in summary)
+        self.status.setText(f'화면 구성 완료 — {ok}')
 
     # --- 명부 로드 ---
 
@@ -327,8 +352,7 @@ class WorkListTab(QWidget):
         if missing:
             QMessageBox.warning(
                 self, '경고',
-                f'필수 컬럼 누락: {", ".join(missing)}\n'
-                f'(ADM_CD, ADM_NM, RI_CD, RI_NM 필요 — 한글명 관용)')
+                f'명부 필수 컬럼 누락: {", ".join(missing)}')
             return
         self._roster = rows
         self.table.setRowCount(len(rows))
@@ -340,7 +364,8 @@ class WorkListTab(QWidget):
             self.table.setItem(i, 4, QTableWidgetItem(r.get('work_yn', '')))
             self.table.setItem(i, 5, QTableWidgetItem(r.get('remark', '')))
         self.table.resizeColumnsToContents()
-        done = sum(1 for r in rows if (r.get('work_yn', '') or '').upper() == 'Y')
+        done = sum(1 for r in rows
+                   if (r.get('work_yn', '') or '').upper() == 'Y')
         self.status.setText(
             f'명부 로드: {len(rows)}개 행정리 (작업완료 {done})')
 
@@ -373,74 +398,37 @@ class WorkListTab(QWidget):
             f"split/추가 시 자동 부여")
 
     def _on_double_click(self, index):
-        """더블클릭 — 워프 스캔 로드 + 해당 영역으로 줌."""
+        """더블클릭 — 선택 + 해당 읍면동으로 맵 줌 (행정경계 레이어 기준)."""
         row = index.row()
         if row < 0 or row >= len(self._roster):
             return
         self._on_row_selected(row)
-        cd = self._current_admin
-        warp_root = self.warped_edit.text().strip()
-        if not warp_root or not cd:
-            return
-        try:
-            from qgis.core import QgsProject, QgsRectangle
-            layer_control.clear_warped_scans(self.iface, exclude_admin=cd)
-            added = layer_control.load_warped_scans(self.iface, cd, warp_root)
-            if added:
-                rect = QgsRectangle()
-                rect.setMinimal()
-                for lyr in QgsProject.instance().mapLayers().values():
-                    if lyr.name() in added:
-                        rect.combineExtentWith(lyr.extent())
-                if not rect.isEmpty():
-                    self.iface.mapCanvas().setExtent(rect)
-                    self.iface.mapCanvas().refresh()
-                self.status.setText(
-                    f'{cd} — 워프 스캔 {len(added)}개 로드 + 줌')
-            else:
-                self.status.setText(f'{cd} — 워프 스캔 없음')
-        except Exception as e:
-            self.status.setText(f'워프 스캔 로드 오류: {e}')
+        self._zoom_to_admin(self._current_admin)
 
-    # --- 레이어 추가 / 작업 시작·종료 ---
-
-    def _on_add_layer(self):
-        path = self.gpkg_edit.text().strip()
-        if not path:
-            QMessageBox.warning(self, '경고', '작업 GeoPackage를 먼저 지정하세요')
-            return
-        if not os.path.exists(path):
-            QMessageBox.warning(
-                self, '경고',
-                'GeoPackage 파일이 없습니다. [새로 만들기]로 생성하세요.')
-            return
-        try:
-            lyr = layer_control.add_geopackage_layer(path)
-        except Exception as e:
-            QMessageBox.critical(self, '오류', f'레이어 추가 실패: {e}')
-            return
-        if lyr is None:
-            QMessageBox.critical(self, '오류', 'GeoPackage 레이어 로드 실패')
-            return
-        self._work_layer = lyr
-        self.status.setText(
-            f'작업 레이어 추가: {lyr.name()} ({lyr.featureCount()}개 피처)')
-
-    def _find_work_layer(self):
+    def _zoom_to_admin(self, adm_cd):
         from qgis.core import QgsProject, QgsVectorLayer
-        if self._work_layer is not None:
-            try:
-                if self._work_layer.isValid():
-                    return self._work_layer
-            except RuntimeError:
-                self._work_layer = None
+        if not adm_cd:
+            return
         for lyr in QgsProject.instance().mapLayers().values():
-            if isinstance(lyr, QgsVectorLayer) and any(
-                    t in lyr.name().lower()
-                    for t in layer_control.EDIT_LAYER_NAMES):
-                self._work_layer = lyr
-                return lyr
-        return None
+            if not isinstance(lyr, QgsVectorLayer):
+                continue
+            if '행정경계' not in lyr.name():
+                continue
+            fields = lyr.fields()
+            idx = next((i for i in range(fields.count())
+                        if fields.at(i).name().lower() == 'adm_cd'), -1)
+            if idx < 0:
+                return
+            for f in lyr.getFeatures():
+                if str(f.attribute(idx)) == adm_cd and f.hasGeometry():
+                    self.iface.mapCanvas().setExtent(
+                        f.geometry().boundingBox())
+                    self.iface.mapCanvas().refresh()
+                    self.status.setText(f'맵 이동: {adm_cd}')
+                    return
+            return
+
+    # --- 작업 시작/종료 ---
 
     def _on_start(self):
         try:
@@ -448,7 +436,7 @@ class WorkListTab(QWidget):
             self.btn_start.setEnabled(False)
             self.btn_end.setEnabled(True)
             self.status.setText(
-                '작업 시작 — 작업 레이어 편집 가능, 나머지 readOnly')
+                '작업 시작 — 작업데이터 편집 가능, 나머지 readOnly')
         except Exception as e:
             QMessageBox.critical(self, '오류', f'작업 시작 실패: {e}')
 
@@ -471,8 +459,7 @@ class WorkListTab(QWidget):
     def _on_get_markup(self):
         cfg = self._get_config()
         adm = self._current_admin or None
-        self.status.setText(
-            f'마크업 회수 중... ({adm or "전체"})')
+        self.status.setText(f'마크업 회수 중... ({adm or "전체"})')
         QApplication.processEvents()
         try:
             geojson = api_client.get_markup(cfg, adm)
@@ -489,21 +476,37 @@ class WorkListTab(QWidget):
 
     # --- 제출 ---
 
+    def _find_work_layer(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+        if self._work_layer is not None:
+            try:
+                if self._work_layer.isValid():
+                    return self._work_layer
+            except RuntimeError:
+                self._work_layer = None
+        for lyr in QgsProject.instance().mapLayers().values():
+            if isinstance(lyr, QgsVectorLayer) and any(
+                    t in lyr.name().lower()
+                    for t in layer_control.EDIT_LAYER_NAMES):
+                self._work_layer = lyr
+                return lyr
+        return None
+
     def _on_submit(self):
         layer = self._find_work_layer()
         if layer is None:
             QMessageBox.warning(
                 self, '경고',
-                '작업 레이어가 없습니다. [작업 GeoPackage를 QGIS 레이어로 추가] 먼저.')
+                '작업데이터 레이어가 없습니다. [화면 구성] 먼저 진행하세요.')
             return
-        # 편집 중이면 먼저 저장 (provider 에 반영돼야 추출됨)
+        # 편집 중이면 먼저 저장 (provider 반영 후 추출)
         if layer.isEditable():
             if not layer.commitChanges():
                 QMessageBox.critical(self, '오류', '편집 내역 저장 실패 — 제출 중단')
                 return
             layer.startEditing()
         try:
-            geojson = layer_control.layer_to_geojson(layer)
+            geojson = layer_control.boundary_to_geojson(layer)
         except Exception as e:
             QMessageBox.critical(self, '오류', f'GeoJSON 추출 실패: {e}')
             return
