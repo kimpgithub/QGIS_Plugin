@@ -627,9 +627,7 @@ class WorkListTab(QWidget):
                 self.iface, attach=False)
             work = self._find_work_layer()
             if work is not None:
-                # 4) 분류 심볼 적용 (ri_cd 빈/채워짐 시각화)
-                layer_control.apply_work_data_categorized_renderer(work)
-                # 5) split→팝업 콜백 연결
+                # 4) split→팝업 콜백 연결 (qgz 스타일은 유지)
                 self._connect_feature_added(work)
             self.btn_start.setEnabled(False)
             self.btn_end.setEnabled(True)
