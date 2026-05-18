@@ -500,6 +500,74 @@ def _aspect_guard(scan_shape, bbox, expected_aspect, tol=0.03):
         return None, deviation, ''
 
 
+def _peer_sanity_pass(records, out_dir, tol=0.01):
+    """admin 내 시트들의 body 사이즈가 같아야 한다는 물리 제약으로 outlier 보정.
+
+    같은 admin = 같은 종이 포맷 = 같은 본문 픽셀 크기. tol 초과 outlier 는
+    peer 의 좌/상/우/하 마진 중앙값으로 원본 스캔에서 재크롭 + 덮어쓰기.
+    records: [{admin,sid,scan_path,out_path,orig_w,orig_h,bbox,cw,ch,method}]
+    Returns: 보정 시트 수.
+    """
+    from statistics import median
+    from collections import defaultdict
+    by_admin = defaultdict(list)
+    for r in records:
+        by_admin[r['admin']].append(r)
+    corrections = []
+    for admin, recs in by_admin.items():
+        if len(recs) < 3:
+            continue
+        ws = [r['cw'] for r in recs]
+        hs = [r['ch'] for r in recs]
+        med_w, med_h = median(ws), median(hs)
+        peers = [r for r in recs
+                 if abs(r['cw'] - med_w) / med_w <= tol
+                 and abs(r['ch'] - med_h) / med_h <= tol]
+        outliers = [r for r in recs if r not in peers]
+        if not peers or not outliers:
+            continue
+        m_left = int(round(median([r['bbox'][0] for r in peers])))
+        m_top = int(round(median([r['bbox'][1] for r in peers])))
+        m_right = int(round(median(
+            [r['orig_w'] - r['bbox'][0] - r['bbox'][2] for r in peers])))
+        m_bot = int(round(median(
+            [r['orig_h'] - r['bbox'][1] - r['bbox'][3] for r in peers])))
+        for r in outliers:
+            new_x, new_y = m_left, m_top
+            new_w = r['orig_w'] - new_x - m_right
+            new_h = r['orig_h'] - new_y - m_bot
+            if new_w <= 0 or new_h <= 0:
+                continue
+            scan = _imread(r['scan_path'])
+            if scan is None:
+                continue
+            new_crop = scan[new_y:new_y + new_h, new_x:new_x + new_w]
+            _imwrite(r['out_path'], new_crop,
+                     [cv2.IMWRITE_JPEG_QUALITY, 92])
+            corrections.append({
+                'admin': admin, 'sid': r['sid'],
+                'before': f'{r["cw"]}x{r["ch"]}',
+                'after': f'{new_w}x{new_h}',
+                'med_peer': f'{int(med_w)}x{int(med_h)}',
+                'n_peers': len(peers),
+                'dw_pct': round((r['cw'] - med_w) / med_w * 100, 2),
+                'dh_pct': round((r['ch'] - med_h) / med_h * 100, 2),
+            })
+            r['bbox'] = (new_x, new_y, new_w, new_h)
+            r['cw'], r['ch'] = new_w, new_h
+    if corrections:
+        post_path = os.path.join(out_dir, '_status_postpass.csv')
+        with open(post_path, 'w', newline='', encoding='utf-8') as f:
+            wr = csv.writer(f)
+            wr.writerow(['admin', 'sheet_id', 'before', 'after',
+                         'peer_median', 'n_peers', 'dw_pct', 'dh_pct'])
+            for c in corrections:
+                wr.writerow([c['admin'], c['sid'], c['before'], c['after'],
+                             c['med_peer'], c['n_peers'],
+                             c['dw_pct'], c['dh_pct']])
+    return len(corrections)
+
+
 def _save_orb_debug(scan, proj, debug_dir, name, downscale=0.15):
     """ORB 매칭 4 코너를 scan 위에 overlay 해서 저장 (시각 검증용).
 
@@ -536,6 +604,11 @@ def main():
                     help='종횡비 편차 허용 (기본 3%%, HSV 폴백 시 보정)')
     ap.add_argument('--no-debug', action='store_true',
                     help='ORB 매칭 4 코너 overlay 디버그 이미지 저장 비활성')
+    ap.add_argument('--peer-sanity-tol', type=float, default=0.01,
+                    help='admin 내 시트 사이즈 median 대비 이 비율 초과 시 '
+                         'peer 마진으로 재크롭 (기본 0.01 = 1%%)')
+    ap.add_argument('--no-peer-sanity', action='store_true',
+                    help='peer sanity post-pass 비활성')
     args = ap.parse_args()
 
     sheet_bboxes = {}
@@ -561,6 +634,7 @@ def main():
     csv_path = os.path.join(args.out_dir, '_status.csv')
     n_ok = n_err = n_orb = n_hsv = n_corrected = 0
     t_total = time.time()
+    records = []   # peer sanity post-pass 용 OK 결과 누적
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
@@ -673,6 +747,13 @@ def main():
                 f'{deviation*100:.2f}' if exp_aspect else '',
                 axis, '', f'{time.time()-t0:.2f}'])
             n_ok += 1
+            records.append({
+                'admin': admin, 'sid': sid, 'scan_path': scan_path,
+                'out_path': out_path,
+                'orig_w': scan.shape[1], 'orig_h': scan.shape[0],
+                'bbox': tuple(bbox), 'cw': cropped.shape[1],
+                'ch': cropped.shape[0], 'method': method,
+            })
 
             if i % 5 == 0 or i == len(targets):
                 print(f'  [{i}/{len(targets)}] OK={n_ok} ERR={n_err} '
@@ -682,6 +763,17 @@ def main():
     print(f'\n[지도영역 추출] 완료: OK={n_ok}, ERROR={n_err} '
           f'(ORB={n_orb}, HSV={n_hsv}, 종횡비 보정={n_corrected})')
     print(f'  결과: {csv_path}')
+
+    if not args.no_peer_sanity and records:
+        n_post = _peer_sanity_pass(records, args.out_dir,
+                                    tol=args.peer_sanity_tol)
+        if n_post:
+            print(f'[peer sanity] admin 내 사이즈 outlier {n_post}장 재크롭 '
+                  f'(tol={args.peer_sanity_tol*100:.1f}%) — '
+                  f'{os.path.join(args.out_dir, "_status_postpass.csv")}')
+        else:
+            print(f'[peer sanity] outlier 없음 '
+                  f'(tol={args.peer_sanity_tol*100:.1f}%)')
 
 
 if __name__ == '__main__':
