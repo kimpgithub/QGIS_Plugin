@@ -307,6 +307,9 @@ class WorkListTab(QWidget):
         self.btn_end = QPushButton('작업 종료 (저장 + 잠금 해제)')
         self.btn_end.clicked.connect(self._on_end)
         self.btn_end.setEnabled(False)
+        self.markup_status_cb = QComboBox()
+        self.markup_status_cb.addItems(['pending', 'applied', 'rejected', 'all'])
+        self.markup_status_cb.setToolTip('회수 대상 마크업 상태')
         self.btn_markup = QPushButton('마크업 받기')
         self.btn_markup.clicked.connect(self._on_get_markup)
         self.btn_submit = QPushButton('제출')
@@ -314,6 +317,8 @@ class WorkListTab(QWidget):
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_end)
         btn_row.addStretch()
+        btn_row.addWidget(QLabel('마크업:'))
+        btn_row.addWidget(self.markup_status_cb)
         btn_row.addWidget(self.btn_markup)
         btn_row.addWidget(self.btn_submit)
         layout.addLayout(btn_row)
@@ -730,20 +735,26 @@ class WorkListTab(QWidget):
     def _on_get_markup(self):
         cfg = self._get_config()
         adm = self._current_admin or None
-        self.status.setText(f'마크업 회수 중... ({adm or "전체"})')
+        status = self.markup_status_cb.currentText()
+        self.status.setText(
+            f'마크업 회수 중... ({adm or "전체"}, status={status})')
         QApplication.processEvents()
         try:
-            geojson = api_client.get_markup(cfg, adm)
+            geojson = api_client.get_markup(cfg, adm, status=status)
         except Exception as e:
             QMessageBox.critical(self, '오류', f'마크업 회수 실패: {e}')
             self.status.setText(f'마크업 회수 실패: {e}')
             return
-        lyr, n = layer_control.load_markup_layer(geojson)
-        if lyr is None:
-            self.status.setText('마크업 0건 (또는 로드 실패)')
+        last_layer, counts = layer_control.load_markup_layer(geojson)
+        total = counts.get('total', 0)
+        if total == 0:
+            self.status.setText(
+                f'마크업 0건 ({adm or "전체"}, status={status})')
         else:
             self.status.setText(
-                f'마크업 {n}건 회수 — "{lyr.name()}" 레이어로 표시')
+                f'마크업 {total}건 회수 — 등록 {counts.get("add",0)} / '
+                f'삭제 {counts.get("delete",0)} / '
+                f'속성 {counts.get("attr",0)} (status={status})')
 
     # --- 제출 ---
 

@@ -148,14 +148,23 @@ def submit_boundary(cfg, geojson, updated_by=''):
 
 # ----- 마크업 회수 -----
 
-def get_markup(cfg, adm_cd=None):
-    """발주자 마크업을 GeoJSON FeatureCollection 으로 회수.
+def get_markup(cfg, adm_cd=None, status='pending'):
+    """발주자 마크업 회수 — 신규 스키마(kind/status/attrs) 대응.
 
-    GET /api/markup?adm_cd= — adm_cd 미지정 시 전체.
+    GET /api/markup?adm_cd=&status=
+    - status: 'pending'(기본) | 'applied' | 'rejected' | 'all' (status param 생략)
+    - 응답: GeoJSON FeatureCollection — feature.properties 에
+      {id, kind('add'|'delete'|'attr'), status, attrs(dict), adm_cd,
+       created_at, applied_at, rejected_at, reject_reason, created_by} 포함
     """
     sess = _session(cfg)
-    params = {'adm_cd': adm_cd} if adm_cd else None
-    r = sess.get(f'{cfg.api_base}/markup', params=params, timeout=HTTP_TIMEOUT)
+    params = {}
+    if adm_cd:
+        params['adm_cd'] = adm_cd
+    if status and status != 'all':
+        params['status'] = status
+    r = sess.get(f'{cfg.api_base}/markup', params=params or None,
+                 timeout=HTTP_TIMEOUT)
     if r.status_code == 401:
         raise RuntimeError('인증 실패 — API 토큰 확인')
     r.raise_for_status()
