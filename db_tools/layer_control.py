@@ -21,6 +21,10 @@ import re
 # 편집 대상 레이어 이름 키워드 — 포함하면 편집 활성, 나머지는 readOnly
 EDIT_LAYER_NAMES = ('작업데이터', 'bnd_job')
 
+# QML 스타일 폴더 (행정리작업데이터.qgz 에서 추출)
+STYLE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), 'data', 'styles')
+
 # 작업 폴더 슬롯 정의 — (하위폴더 번호, 키, 표시명, 종류, 기본표시, 필수)
 #   종류: 'shp' | 'xlsx' | 'raster_dir'
 WORK_SLOTS = [
@@ -87,10 +91,50 @@ def _remove_by_name(name):
             QgsProject.instance().removeMapLayer(lid)
 
 
-def load_workspace(slots):
-    """슬롯 dict({key: path})를 QGIS 에 로드. on/off 기본값 적용.
+def _apply_style(layer, key):
+    """data/styles/{key}.qml 이 있으면 로드. (행정리작업데이터.qgz 추출본)"""
+    qml = os.path.join(STYLE_DIR, f'{key}.qml')
+    if not os.path.exists(qml):
+        return False
+    try:
+        _msg, ok = layer.loadNamedStyle(qml)
+        if ok:
+            layer.triggerRepaint()
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def _zoom_to_work_data(iface, work_layer):
+    """작업데이터 레이어 범위로 캔버스 이동 (CRS 변환 포함)."""
+    if iface is None or work_layer is None:
+        return
+    try:
+        from qgis.core import (QgsProject, QgsCoordinateTransform,
+                               QgsRectangle)
+        extent = work_layer.extent()
+        if extent is None or extent.isEmpty():
+            return
+        canvas = iface.mapCanvas()
+        dst_crs = canvas.mapSettings().destinationCrs()
+        src_crs = work_layer.crs()
+        if src_crs.isValid() and dst_crs.isValid() and src_crs != dst_crs:
+            tr = QgsCoordinateTransform(
+                src_crs, dst_crs, QgsProject.instance())
+            extent = tr.transformBoundingBox(extent)
+        if isinstance(extent, QgsRectangle) and not extent.isEmpty():
+            extent.scale(1.05)
+            canvas.setExtent(extent)
+            canvas.refresh()
+    except Exception:
+        pass
+
+
+def load_workspace(slots, iface=None):
+    """슬롯 dict({key: path})를 QGIS 에 로드. on/off 기본값 + QML 스타일 적용.
 
     명부(xlsx)는 레이어가 아니므로 건너뜀 — 호출자가 별도 로드.
+    iface 가 주어지면 로드 후 작업데이터 범위로 캔버스 이동.
     Returns (work_data_layer or None, summary[list of (label, status)]).
     """
     from qgis.core import QgsProject, QgsVectorLayer, QgsRasterLayer
@@ -110,6 +154,7 @@ def load_workspace(slots):
                 summary.append((label, '로드 실패'))
                 continue
             _remove_by_name(label)
+            _apply_style(lyr, key)
             proj.addMapLayer(lyr)
             node = root.findLayer(lyr.id())
             if node:
@@ -125,12 +170,14 @@ def load_workspace(slots):
                 if not rl.isValid():
                     continue
                 _remove_by_name(nm)
+                _apply_style(rl, key)
                 proj.addMapLayer(rl)
                 node = root.findLayer(rl.id())
                 if node:
                     node.setItemVisibilityChecked(default_on)
                 added += 1
             summary.append((label, f'OK ({added}장)'))
+    _zoom_to_work_data(iface, work_layer)
     return work_layer, summary
 
 

@@ -330,7 +330,8 @@ class WorkListTab(QWidget):
                 self, '경고', f'필수 데이터 누락: {", ".join(missing)}')
             return
         try:
-            work_layer, summary = layer_control.load_workspace(self._slots)
+            work_layer, summary = layer_control.load_workspace(
+                self._slots, iface=self.iface)
         except Exception as e:
             QMessageBox.critical(self, '오류', f'레이어 로드 실패: {e}')
             return
