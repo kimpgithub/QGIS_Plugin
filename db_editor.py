@@ -111,6 +111,239 @@ class RiAssignDialog(QDialog):
 
 
 # ============================================================
+# 마크업 검토 다이얼로그 (Phase C) — 줌/속성적용/split가이드/dissolve가이드
+# ============================================================
+
+def _feature_geometry(feat):
+    """GeoJSON feature → QgsGeometry. shapely 미설치 시 Point/LineString 만 지원."""
+    from qgis.core import QgsGeometry
+    g = (feat or {}).get('geometry') or {}
+    t = g.get('type')
+    c = g.get('coordinates') or []
+    try:
+        from shapely.geometry import shape
+        return QgsGeometry.fromWkt(shape(g).wkt)
+    except Exception:
+        pass
+    if t == 'Point' and len(c) >= 2:
+        return QgsGeometry.fromWkt(f'POINT ({c[0]} {c[1]})')
+    if t == 'LineString':
+        pts = ', '.join(f'{x} {y}' for x, y in c)
+        return QgsGeometry.fromWkt(f'LINESTRING ({pts})')
+    if t == 'MultiLineString':
+        parts = ['(' + ', '.join(f'{x} {y}' for x, y in line) + ')'
+                 for line in c]
+        return QgsGeometry.fromWkt(f'MULTILINESTRING ({", ".join(parts)})')
+    return None
+
+
+class MarkupReviewDialog(QDialog):
+    """발주자 마크업 목록 + kind 별 액션 (modeless)."""
+
+    def __init__(self, iface, work_layer, features, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('발주자 마크업 검토')
+        self.resize(720, 480)
+        self.setModal(False)
+        self.iface = iface
+        self.work_layer = work_layer
+        self.features = list(features or [])
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            f'마크업 <b>{len(self.features)}</b>건. '
+            '행 더블클릭 = 줌. kind 에 맞는 액션 버튼 선택.'))
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ['id', 'kind', 'status', 'attrs', 'adm_cd'])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.doubleClicked.connect(self._on_double)
+        layout.addWidget(self.table, 1)
+
+        btn = QHBoxLayout()
+        self.btn_zoom = QPushButton('줌 이동')
+        self.btn_zoom.clicked.connect(self._zoom_selected)
+        self.btn_apply_attr = QPushButton('폴리곤 적용 (attr)')
+        self.btn_apply_attr.clicked.connect(self._apply_attr)
+        self.btn_split_guide = QPushButton('split 가이드 (add)')
+        self.btn_split_guide.clicked.connect(self._split_guide)
+        self.btn_dissolve_guide = QPushButton('병합 가이드 (delete)')
+        self.btn_dissolve_guide.clicked.connect(self._dissolve_guide)
+        btn.addWidget(self.btn_zoom)
+        btn.addWidget(self.btn_apply_attr)
+        btn.addWidget(self.btn_split_guide)
+        btn.addWidget(self.btn_dissolve_guide)
+        btn.addStretch()
+        layout.addLayout(btn)
+        self._fill_table()
+
+    def _fill_table(self):
+        self.table.setRowCount(len(self.features))
+        for i, f in enumerate(self.features):
+            p = f.get('properties') or {}
+            attrs = p.get('attrs') or {}
+            if isinstance(attrs, dict):
+                attrs_str = ' '.join(f'{k}={v}' for k, v in attrs.items())
+            else:
+                attrs_str = str(attrs or '')
+            for c, v in enumerate([p.get('id', ''), p.get('kind', ''),
+                                   p.get('status', ''), attrs_str,
+                                   p.get('adm_cd', '')]):
+                self.table.setItem(i, c, QTableWidgetItem(str(v)))
+        self.table.resizeColumnsToContents()
+
+    def _selected_feature(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        return self.features[rows[0].row()]
+
+    def _on_double(self, idx):
+        self.table.selectRow(idx.row())
+        self._zoom_selected()
+
+    def _zoom_selected(self):
+        f = self._selected_feature()
+        if not f:
+            return
+        self._zoom_to_feature(f)
+
+    def _zoom_to_feature(self, feat):
+        from qgis.core import (QgsCoordinateReferenceSystem,
+                               QgsCoordinateTransform, QgsProject)
+        geom = _feature_geometry(feat)
+        if geom is None or geom.isEmpty():
+            return
+        bbox = geom.boundingBox()
+        canvas = self.iface.mapCanvas()
+        dst = canvas.mapSettings().destinationCrs()
+        src = QgsCoordinateReferenceSystem('EPSG:4326')
+        if src.isValid() and dst.isValid() and src != dst:
+            tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
+            bbox = tr.transformBoundingBox(bbox)
+        if bbox.isEmpty():
+            return
+        bbox.scale(1.5)
+        canvas.setExtent(bbox)
+        canvas.refresh()
+
+    def _apply_attr(self):
+        f = self._selected_feature()
+        if not f:
+            return
+        p = f.get('properties') or {}
+        if p.get('kind') != 'attr':
+            QMessageBox.warning(self, '경고',
+                                'attr kind 마크업에서만 사용')
+            return
+        attrs = p.get('attrs') or {}
+        if not (attrs.get('ri_cd') or attrs.get('ri_nm')):
+            QMessageBox.warning(self, '경고',
+                                'attrs.ri_cd / ri_nm 비어 있음')
+            return
+        if self.work_layer is None or not self.work_layer.isValid():
+            QMessageBox.warning(self, '경고', '작업데이터 레이어 없음')
+            return
+        g = f.get('geometry') or {}
+        if g.get('type') != 'Point':
+            QMessageBox.warning(self, '경고', 'attr geometry 가 Point 아님')
+            return
+        from qgis.core import (QgsPointXY, QgsGeometry, QgsFeatureRequest,
+                               QgsCoordinateReferenceSystem,
+                               QgsCoordinateTransform, QgsProject)
+        lon, lat = g['coordinates'][:2]
+        pt = QgsPointXY(lon, lat)
+        src = QgsCoordinateReferenceSystem('EPSG:4326')
+        dst = self.work_layer.crs()
+        if src.isValid() and dst.isValid() and src != dst:
+            tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
+            pt = tr.transform(pt)
+        pt_geom = QgsGeometry.fromPointXY(pt)
+        bbox = pt_geom.boundingBox()
+        bbox.grow(1.0)
+        match = None
+        for ft in self.work_layer.getFeatures(
+                QgsFeatureRequest().setFilterRect(bbox)):
+            geom = ft.geometry()
+            if geom and not geom.isEmpty() and geom.contains(pt_geom):
+                match = ft
+                break
+        if match is None:
+            QMessageBox.warning(
+                self, '경고',
+                '포인트와 intersect 되는 작업데이터 폴리곤 없음.\n'
+                '캔버스 줌으로 위치 확인 후 작업데이터에 누락 폴리곤이 '
+                '있는지 점검하세요.')
+            return
+        ri_cd = str(attrs.get('ri_cd', '')).strip()
+        ri_nm = str(attrs.get('ri_nm', '')).strip()
+        if QMessageBox.question(
+                self, '속성 부여 확인',
+                f'폴리곤 id={match.id()} 에 RI_CD="{ri_cd}" '
+                f'RI_NM="{ri_nm}" 부여하시겠습니까?',
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        if not self.work_layer.isEditable():
+            self.work_layer.startEditing()
+        fields = self.work_layer.fields()
+        idx_of = {fields.at(i).name().lower(): i
+                  for i in range(fields.count())}
+        if ri_cd and 'ri_cd' in idx_of:
+            self.work_layer.changeAttributeValue(
+                match.id(), idx_of['ri_cd'], ri_cd)
+        if ri_nm and 'ri_nm' in idx_of:
+            self.work_layer.changeAttributeValue(
+                match.id(), idx_of['ri_nm'], ri_nm)
+        self.work_layer.triggerRepaint()
+        QMessageBox.information(
+            self, '완료',
+            '속성 부여 완료. [작업 종료] 시 저장되며, 추후 Phase D 도착 시 '
+            '서버 markup 상태가 자동으로 applied 마킹됩니다.')
+
+    def _split_guide(self):
+        f = self._selected_feature()
+        if not f:
+            return
+        p = f.get('properties') or {}
+        if p.get('kind') != 'add':
+            QMessageBox.warning(self, '경고',
+                                'add kind 마크업에서만 사용')
+            return
+        self._zoom_to_feature(f)
+        if self.work_layer is not None:
+            try:
+                self.iface.setActiveLayer(self.work_layer)
+                if not self.work_layer.isEditable():
+                    self.work_layer.startEditing()
+                self.iface.actionSplitFeatures().trigger()
+            except Exception:
+                pass
+        QMessageBox.information(
+            self, 'split 가이드',
+            '캔버스에 발주자 등록 라인(초록)이 표시됩니다. 그 라인을 따라 '
+            '작업데이터 폴리곤을 분할하세요. 분할 후 행정리 부여 다이얼로그가 '
+            '자동으로 뜹니다.')
+
+    def _dissolve_guide(self):
+        f = self._selected_feature()
+        if not f:
+            return
+        p = f.get('properties') or {}
+        if p.get('kind') != 'delete':
+            QMessageBox.warning(self, '경고',
+                                'delete kind 마크업에서만 사용')
+            return
+        self._zoom_to_feature(f)
+        QMessageBox.information(
+            self, '병합 가이드',
+            '캔버스에 발주자 삭제 라인(빨강 점선)이 표시됩니다. 그 라인을 '
+            '가로지르는 두 작업데이터 폴리곤을 선택 후 QGIS '
+            '[Merge Selected Features] 도구로 병합하세요.')
+
+
+# ============================================================
 # Tab: 서버 연결
 # ============================================================
 
@@ -253,6 +486,7 @@ class WorkListTab(QWidget):
         self._current_admin = ''
         self._current_admin_nm = ''
         self._feature_added_slot = None  # split 후 팝업용 콜백 참조
+        self._markup_dialog = None       # 마크업 검토 다이얼로그 ref
         self._build()
 
     def _build(self):
@@ -755,6 +989,18 @@ class WorkListTab(QWidget):
                 f'마크업 {total}건 회수 — 등록 {counts.get("add",0)} / '
                 f'삭제 {counts.get("delete",0)} / '
                 f'속성 {counts.get("attr",0)} (status={status})')
+            # 검토 다이얼로그 (modeless) — 이전 인스턴스 닫고 새로 띄움
+            if self._markup_dialog is not None:
+                try:
+                    self._markup_dialog.close()
+                except Exception:
+                    pass
+            self._markup_dialog = MarkupReviewDialog(
+                self.iface, self._find_work_layer(),
+                (geojson or {}).get('features') or [],
+                parent=self)
+            self._markup_dialog.show()
+            self._markup_dialog.raise_()
 
     # --- 제출 ---
 
