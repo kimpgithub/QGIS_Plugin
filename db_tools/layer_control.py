@@ -454,47 +454,76 @@ def seed_work_layer_from_adm(work_layer, adm_layer, adm_codes):
 # 작업데이터 분류 심볼 — ri_cd 채워진 조각만 색, 빈 조각은 회색
 # ============================================================
 
-def apply_work_data_categorized_renderer(layer, attr='ri_cd'):
+def restrict_work_layer_to_codes(layer, adm_codes):
+    """작업데이터 레이어에 adm_cd subset filter 를 적용.
+
+    작업데이터 SHP 에 다른 읍면동 피처가 섞여 있어도 (예: 데모 데이터)
+    현재 작업 대상 코드 집합만 보이도록 한다. 빈 집합이면 필터 해제.
+    """
+    if layer is None:
+        return False
+    if not adm_codes:
+        layer.setSubsetString('')
+        return True
+    quoted = ','.join("'" + str(c).replace("'", "''") + "'"
+                      for c in adm_codes)
+    expr = f'"adm_cd" IN ({quoted})'
+    layer.setSubsetString(expr)
+    return True
+
+
+def apply_work_data_categorized_renderer(layer):
     """작업데이터를 ri_cd 별 분류 심볼로 표현.
 
-    빈 ri_cd → 연한 회색 (아직 부여 안 됨), 값 있는 ri_cd → 랜덤 색.
-    저장된 QML 스타일을 덮어쓰므로 사용자가 원치 않으면 호출하지 않는다.
+    - 카테고리 값: ri_cd
+    - 라벨: 'ri_cd ri_nm' (가독성). 빈/NULL 은 '(미부여)' 단일 카테고리.
+    - 빈값 = 연한 회색, 값 있음 = 팔레트 순환 색.
+    QML 스타일을 덮어쓰므로 호출 시점 주의.
     """
     from qgis.core import (QgsCategorizedSymbolRenderer, QgsRendererCategory,
                            QgsFillSymbol)
-    idx = _field_idx_ci(layer, attr)
-    if idx < 0:
+    idx_cd = _field_idx_ci(layer, 'ri_cd')
+    if idx_cd < 0:
         return False
-    attr_name = layer.fields().at(idx).name()
+    idx_nm = _field_idx_ci(layer, 'ri_nm')
+    attr_name = layer.fields().at(idx_cd).name()
 
-    # 회색(빈값) + 각 ri_cd 별 랜덤색 — 색은 고정 팔레트 순환
     palette = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00',
                '#ffff33', '#a65628', '#f781bf', '#66c2a5', '#fc8d62',
                '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f']
-    cats = []
-    # 빈값 카테고리
+
+    # 빈/NULL 단일 카테고리 (값 None — QGIS 가 NULL 매칭으로 처리)
     empty_sym = QgsFillSymbol.createSimple({
         'color': '200,200,200,80',
         'outline_color': '#666666',
         'outline_width': '0.3',
     })
-    cats.append(QgsRendererCategory('', empty_sym, '(미부여)'))
-    # 현재 레이어에 존재하는 ri_cd 값들로 카테고리 생성
-    values = set()
+    cats = [QgsRendererCategory(None, empty_sym, '(미부여)')]
+
+    # ri_cd → ri_nm 매핑 수집 (현재 subset 범위 내 피처만 순회)
+    cd_to_nm = {}
     for f in layer.getFeatures():
-        v = f.attribute(idx)
-        if v is None:
+        cd = f.attribute(idx_cd)
+        if cd is None or str(cd).strip() == '':
             continue
-        s = str(v).strip()
-        if s:
-            values.add(s)
-    for i, v in enumerate(sorted(values)):
+        cd_str = str(cd).strip()
+        if idx_nm >= 0:
+            nm = f.attribute(idx_nm)
+            if nm is not None and str(nm).strip():
+                cd_to_nm.setdefault(cd_str, str(nm).strip())
+        else:
+            cd_to_nm.setdefault(cd_str, '')
+
+    for i, cd in enumerate(sorted(cd_to_nm.keys())):
+        nm = cd_to_nm[cd]
+        label = f'{cd} {nm}'.strip()
         sym = QgsFillSymbol.createSimple({
             'color': palette[i % len(palette)] + ',140',
             'outline_color': '#333333',
             'outline_width': '0.3',
         })
-        cats.append(QgsRendererCategory(v, sym, v))
+        cats.append(QgsRendererCategory(cd, sym, label))
+
     renderer = QgsCategorizedSymbolRenderer(attr_name, cats)
     layer.setRenderer(renderer)
     layer.triggerRepaint()

@@ -603,7 +603,12 @@ class WorkListTab(QWidget):
     def _on_start(self):
         try:
             work = self._find_work_layer()
-            # 1) 0 피처면 행정경계에서 해당 읍면동 폴리곤을 시드로 복사
+            # 1) 작업데이터에 adm_cd subset 적용 — 병합이미지 대상 읍면동만
+            #    노출 (다른 읍면동 데모/잔여 피처 차단)
+            if work is not None and self._merged_codes:
+                layer_control.restrict_work_layer_to_codes(
+                    work, self._merged_codes)
+            # 2) subset 적용 후 0 피처면 행정경계에서 폴리곤 시드 복사
             seeded = 0
             if work is not None and work.featureCount() == 0:
                 adm = self._find_adm_bnd_layer()
@@ -616,15 +621,15 @@ class WorkListTab(QWidget):
                     seeded = layer_control.seed_work_layer_from_adm(
                         work, adm, self._merged_codes)
                     work.commitChanges()
-            # 2) attach=False — 기존 current_ri 기반 autofill 끄고
+            # 3) attach=False — 기존 current_ri 기반 autofill 끄고
             #    아래에서 split 후 팝업 슬롯을 직접 연결
             self._work_snapshot = layer_control.start_work_mode(
                 self.iface, attach=False)
             work = self._find_work_layer()
-            # 3) 분류 심볼 적용 (ri_cd 빈/채워짐 시각화)
             if work is not None:
+                # 4) 분류 심볼 적용 (ri_cd 빈/채워짐 시각화)
                 layer_control.apply_work_data_categorized_renderer(work)
-                # 4) split→팝업 콜백 연결
+                # 5) split→팝업 콜백 연결
                 self._connect_feature_added(work)
             self.btn_start.setEnabled(False)
             self.btn_end.setEnabled(True)
@@ -640,6 +645,10 @@ class WorkListTab(QWidget):
             saved, errors = layer_control.end_work_mode(
                 self.iface, self._work_snapshot)
             self._work_snapshot = None
+            # subset 해제 — 작업 종료 후 전체 보기로 복귀
+            work = self._find_work_layer()
+            if work is not None:
+                layer_control.restrict_work_layer_to_codes(work, None)
             self.btn_start.setEnabled(True)
             self.btn_end.setEnabled(False)
             msg = f'작업 종료 — {saved}개 레이어 저장'
