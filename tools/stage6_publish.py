@@ -24,21 +24,35 @@ except ImportError:                       # 표준 CLI 실행 경로
     from gis_scan_tools.db_tools import api_client
 
 
-def jpg_to_cog(jpg_path, tif_path):
+DEFAULT_SCALE = 0.5            # 0.46m/px → ~0.92m/px (파일 ~1/4)
+DEFAULT_RESAMPLE = 'lanczos'   # 텍스트 보존 베스트
+
+
+def jpg_to_cog(jpg_path, tif_path,
+               scale=DEFAULT_SCALE, resample=DEFAULT_RESAMPLE):
     """JGW 동반 JPG → COG GeoTIFF (EPSG:5179, JPEG 압축 + 오버뷰).
 
-    GDAL 이 .jgw 월드파일을 자동 인식해 지오트랜스폼을 잡고, outputSRS 로
-    좌표계만 부여(-a_srs, 재투영 아님).
+    - scale: 베이스 해상도 배율(0~1). 0.5 → 폭/높이 절반, 파일 ~1/4.
+      디지타이징에 1m/px 면 충분하고 워프 오차도 평균 효과로 가려진다.
+      원본 유지가 필요하면 1.0 으로 호출.
+    - resample: 다운샘플 알고리즘. 'lanczos' | 'average' | 'cubic' …
+    - GDAL 이 .jgw 월드파일을 자동 인식해 지오트랜스폼을 잡고, outputSRS 로
+      좌표계만 부여(-a_srs, 재투영 아님). scale 적용 시 GDAL 이 지오트랜스폼
+      픽셀 크기도 자동 보정해서 지리 정합은 유지됨.
     """
     from osgeo import gdal
     gdal.UseExceptions()
-    gdal.Translate(
-        tif_path, jpg_path,
+    kwargs = dict(
         format='COG',
         outputSRS='EPSG:5179',
         creationOptions=['COMPRESS=JPEG', 'QUALITY=85', 'BLOCKSIZE=512',
                          'OVERVIEW_RESAMPLING=AVERAGE'],
     )
+    if scale and scale != 1.0:
+        kwargs['widthPct'] = scale * 100
+        kwargs['heightPct'] = scale * 100
+        kwargs['resampleAlg'] = resample
+    gdal.Translate(tif_path, jpg_path, **kwargs)
 
 
 def cog_bounds(tif_path):
@@ -54,7 +68,8 @@ def cog_bounds(tif_path):
     return [xmin, ymin, xmax, ymax], w, h
 
 
-def publish_one(jpg_path, merged_root, out_dir, cfg):
+def publish_one(jpg_path, merged_root, out_dir, cfg,
+                scale=DEFAULT_SCALE, resample=DEFAULT_RESAMPLE):
     """admin 1건 — COG 변환 + 업로드 + 등록. result dict 반환."""
     name = os.path.basename(jpg_path)
     m = re.match(r'(\d{8})', name)
@@ -74,7 +89,7 @@ def publish_one(jpg_path, merged_root, out_dir, cfg):
     os.makedirs(tif_dir, exist_ok=True)
     tif_path = os.path.join(tif_dir, f'{admin}.tif')
 
-    jpg_to_cog(jpg_path, tif_path)
+    jpg_to_cog(jpg_path, tif_path, scale=scale, resample=resample)
     bounds, w, h = cog_bounds(tif_path)
 
     key = f'cog/{rel}/{admin}.tif' if rel else f'cog/{admin}.tif'
@@ -89,6 +104,11 @@ def main():
     ap.add_argument('--merged', required=True, help='Stage 4 병합 출력 폴더')
     ap.add_argument('--out', dest='out_dir', required=True,
                     help='COG 산출 폴더 (로컬 보관본)')
+    ap.add_argument('--scale', type=float, default=DEFAULT_SCALE,
+                    help=f'베이스 해상도 배율 (기본 {DEFAULT_SCALE}; '
+                         '1.0 = 원본 유지, 0.5 = 1/2 축소 → 파일 ~1/4)')
+    ap.add_argument('--resample', default=DEFAULT_RESAMPLE,
+                    help='다운샘플 알고리즘 (lanczos/average/cubic 등)')
     args = ap.parse_args()
 
     cfg = api_client.load_config()
@@ -99,7 +119,8 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     targets = sorted(glob.glob(os.path.join(
         args.merged, '**', '*_scan_merged.jpg'), recursive=True))
-    print(f'[Stage 6] 대상 {len(targets)}장 → {cfg.s3_endpoint}')
+    print(f'[Stage 6] 대상 {len(targets)}장 → {cfg.s3_endpoint} '
+          f'(scale={args.scale}, resample={args.resample})')
 
     csv_path = os.path.join(args.out_dir, '_status.csv')
     ok = err = 0
@@ -110,7 +131,8 @@ def main():
             t0 = time.time()
             print(f'\n[{i}/{len(targets)}] {os.path.basename(jpg)}')
             try:
-                r = publish_one(jpg, args.merged, args.out_dir, cfg)
+                r = publish_one(jpg, args.merged, args.out_dir, cfg,
+                                scale=args.scale, resample=args.resample)
             except Exception as e:
                 r = {'admin_code': '', 'status': 'ERROR', 'message': str(e)}
             el = f'{time.time() - t0:.1f}'
