@@ -84,6 +84,24 @@ def detect_work_folder(root):
     return result
 
 
+def detect_merged_admin_codes(slots):
+    """병합이미지 폴더의 jpg 파일명 앞 8자리 → admin code set.
+
+    명부 38K 행을 다 보여줄 필요 없이, 실제 병합이미지가 있는 읍면동만
+    명부 테이블에 노출하기 위함.
+    """
+    path = (slots or {}).get('merged_img')
+    if not path or not os.path.isdir(path):
+        return set()
+    codes = set()
+    for jpg in glob.glob(os.path.join(path, '*.jpg')):
+        nm = os.path.splitext(os.path.basename(jpg))[0]
+        m = re.match(r'(\d{8})', nm)
+        if m:
+            codes.add(m.group(1))
+    return codes
+
+
 def _remove_by_name(name):
     from qgis.core import QgsProject
     for lid, lyr in list(QgsProject.instance().mapLayers().items()):

@@ -12,11 +12,12 @@
 """
 import os
 
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QTextEdit, QMessageBox, QGroupBox, QApplication, QFileDialog,
-    QTableWidget, QTableWidgetItem,
+    QTableWidget, QTableWidgetItem, QDockWidget,
 )
 
 from .db_tools import api_client, excel_loader, layer_control
@@ -162,7 +163,8 @@ class WorkListTab(QWidget):
         self.parent_dialog = parent_dialog
         self.iface = parent_dialog.iface
         self._slots = {}            # slot_key → path
-        self._roster = []           # 명부 행 dict
+        self._merged_codes = set()  # 병합이미지 8자리 admin code 집합
+        self._roster = []           # 명부 행 dict (필터 적용 후)
         self._work_layer = None     # 작업데이터 레이어
         self._work_snapshot = None
         self._current_admin = ''
@@ -277,6 +279,8 @@ class WorkListTab(QWidget):
     def _detect(self):
         root = self.folder_edit.text().strip()
         self._slots = layer_control.detect_work_folder(root)
+        self._merged_codes = layer_control.detect_merged_admin_codes(
+            self._slots)
         self._fill_slot_table()
 
     def _fill_slot_table(self):
@@ -319,6 +323,9 @@ class WorkListTab(QWidget):
             p = ''
         if p:
             self._slots[key] = p
+            if key == 'merged_img':
+                self._merged_codes = (
+                    layer_control.detect_merged_admin_codes(self._slots))
             self._fill_slot_table()
 
     def _on_load_workspace(self):
@@ -355,6 +362,11 @@ class WorkListTab(QWidget):
                 self, '경고',
                 f'명부 필수 컬럼 누락: {", ".join(missing)}')
             return
+        total = len(rows)
+        # 병합이미지가 있는 읍면동만 필터 (없으면 전체 노출)
+        if self._merged_codes:
+            rows = [r for r in rows
+                    if r.get('adm_cd', '') in self._merged_codes]
         self._roster = rows
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
@@ -367,8 +379,13 @@ class WorkListTab(QWidget):
         self.table.resizeColumnsToContents()
         done = sum(1 for r in rows
                    if (r.get('work_yn', '') or '').upper() == 'Y')
+        if self._merged_codes:
+            tag = (f' (병합이미지 {len(self._merged_codes)}개 읍면동, '
+                   f'명부 전체 {total})')
+        else:
+            tag = ''
         self.status.setText(
-            f'명부 로드: {len(rows)}개 행정리 (작업완료 {done})')
+            f'명부 로드: {len(rows)}개 행정리 (작업완료 {done}){tag}')
 
     def _on_search(self, text):
         text = text.strip().lower()
@@ -540,23 +557,33 @@ class WorkListTab(QWidget):
 # 메인 다이얼로그
 # ============================================================
 
-class DBEditorDialog(QDialog):
+class DBEditorDock(QDockWidget):
+    """QGIS 메인 윈도우에 도킹되는 DB 작업 위젯.
+
+    iface.addDockWidget(Qt.RightDockWidgetArea, ...) 로 설치하면 사용자가
+    한 번 도킹/위치 조정한 뒤 QGIS가 layout 을 기억해 다음 실행에도 같은
+    자리에 뜬다.
+    """
+
     def __init__(self, iface, parent=None):
-        super().__init__(parent)
+        super().__init__('GIS Scan Tools — DB 작업', parent)
+        self.setObjectName('GISScanToolsDBDock')   # QGIS layout 저장 키
+        self.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+            | Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
         self.iface = iface
         self.server_config = None
-        self.setWindowTitle('GIS Scan Tools — DB 작업')
-        self.resize(820, 680)
 
-        layout = QVBoxLayout(self)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
         self.tabs = QTabWidget()
         self.tabs.addTab(ServerConnectionTab(self), '1. 서버 연결')
         self.tabs.addTab(WorkListTab(self), '2. 행정리 작업')
         layout.addWidget(self.tabs)
+        self.setWidget(container)
+        self.setMinimumWidth(540)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_close = QPushButton('닫기')
-        btn_close.clicked.connect(self.close)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
+
+# 하위 호환 alias — 외부에서 import 중인 코드용
+DBEditorDialog = DBEditorDock

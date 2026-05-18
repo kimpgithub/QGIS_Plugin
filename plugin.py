@@ -1184,9 +1184,15 @@ class GISScanToolsPlugin:
             self.edit_toolbar.deleteLater()
             self.edit_toolbar = None
         self.act_simplify = None
-        for d in (self.dialog, self.db_dialog):
-            if d:
-                d.close()
+        if self.dialog:
+            self.dialog.close()
+        if self.db_dialog:
+            try:
+                self.iface.removeDockWidget(self.db_dialog)
+            except Exception:
+                pass
+            self.db_dialog.deleteLater()
+            self.db_dialog = None
 
     def show_dialog(self):
         if self.dialog is None:
@@ -1198,9 +1204,11 @@ class GISScanToolsPlugin:
 
     def show_db_dialog(self):
         if self.db_dialog is None:
-            from .db_editor import DBEditorDialog
-            self.db_dialog = DBEditorDialog(self.iface,
-                                            self.iface.mainWindow())
+            from qgis.PyQt.QtCore import Qt
+            from .db_editor import DBEditorDock
+            self.db_dialog = DBEditorDock(self.iface,
+                                          self.iface.mainWindow())
+            self.iface.addDockWidget(
+                Qt.RightDockWidgetArea, self.db_dialog)
         self.db_dialog.show()
         self.db_dialog.raise_()
-        self.db_dialog.activateWindow()
