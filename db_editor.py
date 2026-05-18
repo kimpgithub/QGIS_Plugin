@@ -17,7 +17,7 @@ from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QTextEdit, QMessageBox, QGroupBox, QApplication, QFileDialog,
-    QTableWidget, QTableWidgetItem, QDockWidget,
+    QTableWidget, QTableWidgetItem, QDockWidget, QComboBox,
 )
 
 from .db_tools import api_client, excel_loader, layer_control
@@ -374,7 +374,9 @@ class WorkListTab(QWidget):
             self.table.setItem(i, 1, QTableWidgetItem(r.get('adm_nm', '')))
             self.table.setItem(i, 2, QTableWidgetItem(r.get('ri_cd', '')))
             self.table.setItem(i, 3, QTableWidgetItem(r.get('ri_nm', '')))
-            self.table.setItem(i, 4, QTableWidgetItem(r.get('work_yn', '')))
+            # 4: 작업여부 — Y/N 콤보로 즉시 편집 + 엑셀 저장
+            self.table.setCellWidget(i, 4, self._make_work_yn_combo(
+                i, r.get('work_yn', '')))
             self.table.setItem(i, 5, QTableWidgetItem(r.get('remark', '')))
         self.table.resizeColumnsToContents()
         done = sum(1 for r in rows
@@ -393,11 +395,70 @@ class WorkListTab(QWidget):
             if not text:
                 self.table.setRowHidden(r, False)
                 continue
-            vals = ' '.join(
-                (self.table.item(r, c).text().lower()
-                 if self.table.item(r, c) else '')
-                for c in range(6))
-            self.table.setRowHidden(r, text not in vals)
+            parts = []
+            for c in range(6):
+                w = self.table.cellWidget(r, c)
+                if isinstance(w, QComboBox):
+                    parts.append(w.currentText().lower())
+                else:
+                    it = self.table.item(r, c)
+                    parts.append(it.text().lower() if it else '')
+            self.table.setRowHidden(r, text not in ' '.join(parts))
+
+    # --- 작업여부 인라인 편집 ---
+
+    def _make_work_yn_combo(self, row_idx, current):
+        cb = QComboBox()
+        cb.addItems(['', 'Y', 'N'])
+        cur = (current or '').strip().upper()
+        cb.setCurrentText(cur if cur in ('Y', 'N') else '')
+        cb.currentTextChanged.connect(
+            lambda v, r=row_idx: self._on_work_yn_changed(r, v))
+        return cb
+
+    def _on_work_yn_changed(self, row_idx, value):
+        if row_idx < 0 or row_idx >= len(self._roster):
+            return
+        rec = self._roster[row_idx]
+        old = (rec.get('work_yn', '') or '').strip().upper()
+        new = (value or '').strip().upper()
+        if old == new:
+            return
+        rec['work_yn'] = new
+        path = self._slots.get('roster')
+        if not path:
+            self.status.setText('명부 경로 없음 — 저장 실패')
+            return
+        try:
+            n = excel_loader.update_work_yn(
+                path, rec.get('adm_cd', ''), rec.get('ri_cd', ''), new)
+        except PermissionError:
+            QMessageBox.critical(
+                self, '저장 실패',
+                '엑셀 파일이 다른 프로그램(엑셀 등)에 열려 있습니다.\n'
+                '닫고 다시 시도하세요.')
+            # UI 되돌림
+            self._revert_work_yn(row_idx, old)
+            rec['work_yn'] = old
+            return
+        except Exception as e:
+            QMessageBox.critical(self, '저장 실패', str(e))
+            self._revert_work_yn(row_idx, old)
+            rec['work_yn'] = old
+            return
+        if n == 0:
+            self.status.setText(
+                f"저장 경고 — ri_cd={rec.get('ri_cd','')} 매칭 행 없음")
+        else:
+            self.status.setText(
+                f"저장 완료 — {rec.get('ri_cd','')} 작업여부={new}")
+
+    def _revert_work_yn(self, row_idx, value):
+        w = self.table.cellWidget(row_idx, 4)
+        if isinstance(w, QComboBox):
+            w.blockSignals(True)
+            w.setCurrentText(value)
+            w.blockSignals(False)
 
     # --- 행정리 선택 → 자동부여 준비 ---
 

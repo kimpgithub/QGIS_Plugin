@@ -13,6 +13,7 @@
     엑셀 LI_CD = 행정리코드 → 내부 ri_cd
 내부 표준(adm=읍면동, ri=행정리)에 맞춰 매핑한다.
 """
+import os
 import re
 
 
@@ -83,6 +84,64 @@ def _pick_sheet(wb):
         if not missing:
             return ws
     return wb.worksheets[0] if wb.worksheets else None
+
+
+def update_work_yn(path, adm_cd, ri_cd, value, sheet=None):
+    """명부 엑셀에서 (adm_cd, ri_cd) 일치 행의 WORK_YN 값을 갱신.
+
+    명부 ri_cd 는 읍면동 안에서만 유일(001/002…)하므로 반드시 adm_cd 와
+    함께 매칭해야 한다. 첫 호출 시 {path}.bak 백업 자동 생성.
+    매칭 행 수(int) 반환. 다른 프로세스가 파일을 열고 있으면 PermissionError.
+    """
+    import openpyxl
+    import shutil
+    bak = path + '.bak'
+    if not os.path.exists(bak):
+        try:
+            shutil.copy2(path, bak)
+        except Exception:
+            pass
+    wb = openpyxl.load_workbook(path)
+    try:
+        ws = wb[sheet] if sheet else _pick_sheet(wb)
+        if ws is None:
+            return 0
+        rows_iter = ws.iter_rows()
+        try:
+            header_row = next(rows_iter)
+        except StopIteration:
+            return 0
+        headers = [str(c.value) if c.value is not None else ''
+                   for c in header_row]
+        mapping, _missing = detect_columns(headers)
+        canon_to_idx = {}
+        for i, h in enumerate(headers):
+            canon = mapping.get(h)
+            if canon:
+                canon_to_idx[canon] = i
+        idx_adm = canon_to_idx.get('adm_cd')
+        idx_ri = canon_to_idx.get('ri_cd')
+        idx_yn = canon_to_idx.get('work_yn')
+        if idx_adm is None or idx_ri is None or idx_yn is None:
+            return 0
+        t_adm = str(adm_cd).strip()
+        t_ri = str(ri_cd).strip()
+        new_val = str(value or '').strip()
+        n = 0
+        for row in rows_iter:
+            cv_adm = row[idx_adm].value
+            cv_ri = row[idx_ri].value
+            if cv_adm is None or cv_ri is None:
+                continue
+            if (str(cv_adm).strip() == t_adm
+                    and str(cv_ri).strip() == t_ri):
+                row[idx_yn].value = new_val
+                n += 1
+        if n:
+            wb.save(path)
+        return n
+    finally:
+        wb.close()
 
 
 def read_excel(path, sheet=None, limit=None):
