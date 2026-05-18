@@ -256,10 +256,12 @@ def load_markup_layer(geojson_dict, layer_name='발주자_마크업'):
 # 작업 모드 — 작업데이터만 편집 활성, 나머지 readOnly
 # ============================================================
 
-def start_work_mode(iface, edit_layer_names=EDIT_LAYER_NAMES):
+def start_work_mode(iface, edit_layer_names=EDIT_LAYER_NAMES, attach=True):
     """작업 모드 진입. snapshot dict(원복용) 반환.
 
-    편집 대상 레이어는 편집 활성 + autofill 콜백 설치, 나머지는 readOnly.
+    편집 대상 레이어는 편집 활성, 나머지는 readOnly. attach=True 면 기존
+    autofill 콜백(get_current_ri 기반) 설치 — 새 split→팝업 흐름을 쓰는
+    호출자는 attach=False 로 두고 직접 featureAdded 를 처리하면 된다.
     """
     from qgis.core import QgsProject, QgsVectorLayer
     snap = {}
@@ -272,7 +274,8 @@ def start_work_mode(iface, edit_layer_names=EDIT_LAYER_NAMES):
             layer.setReadOnly(False)
             if not layer.isEditable():
                 layer.startEditing()
-            attach_autofill(layer, edit_layer_names)
+            if attach:
+                attach_autofill(layer, edit_layer_names)
         else:
             if layer.isEditable():
                 layer.commitChanges(stopEditing=True)
@@ -385,6 +388,117 @@ def detach_autofill(layer=None):
                 lyr.featureAdded.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
+
+
+# ============================================================
+# 작업데이터 초기 시드 — 행정경계 폴리곤 복사
+# ============================================================
+
+def _field_idx_ci(layer, name):
+    """대소문자 무시 필드 인덱스. 없으면 -1."""
+    fields = layer.fields()
+    low = name.lower()
+    for i in range(fields.count()):
+        if fields.at(i).name().lower() == low:
+            return i
+    return -1
+
+
+def seed_work_layer_from_adm(work_layer, adm_layer, adm_codes):
+    """작업데이터가 비어 있을 때 행정경계 폴리곤을 복사해 초기 모집단 생성.
+
+    - adm_codes 의 adm_cd 와 매칭되는 행정경계 피처를 작업데이터로 옮긴다.
+    - 공통 필드(sido_cd, sigungu_cd, adm_cd, adm_nm, …)만 복사, ri_cd/ri_nm
+      은 비워 둔다 (이후 split + 팝업으로 부여).
+    - 좌표계 변환은 두 레이어가 동일 CRS 라고 가정 (보통 5179 통일).
+    Returns 추가된 피처 수.
+    """
+    from qgis.core import QgsFeature, QgsFeatureRequest
+    if work_layer is None or adm_layer is None or not adm_codes:
+        return 0
+    src_adm_idx = _field_idx_ci(adm_layer, 'adm_cd')
+    if src_adm_idx < 0:
+        return 0
+
+    # 작업데이터 컬럼 매핑 — 소스에서 같은 이름 컬럼만 옮긴다
+    src_fields = adm_layer.fields()
+    dst_fields = work_layer.fields()
+    src_to_dst = {}
+    for si in range(src_fields.count()):
+        sn = src_fields.at(si).name()
+        di = _field_idx_ci(work_layer, sn)
+        if di >= 0:
+            src_to_dst[si] = di
+
+    if not work_layer.isEditable():
+        work_layer.startEditing()
+
+    code_set = set(str(c).strip() for c in adm_codes)
+    req = QgsFeatureRequest()
+    added = 0
+    for src in adm_layer.getFeatures(req):
+        code = src.attribute(src_adm_idx)
+        if code is None or str(code).strip() not in code_set:
+            continue
+        dst = QgsFeature(dst_fields)
+        for si, di in src_to_dst.items():
+            dst.setAttribute(di, src.attribute(si))
+        if src.hasGeometry():
+            dst.setGeometry(src.geometry())
+        if work_layer.addFeature(dst):
+            added += 1
+    return added
+
+
+# ============================================================
+# 작업데이터 분류 심볼 — ri_cd 채워진 조각만 색, 빈 조각은 회색
+# ============================================================
+
+def apply_work_data_categorized_renderer(layer, attr='ri_cd'):
+    """작업데이터를 ri_cd 별 분류 심볼로 표현.
+
+    빈 ri_cd → 연한 회색 (아직 부여 안 됨), 값 있는 ri_cd → 랜덤 색.
+    저장된 QML 스타일을 덮어쓰므로 사용자가 원치 않으면 호출하지 않는다.
+    """
+    from qgis.core import (QgsCategorizedSymbolRenderer, QgsRendererCategory,
+                           QgsFillSymbol)
+    idx = _field_idx_ci(layer, attr)
+    if idx < 0:
+        return False
+    attr_name = layer.fields().at(idx).name()
+
+    # 회색(빈값) + 각 ri_cd 별 랜덤색 — 색은 고정 팔레트 순환
+    palette = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00',
+               '#ffff33', '#a65628', '#f781bf', '#66c2a5', '#fc8d62',
+               '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f']
+    cats = []
+    # 빈값 카테고리
+    empty_sym = QgsFillSymbol.createSimple({
+        'color': '200,200,200,80',
+        'outline_color': '#666666',
+        'outline_width': '0.3',
+    })
+    cats.append(QgsRendererCategory('', empty_sym, '(미부여)'))
+    # 현재 레이어에 존재하는 ri_cd 값들로 카테고리 생성
+    values = set()
+    for f in layer.getFeatures():
+        v = f.attribute(idx)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            values.add(s)
+    for i, v in enumerate(sorted(values)):
+        sym = QgsFillSymbol.createSimple({
+            'color': palette[i % len(palette)] + ',140',
+            'outline_color': '#333333',
+            'outline_width': '0.3',
+        })
+        cats.append(QgsRendererCategory(v, sym, v))
+    renderer = QgsCategorizedSymbolRenderer(attr_name, cats)
+    layer.setRenderer(renderer)
+    layer.triggerRepaint()
+    return True
 
 
 # ============================================================

@@ -28,6 +28,89 @@ PLUGIN_DIR = os.path.dirname(__file__)
 
 
 # ============================================================
+# split 후 행정리 부여 다이얼로그
+# ============================================================
+
+class RiAssignDialog(QDialog):
+    """split 직후 새 피처에 부여할 행정리를 고른다.
+
+    후보 — 현재 로드된 명부 중 작업여부 != 'Y' 행. 검색 + 더블클릭 OK.
+    chosen 속성으로 선택 결과(dict) 노출. 취소면 chosen=None.
+    """
+
+    def __init__(self, candidates, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('행정리 부여')
+        self.resize(520, 480)
+        self.candidates = list(candidates)
+        self._filtered_idx = list(range(len(self.candidates)))
+        self.chosen = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            '이 조각에 부여할 <b>행정리</b>를 선택하세요. (미완료만 표시)'))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('행정리 코드/명 검색')
+        self.search.textChanged.connect(self._refilter)
+        layout.addWidget(self.search)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ['읍면동', '행정리코드', '행정리명', '비고'])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.doubleClicked.connect(self._accept_selected)
+        layout.addWidget(self.table, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_cancel = QPushButton('취소(부여 안 함)')
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton('부여')
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._accept_selected)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+        self._fill_table()
+        if self.candidates:
+            self.table.selectRow(0)
+
+    def _fill_table(self):
+        self.table.setRowCount(len(self._filtered_idx))
+        for row, src_idx in enumerate(self._filtered_idx):
+            r = self.candidates[src_idx]
+            adm = f"{r.get('adm_cd','')} {r.get('adm_nm','')}".strip()
+            self.table.setItem(row, 0, QTableWidgetItem(adm))
+            self.table.setItem(row, 1, QTableWidgetItem(r.get('ri_cd', '')))
+            self.table.setItem(row, 2, QTableWidgetItem(r.get('ri_nm', '')))
+            self.table.setItem(row, 3, QTableWidgetItem(r.get('remark', '')))
+        self.table.resizeColumnsToContents()
+
+    def _refilter(self, text):
+        t = (text or '').strip().lower()
+        if not t:
+            self._filtered_idx = list(range(len(self.candidates)))
+        else:
+            self._filtered_idx = [
+                i for i, r in enumerate(self.candidates)
+                if t in (r.get('ri_cd', '') + ' '
+                         + r.get('ri_nm', '')).lower()]
+        self._fill_table()
+        if self._filtered_idx:
+            self.table.selectRow(0)
+
+    def _accept_selected(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        src_idx = self._filtered_idx[rows[0].row()]
+        self.chosen = self.candidates[src_idx]
+        self.accept()
+
+
+# ============================================================
 # Tab: 서버 연결
 # ============================================================
 
@@ -169,6 +252,7 @@ class WorkListTab(QWidget):
         self._work_snapshot = None
         self._current_admin = ''
         self._current_admin_nm = ''
+        self._feature_added_slot = None  # split 후 팝업용 콜백 참조
         self._build()
 
     def _build(self):
@@ -508,18 +592,51 @@ class WorkListTab(QWidget):
 
     # --- 작업 시작/종료 ---
 
+    def _find_adm_bnd_layer(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+        for lyr in QgsProject.instance().mapLayers().values():
+            if (isinstance(lyr, QgsVectorLayer)
+                    and '행정경계' in lyr.name()):
+                return lyr
+        return None
+
     def _on_start(self):
         try:
-            self._work_snapshot = layer_control.start_work_mode(self.iface)
+            work = self._find_work_layer()
+            # 1) 0 피처면 행정경계에서 해당 읍면동 폴리곤을 시드로 복사
+            seeded = 0
+            if work is not None and work.featureCount() == 0:
+                adm = self._find_adm_bnd_layer()
+                if adm is None:
+                    QMessageBox.warning(
+                        self, '경고', '행정경계 레이어가 없어 초기 시드 불가.')
+                else:
+                    if not work.isEditable():
+                        work.startEditing()
+                    seeded = layer_control.seed_work_layer_from_adm(
+                        work, adm, self._merged_codes)
+                    work.commitChanges()
+            # 2) attach=False — 기존 current_ri 기반 autofill 끄고
+            #    아래에서 split 후 팝업 슬롯을 직접 연결
+            self._work_snapshot = layer_control.start_work_mode(
+                self.iface, attach=False)
+            work = self._find_work_layer()
+            # 3) 분류 심볼 적용 (ri_cd 빈/채워짐 시각화)
+            if work is not None:
+                layer_control.apply_work_data_categorized_renderer(work)
+                # 4) split→팝업 콜백 연결
+                self._connect_feature_added(work)
             self.btn_start.setEnabled(False)
             self.btn_end.setEnabled(True)
+            extra = f' (시드 {seeded}개)' if seeded else ''
             self.status.setText(
-                '작업 시작 — 작업데이터 편집 가능, 나머지 readOnly')
+                f'작업 시작 — split 시 팝업으로 행정리 부여{extra}')
         except Exception as e:
             QMessageBox.critical(self, '오류', f'작업 시작 실패: {e}')
 
     def _on_end(self):
         try:
+            self._disconnect_feature_added()
             saved, errors = layer_control.end_work_mode(
                 self.iface, self._work_snapshot)
             self._work_snapshot = None
@@ -531,6 +648,75 @@ class WorkListTab(QWidget):
             self.status.setText(msg)
         except Exception as e:
             QMessageBox.critical(self, '오류', f'작업 종료 실패: {e}')
+
+    # --- split → 팝업 자동 부여 ---
+
+    def _connect_feature_added(self, layer):
+        self._disconnect_feature_added()
+        slot = lambda fid, _l=layer: self._on_feature_added(_l, fid)
+        layer.featureAdded.connect(slot)
+        self._feature_added_slot = (layer, slot)
+
+    def _disconnect_feature_added(self):
+        if not self._feature_added_slot:
+            return
+        layer, slot = self._feature_added_slot
+        try:
+            layer.featureAdded.disconnect(slot)
+        except (TypeError, RuntimeError):
+            pass
+        self._feature_added_slot = None
+
+    def _on_feature_added(self, layer, fid):
+        # 미완료(N/공백) 후보만 표시
+        candidates = [r for r in self._roster
+                      if (r.get('work_yn', '') or '').upper() != 'Y']
+        if not candidates:
+            self.status.setText('split 됨 — 미완료 행정리 후보 없음')
+            return
+        dlg = RiAssignDialog(candidates, parent=self)
+        if dlg.exec_() != QDialog.Accepted or dlg.chosen is None:
+            self.status.setText('split 됨 — 부여 취소')
+            return
+        chosen = dlg.chosen
+        self._assign_attrs_to_feature(layer, fid, chosen)
+        self._mark_row_done(chosen)
+
+    def _assign_attrs_to_feature(self, layer, fid, rec):
+        fields = layer.fields()
+        idx_of = {fields.at(i).name().lower(): i
+                  for i in range(fields.count())}
+        for col, val in (('adm_cd', rec.get('adm_cd', '')),
+                         ('adm_nm', rec.get('adm_nm', '')),
+                         ('ri_cd', rec.get('ri_cd', '')),
+                         ('ri_nm', rec.get('ri_nm', ''))):
+            idx = idx_of.get(col, -1)
+            if idx >= 0 and val:
+                layer.changeAttributeValue(fid, idx, val)
+        layer.triggerRepaint()
+
+    def _mark_row_done(self, rec):
+        # 명부 메모리 + 엑셀 + 테이블 콤보 동기 갱신
+        rec['work_yn'] = 'Y'
+        path = self._slots.get('roster')
+        if path:
+            try:
+                excel_loader.update_work_yn(
+                    path, rec.get('adm_cd', ''), rec.get('ri_cd', ''), 'Y')
+            except Exception as e:
+                self.status.setText(f'엑셀 저장 실패: {e}')
+        # 테이블 콤보 갱신 — roster 내 같은 (adm_cd, ri_cd) 찾기
+        for i, r in enumerate(self._roster):
+            if (r.get('adm_cd', '') == rec.get('adm_cd', '')
+                    and r.get('ri_cd', '') == rec.get('ri_cd', '')):
+                w = self.table.cellWidget(i, 4)
+                if isinstance(w, QComboBox):
+                    w.blockSignals(True)
+                    w.setCurrentText('Y')
+                    w.blockSignals(False)
+                break
+        self.status.setText(
+            f"부여 완료 — {rec.get('ri_cd','')} {rec.get('ri_nm','')} → Y")
 
     # --- 마크업 회수 ---
 
