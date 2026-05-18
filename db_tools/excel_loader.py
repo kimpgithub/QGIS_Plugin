@@ -144,13 +144,15 @@ def update_work_yn(path, adm_cd, ri_cd, value, sheet=None):
         wb.close()
 
 
-def read_excel(path, sheet=None, limit=None):
+def read_excel(path, sheet=None, limit=None, adm_codes=None):
     """엑셀 파일 → (headers, rows, mapping, missing).
 
     - headers: 원본 엑셀 헤더 list
     - rows: 데이터 행 (원본 순서 유지) — dict with canonical keys
     - mapping: 엑셀 헤더 → 표준 컬럼
     - missing: 누락된 required 컬럼
+    - adm_codes: 주어지면 해당 set 의 adm_cd 행만 읽어들임 (38K 행 명부에서
+      병합이미지 대상 읍면동만 추출하는 용도)
     """
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -170,22 +172,29 @@ def read_excel(path, sheet=None, limit=None):
     # 엑셀 헤더 → canonical 이름으로 변환
     col_to_canon = {i: mapping[headers[i]] for i in range(len(headers))
                     if headers[i] in mapping}
+    # adm_cd 컬럼 인덱스 (사전 필터에 사용)
+    adm_idx = next((i for i, c in col_to_canon.items()
+                    if c == 'adm_cd'), None)
+    code_set = (set(str(c).strip() for c in adm_codes)
+                if adm_codes else None)
     rows = []
     for r in rows_iter:
         if all(c is None for c in r):
             continue
+        # adm_cd 사전 필터 — dict 빌드 전에 조기 컷
+        if code_set is not None and adm_idx is not None:
+            v = r[adm_idx] if adm_idx < len(r) else None
+            if v is None or str(v).strip() not in code_set:
+                continue
         rec = {}
         for i, v in enumerate(r):
             if i in col_to_canon:
-                # 공백 trim, None→''
                 if v is None:
                     rec[col_to_canon[i]] = ''
                 else:
                     rec[col_to_canon[i]] = str(v).strip()
-        # 빈 키 보정
         for c in ALL_COLS:
             rec.setdefault(c, '')
-        # 필수 값 체크
         if not rec['adm_cd'] or not rec['ri_cd'] or not rec['ri_nm']:
             continue
         rows.append(rec)

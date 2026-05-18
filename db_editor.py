@@ -352,8 +352,15 @@ class WorkListTab(QWidget):
     # --- 명부 로드 ---
 
     def _load_roster(self, path):
+        if not self._merged_codes:
+            QMessageBox.warning(
+                self, '경고',
+                '병합이미지가 없어 작업 대상 읍면동을 특정할 수 없습니다.\n'
+                '11_병합이미지 폴더의 jpg 파일을 먼저 확인하세요.')
+            return
         try:
-            _headers, rows, _mapping, missing = excel_loader.read_excel(path)
+            _headers, rows, _mapping, missing = excel_loader.read_excel(
+                path, adm_codes=self._merged_codes)
         except Exception as e:
             QMessageBox.critical(self, '오류', f'명부 엑셀 읽기 실패: {e}')
             return
@@ -363,10 +370,6 @@ class WorkListTab(QWidget):
                 f'명부 필수 컬럼 누락: {", ".join(missing)}')
             return
         total = len(rows)
-        # 병합이미지가 있는 읍면동만 필터 (없으면 전체 노출)
-        if self._merged_codes:
-            rows = [r for r in rows
-                    if r.get('adm_cd', '') in self._merged_codes]
         self._roster = rows
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
@@ -381,11 +384,7 @@ class WorkListTab(QWidget):
         self.table.resizeColumnsToContents()
         done = sum(1 for r in rows
                    if (r.get('work_yn', '') or '').upper() == 'Y')
-        if self._merged_codes:
-            tag = (f' (병합이미지 {len(self._merged_codes)}개 읍면동, '
-                   f'명부 전체 {total})')
-        else:
-            tag = ''
+        tag = f' (병합이미지 {len(self._merged_codes)}개 읍면동)'
         self.status.setText(
             f'명부 로드: {len(rows)}개 행정리 (작업완료 {done}){tag}')
 
