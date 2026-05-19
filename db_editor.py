@@ -12,7 +12,7 @@
 """
 import os
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QFormLayout,
@@ -25,6 +25,38 @@ from .db_tools.api_client import ServerConfig, save_config, load_config
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
+
+
+# ============================================================
+# 엑셀 Y/N 저장 워커 — UI 멈춤 방지
+# ============================================================
+
+class WorkYnSaveWorker(QThread):
+    """update_work_yn 한 건을 백그라운드에서 실행.
+
+    UI 콤보 변경은 즉시 반영하고 엑셀 저장은 비동기. 실패 시 호출부가
+    UI 를 revert 한다. 매번 새 인스턴스 — 직렬 저장.
+    """
+    done = pyqtSignal(int, str, str, int)  # row_idx, adm_cd, ri_cd, n
+    failed = pyqtSignal(int, str, str, str, str)  # row_idx, adm_cd, ri_cd, old, err
+
+    def __init__(self, row_idx, path, adm_cd, ri_cd, new_val, old_val):
+        super().__init__()
+        self.row_idx = row_idx
+        self.path = path
+        self.adm_cd = adm_cd
+        self.ri_cd = ri_cd
+        self.new_val = new_val
+        self.old_val = old_val
+
+    def run(self):
+        try:
+            n = excel_loader.update_work_yn(
+                self.path, self.adm_cd, self.ri_cd, self.new_val)
+            self.done.emit(self.row_idx, self.adm_cd, self.ri_cd, n)
+        except Exception as e:
+            self.failed.emit(self.row_idx, self.adm_cd, self.ri_cd,
+                             self.old_val, str(e))
 
 
 # ============================================================
@@ -566,12 +598,15 @@ class WorkListTab(QWidget):
         search_row.addWidget(self.search)
         layout.addLayout(search_row)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             ['읍면동 코드', '읍면동명', '행정리 코드', '행정리명',
-             '작업여부', '비고'])
+             '작업여부', '현재면적(㎡)', '비고'])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSortingEnabled(True)
+        # 헤더 클릭 정렬. work_yn 셀은 setItem + setCellWidget 양쪽 모두 세팅해
+        # 정렬 키를 유지 (콤보만 두면 빈 셀로 취급됨).
         self.table.currentCellChanged.connect(
             lambda r, *_: self._on_row_selected(r))
         self.table.doubleClicked.connect(self._on_double_click)
@@ -694,31 +729,97 @@ class WorkListTab(QWidget):
             return
         total = len(rows)
         self._roster = rows
+        # 채우는 동안 정렬 꺼두기 — row 순서 바뀌면 cellWidget 매핑 깨짐
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             self.table.setItem(i, 0, QTableWidgetItem(r.get('adm_cd', '')))
             self.table.setItem(i, 1, QTableWidgetItem(r.get('adm_nm', '')))
             self.table.setItem(i, 2, QTableWidgetItem(r.get('ri_cd', '')))
             self.table.setItem(i, 3, QTableWidgetItem(r.get('ri_nm', '')))
-            # 4: 작업여부 — Y/N 콤보로 즉시 편집 + 엑셀 저장
-            self.table.setCellWidget(i, 4, self._make_work_yn_combo(
-                i, r.get('work_yn', '')))
-            self.table.setItem(i, 5, QTableWidgetItem(r.get('remark', '')))
+            # 4: 작업여부 — sort 용 item + 표시용 콤보
+            yn = (r.get('work_yn', '') or '').strip().upper()
+            yn_item = QTableWidgetItem(yn)
+            yn_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(i, 4, yn_item)
+            self.table.setCellWidget(i, 4, self._make_work_yn_combo(i, yn))
+            # 5: 현재면적 — 작업데이터 layer 에서 계산해 채움 (초기 0)
+            self.table.setItem(i, 5, self._make_area_item(0))
+            self.table.setItem(i, 6, QTableWidgetItem(r.get('remark', '')))
         self.table.resizeColumnsToContents()
+        self.table.setSortingEnabled(True)
         done = sum(1 for r in rows
                    if (r.get('work_yn', '') or '').upper() == 'Y')
         tag = f' (병합이미지 {len(self._merged_codes)}개 읍면동)'
         self.status.setText(
             f'명부 로드: {len(rows)}개 행정리 (작업완료 {done}){tag}')
+        self._refresh_area_column()
+        self._hook_work_layer_changes()
+
+    # --- 현재면적 컬럼 갱신 ---
+
+    def _compute_area_sums(self):
+        """work_layer 의 (adm_cd, ri_cd) 별 면적 합 dict."""
+        sums = {}
+        lyr = self._work_layer
+        if lyr is None or not lyr.isValid():
+            return sums
+        fields = lyr.fields()
+        idx_adm = next((i for i in range(fields.count())
+                        if fields.at(i).name().lower() == 'adm_cd'), -1)
+        idx_ri = next((i for i in range(fields.count())
+                       if fields.at(i).name().lower() == 'ri_cd'), -1)
+        if idx_adm < 0 or idx_ri < 0:
+            return sums
+        for f in lyr.getFeatures():
+            if not f.hasGeometry():
+                continue
+            adm = str(f.attribute(idx_adm) or '').strip()
+            ri = str(f.attribute(idx_ri) or '').strip()
+            if not adm or not ri:
+                continue
+            sums[(adm, ri)] = sums.get((adm, ri), 0.0) + f.geometry().area()
+        return sums
+
+    def _refresh_area_column(self):
+        sums = self._compute_area_sums()
+        was_sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
+        for r in range(self.table.rowCount()):
+            it_adm = self.table.item(r, 0)
+            it_ri = self.table.item(r, 2)
+            if not (it_adm and it_ri):
+                continue
+            a = sums.get((it_adm.text(), it_ri.text()), 0.0)
+            cell = self.table.item(r, 5)
+            if cell is None:
+                self.table.setItem(r, 5, self._make_area_item(int(round(a))))
+            else:
+                cell.setData(Qt.DisplayRole, int(round(a)))
+        self.table.setSortingEnabled(was_sorting)
+
+    def _hook_work_layer_changes(self):
+        """작업데이터 편집 저장 시 면적 컬럼 자동 갱신."""
+        lyr = self._work_layer
+        if lyr is None or not lyr.isValid():
+            return
+        if getattr(self, '_area_hook_layer_id', None) == lyr.id():
+            return
+        try:
+            lyr.editingStopped.connect(self._refresh_area_column)
+        except Exception:
+            pass
+        self._area_hook_layer_id = lyr.id()
 
     def _on_search(self, text):
         text = text.strip().lower()
+        cols = self.table.columnCount()
         for r in range(self.table.rowCount()):
             if not text:
                 self.table.setRowHidden(r, False)
                 continue
             parts = []
-            for c in range(6):
+            for c in range(cols):
                 w = self.table.cellWidget(r, c)
                 if isinstance(w, QComboBox):
                     parts.append(w.currentText().lower())
@@ -746,34 +847,73 @@ class WorkListTab(QWidget):
         new = (value or '').strip().upper()
         if old == new:
             return
-        rec['work_yn'] = new
+        rec['work_yn'] = new   # 메모리 즉시 반영, 엑셀은 백그라운드
+        # 정렬키 동기화 — 콤보가 바뀐 row 의 item 도 갱신
+        cur_row = self._find_row(rec.get('adm_cd', ''), rec.get('ri_cd', ''))
+        if cur_row >= 0:
+            it = self.table.item(cur_row, 4)
+            if it is not None:
+                it.setText(new)
         path = self._slots.get('roster')
         if not path:
             self.status.setText('명부 경로 없음 — 저장 실패')
             return
-        try:
-            n = excel_loader.update_work_yn(
-                path, rec.get('adm_cd', ''), rec.get('ri_cd', ''), new)
-        except PermissionError:
+        self.status.setText(
+            f"저장 중 — {rec.get('ri_cd','')} 작업여부={new} (백그라운드)")
+        w = WorkYnSaveWorker(
+            row_idx, path, rec.get('adm_cd', ''), rec.get('ri_cd', ''),
+            new, old)
+        w.done.connect(self._on_work_yn_saved)
+        w.failed.connect(self._on_work_yn_save_failed)
+        # 인스턴스 보존 — GC 로 워커 즉시 사라지면 시그널이 끊김
+        if not hasattr(self, '_work_yn_workers'):
+            self._work_yn_workers = []
+        self._work_yn_workers.append(w)
+        w.finished.connect(lambda w=w: self._work_yn_workers.remove(w))
+        w.start()
+
+    def _on_work_yn_saved(self, row_idx, adm_cd, ri_cd, n):
+        if n == 0:
+            self.status.setText(
+                f"저장 경고 — ri_cd={ri_cd} 매칭 행 없음")
+        else:
+            # 현재 rec 값을 status 에 그대로 반영
+            rec = self._find_rec(adm_cd, ri_cd) or {}
+            self.status.setText(
+                f"저장 완료 — {ri_cd} 작업여부={rec.get('work_yn','')}")
+
+    def _on_work_yn_save_failed(self, row_idx, adm_cd, ri_cd, old, err):
+        if 'Permission' in err or 'PermissionError' in err:
             QMessageBox.critical(
                 self, '저장 실패',
                 '엑셀 파일이 다른 프로그램(엑셀 등)에 열려 있습니다.\n'
                 '닫고 다시 시도하세요.')
-            # UI 되돌림
-            self._revert_work_yn(row_idx, old)
-            rec['work_yn'] = old
-            return
-        except Exception as e:
-            QMessageBox.critical(self, '저장 실패', str(e))
-            self._revert_work_yn(row_idx, old)
-            rec['work_yn'] = old
-            return
-        if n == 0:
-            self.status.setText(
-                f"저장 경고 — ri_cd={rec.get('ri_cd','')} 매칭 행 없음")
         else:
-            self.status.setText(
-                f"저장 완료 — {rec.get('ri_cd','')} 작업여부={new}")
+            QMessageBox.critical(self, '저장 실패', err)
+        rec = self._find_rec(adm_cd, ri_cd)
+        if rec is not None:
+            rec['work_yn'] = old
+        # 정렬되어 row_idx 가 이동했을 수 있으니 (adm_cd, ri_cd) 로 찾음
+        target = self._find_row(adm_cd, ri_cd)
+        if target >= 0:
+            self._revert_work_yn(target, old)
+
+    def _find_rec(self, adm_cd, ri_cd):
+        for r in self._roster:
+            if r.get('adm_cd', '') == adm_cd and r.get('ri_cd', '') == ri_cd:
+                return r
+        return None
+
+    def _find_row(self, adm_cd, ri_cd):
+        """현재 정렬된 화면 row index 를 (adm_cd, ri_cd) 로 검색."""
+        for r in range(self.table.rowCount()):
+            it_adm = self.table.item(r, 0)
+            it_ri = self.table.item(r, 2)
+            if (it_adm and it_ri
+                    and it_adm.text() == adm_cd
+                    and it_ri.text() == ri_cd):
+                return r
+        return -1
 
     def _revert_work_yn(self, row_idx, value):
         w = self.table.cellWidget(row_idx, 4)
@@ -781,6 +921,16 @@ class WorkListTab(QWidget):
             w.blockSignals(True)
             w.setCurrentText(value)
             w.blockSignals(False)
+        it = self.table.item(row_idx, 4)
+        if it is not None:
+            it.setText(value)
+
+    def _make_area_item(self, area_m2):
+        """현재면적 셀 — 정렬용 정수값 보유."""
+        it = QTableWidgetItem()
+        it.setData(Qt.DisplayRole, int(area_m2))
+        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        return it
 
     # --- 행정리 선택 → 자동부여 준비 ---
 

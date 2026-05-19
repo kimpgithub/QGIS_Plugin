@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-05-19 — DB 작업 명부 패널 4종 개선
+
+- **split 후 area 자동 재계산** — `attach_autofill` 에 `featureAdded`
+  처리 + `geometryChanged` 훅 추가. split 으로 줄어든 원본 폴리곤과
+  새로 생긴 조각 모두 `area` 필드를 geometry.area() 로 갱신
+  (기존엔 상속된 원본 면적 그대로 남아 있었음).
+- **Y/N 저장 백그라운드 워커** — `WorkYnSaveWorker(QThread)` 신설.
+  openpyxl 전체 워크북 reload/save 가 직렬 동기여서 38K행 명부에서
+  콤보 변경마다 1~3초 UI 멈춤이 있었음. 콤보 시그널은 즉시 메모리·UI
+  반영, 엑셀 쓰기는 백그라운드. 실패 시 (adm_cd, ri_cd) 키로 원래 행 찾아 revert.
+- **명부 테이블 헤더 클릭 정렬** — `setSortingEnabled(True)` +
+  work_yn 콤보 셀에 `QTableWidgetItem` 동기화(정렬 키). 워커 콜백은
+  row index 가 아닌 (adm_cd, ri_cd) 로 행 lookup 해서 정렬 후에도 안정.
+- **현재면적(㎡) 컬럼 신규** — bnd_job_pg 의 (adm_cd, ri_cd) 별
+  geometry.area() 합. 작업데이터 `editingStopped` 시그널에 훅 → 편집
+  저장하면 자동 갱신. 정렬도 숫자 기준.
+
 ## 2026-05-19 — Stage 6 외부 병합 폴더 입력 지원
 
 - 기존엔 공통입력 `프로젝트 폴더` 하위 `5_merged/` 만 인풋 가능 → 미리

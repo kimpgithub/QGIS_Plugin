@@ -423,13 +423,31 @@ def get_current_ri():
 # 자동 속성 부여 (featureAdded 훅)
 # ============================================================
 
-_active_callbacks = {}   # layer_id → slot
+_active_callbacks = {}   # layer_id → (added_slot, geom_slot)
+
+
+def _recalc_area(layer, fid):
+    """fid 의 geometry 면적 (㎡, 정수) 을 'area' 필드에 기록.
+
+    필드명 area 가 없거나 geometry 가 없으면 무시.
+    """
+    idx = _field_idx_ci(layer, 'area')
+    if idx < 0:
+        return
+    feat = layer.getFeature(fid)
+    if not feat or not feat.hasGeometry():
+        return
+    g = feat.geometry()
+    if g.isEmpty():
+        return
+    layer.changeAttributeValue(fid, idx, int(round(g.area())))
 
 
 def attach_autofill(layer, target_layer_names=EDIT_LAYER_NAMES):
-    """layer.featureAdded 시 현재 선택 RI 의 adm/ri 속성 자동 기록.
+    """layer.featureAdded 시 현재 선택 RI 의 adm/ri 속성 자동 기록 +
+    featureAdded / geometryChanged 시 area 필드 자동 재계산.
 
-    작업 SHP 는 컬럼이 대문자(RI_CD/RI_NM)일 수 있어 대소문자 무시 검색.
+    작업 SHP 는 컬럼이 대문자(RI_CD/RI_NM/AREA)일 수 있어 대소문자 무시 검색.
     """
     nm = layer.name().lower()
     if not any(t in nm for t in target_layer_names):
@@ -440,37 +458,44 @@ def attach_autofill(layer, target_layer_names=EDIT_LAYER_NAMES):
 
     def _on_added(fid, _layer=layer):
         cur = get_current_ri()
-        if not cur['ri_cd']:
-            return
         fields = _layer.fields()
-        # 대소문자 무시 컬럼 인덱스
         idx_of = {fields.at(i).name().lower(): i
                   for i in range(fields.count())}
-        for col, val in (('adm_cd', cur['adm_cd']),
-                         ('adm_nm', cur['adm_nm']),
-                         ('ri_cd', cur['ri_cd']),
-                         ('ri_nm', cur['ri_nm'])):
-            idx = idx_of.get(col, -1)
-            if idx >= 0 and val:
-                _layer.changeAttributeValue(fid, idx, val)
+        if cur['ri_cd']:
+            for col, val in (('adm_cd', cur['adm_cd']),
+                             ('adm_nm', cur['adm_nm']),
+                             ('ri_cd', cur['ri_cd']),
+                             ('ri_nm', cur['ri_nm'])):
+                idx = idx_of.get(col, -1)
+                if idx >= 0 and val:
+                    _layer.changeAttributeValue(fid, idx, val)
+        _recalc_area(_layer, fid)
+
+    def _on_geom_changed(fid, _geom=None, _layer=layer):
+        # split 시 원본 폴리곤 축소 케이스 — area 같이 갱신
+        _recalc_area(_layer, fid)
 
     layer.featureAdded.connect(_on_added)
-    _active_callbacks[lid] = _on_added
+    layer.geometryChanged.connect(_on_geom_changed)
+    _active_callbacks[lid] = (_on_added, _on_geom_changed)
     return True
 
 
 def detach_autofill(layer=None):
-    """featureAdded 콜백 해제. layer=None 이면 전체 해제."""
+    """featureAdded/geometryChanged 콜백 해제. layer=None 이면 전체 해제."""
     from qgis.core import QgsProject
     targets = [layer.id()] if layer else list(_active_callbacks.keys())
     for lid in targets:
         if lid not in _active_callbacks:
             continue
         lyr = QgsProject.instance().mapLayer(lid)
-        slot = _active_callbacks.pop(lid)
-        if lyr is not None:
+        added_slot, geom_slot = _active_callbacks.pop(lid)
+        if lyr is None:
+            continue
+        for sig, slot in ((lyr.featureAdded, added_slot),
+                          (lyr.geometryChanged, geom_slot)):
             try:
-                lyr.featureAdded.disconnect(slot)
+                sig.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
 
