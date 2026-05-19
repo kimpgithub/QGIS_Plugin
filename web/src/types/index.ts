@@ -62,8 +62,12 @@ export type Markup = {
   reject_reason?: string | null;
 };
 
-// 서버 응답: GeoJSON FeatureCollection (properties = Markup)
-export type MarkupCollection = GjFeatureCollection<Markup>;
+// 서버 응답: GeoJSON FeatureCollection.
+// properties 에 geometry 가 같이 들어있으면 ol/format/GeoJSON 가
+// setProperties 단계에서 OL Geometry slot 을 raw GeoJSON 으로 덮어쓰므로
+// 반드시 Omit. geometry 는 Feature 의 top-level slot 에만 둔다.
+export type MarkupProps = Omit<Markup, 'geometry'>;
+export type MarkupCollection = GjFeatureCollection<MarkupProps>;
 
 // 새 마크업 등록 payload
 export type MarkupCreate = {

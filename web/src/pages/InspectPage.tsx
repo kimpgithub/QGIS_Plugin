@@ -91,15 +91,18 @@ export default function InspectPage() {
       .finally(() => setLoading(false));
   }, [admin]);
 
-  // markup 을 FC 형태로 MapView 에 전달
+  // markup 을 FC 형태로 MapView 에 전달.
+  // properties 에 geometry 가 들어있으면 ol/format/GeoJSON.readFeatures 가
+  // setProperties 단계에서 OL Geometry slot 을 raw GeoJSON 으로 덮어써
+  // 다음 addFeaturesInternal 에서 getExtent is not a function 으로 터짐.
   const markupFC = useMemo<MarkupCollection | null>(() => {
     if (!items.length) return null;
     return {
       type: 'FeatureCollection',
-      features: items.map((m) => ({
+      features: items.map(({ geometry, ...rest }) => ({
         type: 'Feature',
-        geometry: m.geometry,
-        properties: m,
+        geometry,
+        properties: rest,
       })),
     };
   }, [items]);
