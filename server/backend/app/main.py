@@ -223,7 +223,7 @@ def admin_outline(
     bbox: str | None = None,
     _: dict = Depends(get_user),
 ):
-    """admin_outline (bnd_adm_pg.shp 적재본) GeoJSON FC. 미리 단순화된 geom_simplified 사용.
+    """admin_outline (bnd_adm_pg.shp 적재본) 원본 geom GeoJSON FC.
 
     - adm_cd 지정: 해당 읍면 + buffer_m(기본 1km, EPSG:5179) 거리 내 이웃 폴리곤 반환.
     - bbox 지정 (minx,miny,maxx,maxy EPSG:4326): bbox 와 교차하는 폴리곤 반환.
@@ -235,8 +235,8 @@ def admin_outline(
         if buffer_m < 0 or buffer_m > 50000:
             raise HTTPException(status_code=400, detail="buffer_m 은 0~50000m")
         where = """
-            WHERE geom_simplified && (
-                SELECT ST_Expand(geom_simplified, %s) FROM admin_outline WHERE adm_cd = %s
+            WHERE geom && (
+                SELECT ST_Expand(geom, %s) FROM admin_outline WHERE adm_cd = %s
             )
         """
         params: tuple = (buffer_m, adm_cd)
@@ -246,7 +246,7 @@ def admin_outline(
         except ValueError as e:
             raise HTTPException(status_code=400,
                 detail="bbox 형식: minx,miny,maxx,maxy (EPSG:4326)") from e
-        where = ("WHERE geom_simplified && "
+        where = ("WHERE geom && "
                  "ST_Transform(ST_MakeEnvelope(%s,%s,%s,%s,4326), 5179)")
         params = (x1, y1, x2, y2)
     else:
@@ -258,7 +258,7 @@ def admin_outline(
           'type', 'FeatureCollection',
           'features', COALESCE(json_agg(json_build_object(
             'type', 'Feature', 'id', adm_cd,
-            'geometry', ST_AsGeoJSON(ST_Transform(geom_simplified, 4326))::json,
+            'geometry', ST_AsGeoJSON(ST_Transform(geom, 4326))::json,
             'properties', json_build_object(
               'adm_cd', adm_cd, 'adm_nm', adm_nm,
               'sgg_cd', sgg_cd, 'sgg_nm', sgg_nm,
