@@ -7,10 +7,10 @@ type Props = {
 };
 
 const ROWS: { key: LayerKey; label: string }[] = [
-  { key: 'cog', label: '스캔 이미지' },
-  { key: 'admin', label: '행정읍면 라인' },
-  { key: 'ri', label: '행정리 경계' },
   { key: 'markup', label: '수정요청' },
+  { key: 'ri', label: '행정리 경계' },
+  { key: 'admin', label: '행정읍면 라인' },
+  { key: 'cog', label: '스캔 이미지' },
 ];
 
 export default function LayerControls({ visible, onToggle, onFitBoundary }: Props) {
