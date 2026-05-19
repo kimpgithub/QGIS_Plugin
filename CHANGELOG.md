@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-05-19 — 검수 웹 (kostat_front) 통합 — `web/`
+
+- 행정리경계 검수용 React + Vite + OpenLayers 페이지를 같은 저장소
+  하위 `web/` 폴더로 합류. QGIS 플러그인과 같은 백엔드(Funnel) 공유.
+- 화면: 로그인 → 지도 검수 (라인등록/라인삭제/삭제표기/속성등록) →
+  수정요청 우측 패널 (미처리/반영/반려 필터 + [반영][반려]) → 행정읍면
+  선택 팝업(마스터). 화면정의서 11장 모두 대응.
+- 백엔드 호환: `/api/admins`, `/api/boundary`, `/api/markup`(GET/POST/PATCH)
+  — `db_tools/api_client.py` 와 스키마 일치 (kind/status/attrs 신규
+  스키마 기준). `/api/login`, `/api/cog/{adm_cd}` 는 신규.
+- 베이스맵: vworld WMTS (`/vworld` proxy). COG 타일은 백엔드의 titiler
+  URL 받아 XYZ 레이어 갱신.
+- 로컬: `cd web && npm install && npm run dev`. 배포: `npm run build` →
+  `dist/` 를 nginx 정적 루트로.
+
 ## 2026-05-19 — Stage 6 bnd_job_pg 시드 동봉
 
 - **`stage6_publish.write_bnd_job_pg()`** — COG 생성 직후 같은 슬롯에
