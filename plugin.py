@@ -1056,8 +1056,12 @@ class Stage6Tab(StageTab):
 
     def get_argv(self):
         self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
-        return ['--merged', self.common.sub(SUB_MERGED),
+        argv = ['--merged', self.common.sub(SUB_MERGED),
                 '--out', self.get_out_dir()]
+        shp = self.common.shp.text().strip()
+        if shp:
+            argv += ['--shp', shp]
+        return argv
 
 
 # ============================================================

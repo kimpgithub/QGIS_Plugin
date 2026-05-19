@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-05-19 — Stage 6 bnd_job_pg 시드 동봉
+
+- **`stage6_publish.write_bnd_job_pg()`** — COG 생성 직후 같은 슬롯에
+  `{admin}_bnd_job_pg.shp` 시드 생성. bnd_adm_pg 에서 admin_cd 행 1건만
+  필터 + 작업용 4컬럼(`spec`, `RI_NM`, `RI_CD`, `REMARK`) 추가 + `area`
+  파생. 사용자는 QGIS 에서 이 폴리곤을 split 해 행정리별로 쪼개 나간다
+  (기존 "0 피처 시드" 와 동일한 초기 상태를 파일로 미리 제공).
+- CLI `--shp` 추가, plugin `Stage6Tab` 는 공통입력 SHP 가 채워져 있으면
+  자동 전달. 미지정 시 COG 만 생성 (회귀 0).
+- 산출 경로: `{out}/{시도}/{시군구}/{admin}_bnd_job_pg.{shp,dbf,shx,prj,cpg}`
+
 ## 2026-05-18 — Stage 6 COG 다운샘플 + 작업 흐름 개편
 
 - **`stage6_publish.jpg_to_cog(scale=0.5, resample='lanczos')`** — 베이스

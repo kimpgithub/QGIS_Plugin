@@ -55,6 +55,23 @@ def jpg_to_cog(jpg_path, tif_path,
     gdal.Translate(tif_path, jpg_path, **kwargs)
 
 
+def write_bnd_job_pg(shp_path, admin_cd, out_shp):
+    """bnd_adm_pg 에서 admin_cd 행만 필터 + 작업용 4컬럼 추가하여 저장.
+
+    초기 시드 상태 — 1 admin = 1 polygon. 사용자가 QGIS 에서 split 해
+    행정리별 폴리곤을 만들어 나간다.
+    """
+    import geopandas as gpd
+    gdf = gpd.read_file(shp_path)
+    sub = gdf[gdf['adm_cd'].astype(str) == str(admin_cd)].copy()
+    if sub.empty:
+        raise ValueError(f'bnd_adm_pg 에 adm_cd={admin_cd} 없음')
+    for col in ('spec', 'RI_NM', 'RI_CD', 'REMARK'):
+        sub[col] = ''
+    sub['area'] = sub.geometry.area.round().astype('int64')
+    sub.to_file(out_shp, driver='ESRI Shapefile', encoding='utf-8')
+
+
 def cog_bounds(tif_path):
     """COG 의 (bounds[xmin,ymin,xmax,ymax], width, height) — EPSG:5179."""
     from osgeo import gdal
@@ -69,8 +86,12 @@ def cog_bounds(tif_path):
 
 
 def publish_one(jpg_path, merged_root, out_dir, cfg,
-                scale=DEFAULT_SCALE, resample=DEFAULT_RESAMPLE):
-    """admin 1건 — COG 변환 + 업로드 + 등록. result dict 반환."""
+                scale=DEFAULT_SCALE, resample=DEFAULT_RESAMPLE,
+                shp_path=None):
+    """admin 1건 — COG 변환 + 업로드 + 등록. result dict 반환.
+
+    shp_path 가 주어지면 같은 슬롯에 `{admin}_bnd_job_pg.shp` 시드도 생성.
+    """
     name = os.path.basename(jpg_path)
     m = re.match(r'(\d{8})', name)
     if not m:
@@ -95,6 +116,11 @@ def publish_one(jpg_path, merged_root, out_dir, cfg,
     key = f'cog/{rel}/{admin}.tif' if rel else f'cog/{admin}.tif'
     api_client.upload_s3(cfg, tif_path, key, content_type='image/tiff')
     api_client.register_cog(cfg, admin, key, bounds=bounds, width=w, height=h)
+
+    if shp_path:
+        out_shp = os.path.join(tif_dir, f'{admin}_bnd_job_pg.shp')
+        write_bnd_job_pg(shp_path, admin, out_shp)
+
     return {'admin_code': admin, 'status': 'OK', 'message': key}
 
 
@@ -109,6 +135,9 @@ def main():
                          '1.0 = 원본 유지, 0.5 = 1/2 축소 → 파일 ~1/4)')
     ap.add_argument('--resample', default=DEFAULT_RESAMPLE,
                     help='다운샘플 알고리즘 (lanczos/average/cubic 등)')
+    ap.add_argument('--shp', default='',
+                    help='bnd_adm_pg.shp 경로. 주면 COG 옆에 '
+                         '{admin}_bnd_job_pg.shp 시드도 생성.')
     args = ap.parse_args()
 
     cfg = api_client.load_config()
@@ -132,7 +161,8 @@ def main():
             print(f'\n[{i}/{len(targets)}] {os.path.basename(jpg)}')
             try:
                 r = publish_one(jpg, args.merged, args.out_dir, cfg,
-                                scale=args.scale, resample=args.resample)
+                                scale=args.scale, resample=args.resample,
+                                shp_path=args.shp or None)
             except Exception as e:
                 r = {'admin_code': '', 'status': 'ERROR', 'message': str(e)}
             el = f'{time.time() - t0:.1f}'
