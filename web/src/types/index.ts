@@ -76,3 +76,17 @@ export type MarkupCreate = {
   geometry: GjGeometry;
   attrs?: Markup['attrs'];
 };
+
+// /api/cog/{adm_cd} 응답
+export type CogInfo = {
+  adm_cd: string;
+  s3_key: string;
+  s3_url: string;
+  width: number;
+  height: number;
+  published_at: string;
+  bounds_geojson: GjGeometry | null;
+  bbox: [number, number, number, number] | null;   // [minLon, minLat, maxLon, maxLat] in EPSG:4326
+  tile_url: string;                                  // {z}/{x}/{y} 템플릿 (same-origin /tiles/...)
+  tilejson_url: string;
+};

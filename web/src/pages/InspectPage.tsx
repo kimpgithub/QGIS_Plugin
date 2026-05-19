@@ -11,9 +11,11 @@ import AdminPickerModal from '../components/modal/AdminPickerModal';
 import { listMarkup, createMarkup, applyMarkup, rejectMarkup } from '../api/markup';
 import { getBoundary } from '../api/boundary';
 import { listAdmins } from '../api/admins';
+import { getCog } from '../api/cog';
 import { attachTool, type ActiveTool } from '../components/map/tools';
 import type {
   AdminUnit,
+  CogInfo,
   GjFeatureCollection,
   GjGeometry,
   Markup,
@@ -62,6 +64,7 @@ export default function InspectPage() {
   // 데이터
   const [boundary, setBoundary] = useState<GjFeatureCollection | null>(null);
   const [items, setItems] = useState<Markup[]>([]);
+  const [cog, setCog] = useState<CogInfo | null>(null);
   const [loading, setLoading] = useState(false);
 
   // 필터 + 선택
@@ -72,21 +75,23 @@ export default function InspectPage() {
   });
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  // admin 선택 시 boundary + markup 로드
+  // admin 선택 시 boundary + markup + cog 로드 (cog 는 미업로드 시 404 → null)
   useEffect(() => {
     if (!admin) return;
     setLoading(true);
     Promise.all([
       getBoundary(admin.adm_cd).catch(() => null),
       listMarkup(admin.adm_cd, 'all').catch(() => null),
+      getCog(admin.adm_cd).catch(() => null),
     ])
-      .then(([b, mk]) => {
+      .then(([b, mk, c]) => {
         setBoundary(b);
         setItems(
           mk
             ? mk.features.map((f) => ({ ...f.properties, geometry: f.geometry }))
             : []
         );
+        setCog(c);
       })
       .finally(() => setLoading(false));
   }, [admin]);
@@ -263,7 +268,8 @@ export default function InspectPage() {
         <div style={styles.mapWrap}>
           <MapView
             visible={visible}
-            cogTileUrl={null /* TODO: COG tile URL 연결 */}
+            cogTileUrl={cog?.tile_url ?? null}
+            cogBbox={cog?.bbox ?? null}
             boundary={boundary}
             markup={markupFC}
             onMapReady={(h) => (mapHandleRef.current = h)}

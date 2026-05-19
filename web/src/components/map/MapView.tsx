@@ -26,6 +26,7 @@ export type MapHandle = {
 
 type Props = {
   cogTileUrl?: string | null;        // COG 베이스 타일 URL 템플릿
+  cogBbox?: [number, number, number, number] | null;  // [minLon,minLat,maxLon,maxLat] EPSG:4326
   boundary?: GjFeatureCollection | null;  // 행정리경계
   markup?: MarkupCollection | null;       // 수정요청 레이어
   visible: LayerVisibility;
@@ -40,6 +41,7 @@ const KOREA_EXTENT = transformExtent(
 
 export default function MapView({
   cogTileUrl,
+  cogBbox,
   boundary,
   markup,
   visible,
@@ -131,17 +133,25 @@ export default function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // COG URL 변경 시 source 교체 + 가시성
+  // COG URL 변경 시 source 교체 + 가시성. bbox 가 있고 boundary 가 비어있으면
+  // COG 범위로 fit (boundary 가 있으면 그쪽 useEffect 가 우선 fit).
   useEffect(() => {
     const l = cogRef.current;
     if (!l) return;
     if (cogTileUrl) {
       l.setSource(new XYZ({ url: cogTileUrl }));
       l.setVisible(visible.cog);
+      if (cogBbox && !boundary?.features?.length) {
+        const ext = transformExtent(cogBbox, 'EPSG:4326', 'EPSG:3857');
+        const m = mapRef.current;
+        if (m && isFinite(ext[0])) {
+          m.getView().fit(ext, { padding: [40, 40, 40, 40], duration: 400 });
+        }
+      }
     } else {
       l.setVisible(false);
     }
-  }, [cogTileUrl, visible.cog]);
+  }, [cogTileUrl, cogBbox, visible.cog, boundary]);
 
   // boundary 변경
   useEffect(() => {
