@@ -1,4 +1,4 @@
-import type { Markup, MarkupKind } from '../../types';
+import type { Markup, MarkupKind, MarkupStatus } from '../../types';
 
 const KIND_LABEL: Record<MarkupKind, string> = {
   add: '등록',
@@ -12,6 +12,18 @@ const KIND_COLOR: Record<MarkupKind, string> = {
   delete: '#dc2626',
   attr: '#0f766e',
   delete_mark: '#b45309',
+};
+
+// 처리대기 0 / 승인 1 / 반려 2 — 요구사항 표기
+const STATUS_LABEL: Record<MarkupStatus, string> = {
+  pending: '처리대기(0)',
+  applied: '승인(1)',
+  rejected: '반려(2)',
+};
+const STATUS_COLOR: Record<MarkupStatus, string> = {
+  pending: '#6b7280',
+  applied: '#15803d',
+  rejected: '#b91c1c',
 };
 
 type Props = {
@@ -41,11 +53,14 @@ export default function MarkupCard({
         <span style={{ ...styles.badge, background: KIND_COLOR[item.kind] }}>
           [{KIND_LABEL[item.kind]}]
         </span>
-        <span style={styles.meta}>
-          {item.created_by} · {fmt(item.created_at)}
+        <span style={{ ...styles.statusBadge, color: STATUS_COLOR[item.status] }}>
+          {STATUS_LABEL[item.status]}
         </span>
       </div>
       <div style={styles.body}>요청: {note}</div>
+      <div style={styles.meta}>
+        작업자 {item.created_by || '-'} · {fmt(item.created_at)}
+      </div>
       <div style={styles.actions}>
         <button
           type="button"
@@ -71,11 +86,13 @@ export default function MarkupCard({
         </button>
       </div>
       {item.status === 'applied' && (
-        <div style={styles.footnote}>반영: {fmt(item.applied_at)}</div>
+        <div style={styles.footnote}>
+          승인 {item.applied_by || '-'} · {fmt(item.applied_at)}
+        </div>
       )}
       {item.status === 'rejected' && (
         <div style={styles.footnote}>
-          반려: {fmt(item.rejected_at)}
+          반려 {item.rejected_by || '-'} · {fmt(item.rejected_at)}
           {item.reject_reason && (
             <div style={styles.reason}>사유: {item.reject_reason}</div>
           )}
@@ -128,7 +145,8 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     fontWeight: 600,
   },
-  meta: { color: '#6b7280' },
+  meta: { color: '#6b7280', fontSize: 11 },
+  statusBadge: { fontSize: 11, fontWeight: 600 },
   body: { fontSize: 13, color: '#1f2937', lineHeight: 1.4 },
   actions: { display: 'flex', gap: 6 },
   btn: {

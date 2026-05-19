@@ -43,7 +43,8 @@ export type MarkupKind = 'add' | 'delete' | 'attr' | 'delete_mark';
 
 export type MarkupStatus = 'pending' | 'applied' | 'rejected';
 
-// 서버 → 클라이언트 (api_client.py 신규 스키마 기준)
+// 서버 → 클라이언트 (api_client.py 신규 스키마 기준).
+// created_by = 작업자(행정구역코드 8자), applied_by/rejected_by = 처리 관리자(마스터 admin_cd).
 export type Markup = {
   id: number;
   adm_cd: string;
@@ -57,7 +58,9 @@ export type Markup = {
   };
   created_by: string;
   created_at: string;
+  applied_by?: string | null;
   applied_at?: string | null;
+  rejected_by?: string | null;
   rejected_at?: string | null;
   reject_reason?: string | null;
 };

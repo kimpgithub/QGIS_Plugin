@@ -457,7 +457,8 @@ def list_markup(
               'adm_cd', adm_cd, 'status', status,
               'reject_reason', reject_reason,
               'created_by', created_by, 'created_at', created_at,
-              'applied_at', applied_at, 'rejected_at', rejected_at)
+              'applied_by', applied_by, 'applied_at', applied_at,
+              'rejected_by', rejected_by, 'rejected_at', rejected_at)
           )) FILTER (WHERE id IS NOT NULL), '[]'::json)
         ) AS fc
         FROM review_markup {where}
@@ -505,10 +506,11 @@ def apply_markup(markup_id: int, user: dict = Depends(get_user)):
     execute(
         """
         UPDATE review_markup
-           SET status = 'applied', applied_at = now(), reject_reason = NULL
+           SET status = 'applied', applied_at = now(),
+               applied_by = %s, reject_reason = NULL, rejected_by = NULL
          WHERE id = %s
         """,
-        (markup_id,),
+        (user["admin_cd"], markup_id),
     )
     return Response(status_code=204)
 
@@ -525,9 +527,10 @@ def reject_markup(markup_id: int, body: RejectBody, user: dict = Depends(get_use
         """
         UPDATE review_markup
            SET status = 'rejected', rejected_at = now(),
+               rejected_by = %s, applied_by = NULL,
                reject_reason = %s
          WHERE id = %s
         """,
-        (body.reason.strip(), markup_id),
+        (user["admin_cd"], body.reason.strip(), markup_id),
     )
     return Response(status_code=204)
