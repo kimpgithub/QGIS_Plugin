@@ -9,3 +9,19 @@ build/
 *.so
 .DS_Store
 Thumbs.db
+
+# --- server/ (HQ stack) ---
+# 시크릿: 실제 값은 /srv/gis/compose/.env 에만, repo 에는 .env.example 만.
+server/compose/.env
+server/compose/*.env
+server/compose/.web-credentials.txt
+# 런타임 데이터 (호스트 볼륨)
+server/pgdata/
+server/minio/
+# 운영팀 반입 SHP 원본 (대용량/원본 데이터)
+server/_admin_src/
+server/**/*.shp
+server/**/*.shx
+server/**/*.dbf
+server/**/*.prj
+server/**/*.cpg

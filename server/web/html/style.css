@@ -1,0 +1,73 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: system-ui, "Apple SD Gothic Neo", sans-serif; }
+.hidden { display: none !important; }
+.muted { color: #888; font-size: 13px; line-height: 1.5; }
+.error { color: #d33; font-size: 13px; min-height: 18px; margin-top: 6px; }
+
+/* 로그인 */
+.overlay {
+  position: fixed; inset: 0; background: #2c3e50;
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.login-box {
+  background: #fff; padding: 32px; border-radius: 10px; width: 320px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.login-box h1 { font-size: 20px; }
+.login-box input, .login-box button {
+  padding: 10px 12px; font-size: 14px; border-radius: 6px; border: 1px solid #ccc;
+}
+.login-box button { background: #2c7be5; color: #fff; border: none; cursor: pointer; }
+
+/* 앱 레이아웃 */
+#app { display: flex; height: 100%; }
+#sidebar {
+  width: 320px; flex-shrink: 0; background: #f7f8fa; border-right: 1px solid #ddd;
+  display: flex; flex-direction: column; overflow-y: auto; padding: 16px;
+}
+#sidebar header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+#sidebar h2 { font-size: 16px; }
+#sidebar h3 { font-size: 13px; color: #555; margin: 18px 0 8px; text-transform: uppercase; }
+.link { background: none; border: none; color: #2c7be5; cursor: pointer; font-size: 12px; }
+main { flex: 1; position: relative; }
+#map { position: absolute; inset: 0; }
+
+/* admin 목록 */
+#admin-list, #markup-list { list-style: none; }
+#admin-list li, #markup-list li {
+  padding: 10px; border-radius: 6px; cursor: pointer; margin-bottom: 4px;
+  background: #fff; border: 1px solid #e3e3e3; font-size: 13px;
+}
+#admin-list li:hover { background: #eef4 fc; }
+#admin-list li.active { background: #2c7be5; color: #fff; border-color: #2c7be5; }
+#admin-list li .badge {
+  float: right; background: #e63946; color: #fff; border-radius: 10px;
+  padding: 1px 7px; font-size: 11px;
+}
+#admin-list li.active .badge { background: #fff; color: #e63946; }
+
+/* 도구 */
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
+.tool {
+  flex: 1 1 45%; padding: 8px 4px; font-size: 13px; cursor: pointer;
+  border: 1px solid #ccc; border-radius: 6px; background: #fff;
+}
+.tool.active { background: #2c7be5; color: #fff; border-color: #2c7be5; }
+#finish-area, #draw-hint { margin-top: 8px; }
+#finish-area { width: 100%; padding: 8px; cursor: pointer; border-radius: 6px;
+  border: 1px solid #2c7be5; background: #2c7be5; color: #fff; }
+
+/* 마크업 목록 항목 */
+#markup-list li { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+#markup-list li.resolved { opacity: 0.55; }
+#markup-list .mk-kind { font-weight: 600; }
+#markup-list .mk-status {
+  font-size: 11px; padding: 1px 6px; border-radius: 8px; cursor: pointer;
+  background: #e63946; color: #fff; flex-shrink: 0;
+}
+#markup-list li.resolved .mk-status { background: #2a9d8f; }
+
+/* 팝업 */
+.maplibregl-popup-content { font-size: 13px; max-width: 240px; }
+.popup-actions { margin-top: 8px; display: flex; gap: 6px; }
+.popup-actions button { font-size: 12px; padding: 4px 8px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; background: #fff; }

@@ -1,0 +1,109 @@
+# GIS 검수 인프라 — 본사(서울) 서버
+# 외부 노출은 web(nginx) 한 곳만(Funnel). db/minio는 Tailscale 망 바인딩, titiler/backend는 내부 전용.
+name: gis
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - /srv/gis/pgdata:/var/lib/postgresql/data
+    # 호스트 포트 노출 없음 — docker 내부망에서 backend만 접근.
+    # 대전 QGIS는 PostGIS에 직접 접속하지 않고 backend API(PUT /api/boundary 등) 경유.
+    networks: [gisnet]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - /srv/gis/minio:/data
+    # 호스트 포트 노출 없음 — 외부(대전 플러그인 boto3 업로드)는 nginx /s3/ 경유로만.
+    # titiler는 docker 내부망에서 직접 read. 콘솔(9001)은 docker exec mc 로 관리.
+    networks: [gisnet]
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  titiler:
+    image: ghcr.io/developmentseed/titiler:latest
+    restart: unless-stopped
+    environment:
+      # MinIO를 S3로 직접 read
+      AWS_S3_ENDPOINT: minio:9000
+      AWS_ACCESS_KEY_ID: ${S3_RO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_RO_SECRET_KEY}
+      AWS_VIRTUAL_HOSTING: "FALSE"
+      AWS_HTTPS: "NO"
+      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+      # COG 핸들러 권장 튜닝
+      CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.TIF,.tiff"
+      GDAL_HTTP_MULTIPLEX: "YES"
+      GDAL_HTTP_VERSION: "2"
+      VSI_CACHE: "TRUE"
+      VSI_CACHE_SIZE: "536870912"
+    # 내부 전용 — 호스트 포트 노출 없음. nginx가 /tiles/로 프록시.
+    # titiler:latest 이미지는 컨테이너 내부에서 80번을 listen.
+    expose:
+      - "80"
+    networks: [gisnet]
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  backend:
+    build: ../backend
+    restart: unless-stopped
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      REVIEW_PASSWORD: ${REVIEW_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
+      PLUGIN_TOKEN: ${PLUGIN_TOKEN}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_MIN: ${JWT_EXPIRES_MIN}
+      S3_BUCKET: ${S3_BUCKET}
+      TITILER_PREFIX: /tiles
+    # 내부 전용 — nginx가 /api/로 프록시. 호스트 포트 노출 없음.
+    expose:
+      - "8000"
+    networks: [gisnet]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: nginx:1.27
+    restart: unless-stopped
+    volumes:
+      # 디렉터리 마운트 — 단일 파일 마운트는 호스트측 편집(atomic rename) 시 inode가 끊김.
+      - /srv/gis/web/conf:/etc/nginx/conf.d:ro
+      - /srv/gis/web/html:/usr/share/nginx/html:ro
+    ports:
+      # 외부 노출되는 유일한 컨테이너. Funnel이 localhost로만 접근하므로 127.0.0.1 바인딩.
+      - "127.0.0.1:8080:80"
+    networks: [gisnet]
+    depends_on:
+      - backend
+      - titiler
+
+networks:
+  gisnet:
+    driver: bridge
