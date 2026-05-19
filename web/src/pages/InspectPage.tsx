@@ -12,6 +12,10 @@ import { listMarkup, createMarkup, applyMarkup, rejectMarkup } from '../api/mark
 import { getBoundary } from '../api/boundary';
 import { listAdmins } from '../api/admins';
 import { getCog } from '../api/cog';
+import {
+  getAdminOutline,
+  type AdminOutlineCollection,
+} from '../api/admin_outline';
 import { attachTool, type ActiveTool } from '../components/map/tools';
 import type {
   AdminUnit,
@@ -65,6 +69,7 @@ export default function InspectPage() {
   const [boundary, setBoundary] = useState<GjFeatureCollection | null>(null);
   const [items, setItems] = useState<Markup[]>([]);
   const [cog, setCog] = useState<CogInfo | null>(null);
+  const [adminOutline, setAdminOutline] = useState<AdminOutlineCollection | null>(null);
   const [loading, setLoading] = useState(false);
 
   // 필터 + 선택
@@ -75,7 +80,8 @@ export default function InspectPage() {
   });
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  // admin 선택 시 boundary + markup + cog 로드 (cog 는 미업로드 시 404 → null)
+  // admin 선택 시 boundary + markup + cog + admin_outline 로드
+  // (cog/admin_outline 은 미존재 시 404/400 → null)
   useEffect(() => {
     if (!admin) return;
     setLoading(true);
@@ -83,8 +89,9 @@ export default function InspectPage() {
       getBoundary(admin.adm_cd).catch(() => null),
       listMarkup(admin.adm_cd, 'all').catch(() => null),
       getCog(admin.adm_cd).catch(() => null),
+      getAdminOutline(admin.adm_cd).catch(() => null),
     ])
-      .then(([b, mk, c]) => {
+      .then(([b, mk, c, ao]) => {
         setBoundary(b);
         setItems(
           mk
@@ -92,6 +99,7 @@ export default function InspectPage() {
             : []
         );
         setCog(c);
+        setAdminOutline(ao);
       })
       .finally(() => setLoading(false));
   }, [admin]);
@@ -270,6 +278,7 @@ export default function InspectPage() {
             visible={visible}
             cogTileUrl={cog?.tile_url ?? null}
             cogBbox={cog?.bbox ?? null}
+            adminOutline={adminOutline}
             boundary={boundary}
             markup={markupFC}
             onMapReady={(h) => (mapHandleRef.current = h)}

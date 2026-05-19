@@ -6,10 +6,11 @@ import XYZ from 'ol/source/XYZ';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import GeoJSON from 'ol/format/GeoJSON';
-import { Style, Stroke, Fill, Circle as CircleStyle } from 'ol/style';
+import { Style, Stroke, Circle as CircleStyle, Fill } from 'ol/style';
 import { transformExtent } from 'ol/proj';
 import 'ol/ol.css';
 import type { GjFeatureCollection, MarkupCollection } from '../../types';
+import type { AdminOutlineCollection } from '../../api/admin_outline';
 
 const VWORLD_KEY =
   import.meta.env.VITE_VWORLD_KEY || '55A24471-C374-3A22-8652-6E8D55D53E08';
@@ -27,8 +28,9 @@ export type MapHandle = {
 type Props = {
   cogTileUrl?: string | null;        // COG 베이스 타일 URL 템플릿
   cogBbox?: [number, number, number, number] | null;  // [minLon,minLat,maxLon,maxLat] EPSG:4326
-  boundary?: GjFeatureCollection | null;  // 행정리경계
-  markup?: MarkupCollection | null;       // 수정요청 레이어
+  adminOutline?: AdminOutlineCollection | null;  // 선택 읍면 + 주변 buffer
+  boundary?: GjFeatureCollection | null;         // 행정리경계
+  markup?: MarkupCollection | null;              // 수정요청 레이어
   visible: LayerVisibility;
   onMapReady?: (handle: MapHandle) => void;
 };
@@ -42,6 +44,7 @@ const KOREA_EXTENT = transformExtent(
 export default function MapView({
   cogTileUrl,
   cogBbox,
+  adminOutline,
   boundary,
   markup,
   visible,
@@ -54,7 +57,8 @@ export default function MapView({
   const markupSrcRef = useRef<VectorSource | null>(null);
   const boundaryLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
   const markupLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
-  const adminLayerRef = useRef<TileLayer<XYZ> | null>(null);
+  const adminLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
+  const adminSrcRef = useRef<VectorSource | null>(null);
 
   // map init (once)
   useEffect(() => {
@@ -72,11 +76,22 @@ export default function MapView({
     const cog = new TileLayer<XYZ>({ visible: false, opacity: 0.9 });
     cogRef.current = cog;
 
-    // 행정읍면 라인(vworld WMTS 의 hybrid 라벨 대용 — 별도 admin overlay)
-    const admin = new TileLayer<XYZ>({
-      source: new XYZ({
-        url: `/vworld/req/wmts/1.0.0/${VWORLD_KEY}/Hybrid/{z}/{y}/{x}.png`,
-      }),
+    // 행정읍면 라인 — 저장소 SHP (bnd_adm_pg) 적재본 (admin_outline). 선택된 읍면 +
+    // 1km buffer 만 InspectPage 에서 fetch 해 prop 으로 내려준다.
+    // is_target=true 폴리곤은 strong, 이웃은 thin gray.
+    const adminSrc = new VectorSource();
+    adminSrcRef.current = adminSrc;
+    const admin = new VectorLayer({
+      source: adminSrc,
+      style: (feat) => {
+        const isTarget = feat.get('is_target') === true;
+        return new Style({
+          stroke: new Stroke({
+            color: isTarget ? '#111827' : '#6b7280',
+            width: isTarget ? 1.6 : 0.8,
+          }),
+        });
+      },
     });
     adminLayerRef.current = admin;
 
@@ -152,6 +167,20 @@ export default function MapView({
       l.setVisible(false);
     }
   }, [cogTileUrl, cogBbox, visible.cog, boundary]);
+
+  // adminOutline (선택 읍면 + buffer) 변경 시 source 교체.
+  useEffect(() => {
+    const src = adminSrcRef.current;
+    if (!src) return;
+    src.clear();
+    if (adminOutline && adminOutline.features?.length) {
+      const feats = new GeoJSON().readFeatures(adminOutline, {
+        dataProjection: 'EPSG:4326',
+        featureProjection: 'EPSG:3857',
+      });
+      src.addFeatures(feats);
+    }
+  }, [adminOutline]);
 
   // boundary 변경
   useEffect(() => {
