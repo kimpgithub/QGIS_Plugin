@@ -95,7 +95,9 @@ services:
     volumes:
       # 디렉터리 마운트 — 단일 파일 마운트는 호스트측 편집(atomic rename) 시 inode가 끊김.
       - /srv/gis/web/conf:/etc/nginx/conf.d:ro
-      - /srv/gis/web/html:/usr/share/nginx/html:ro
+      # 프론트엔드: 저장소 루트의 web/ (Vite+React+OpenLayers) 빌드 산출물.
+      # 빌드: cd /srv/gis-src/QGIS_Plugin/web && docker run --rm -v $PWD:/app -w /app node:20-alpine sh -c 'npm install && npm run build'
+      - /srv/gis-src/QGIS_Plugin/web/dist:/usr/share/nginx/html:ro
     ports:
       # 외부 노출되는 유일한 컨테이너. Funnel이 localhost로만 접근하므로 127.0.0.1 바인딩.
       - "127.0.0.1:8080:80"
