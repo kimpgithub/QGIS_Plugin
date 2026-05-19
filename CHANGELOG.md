@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-05-19 — Stage 6 외부 병합 폴더 입력 지원
+
+- 기존엔 공통입력 `프로젝트 폴더` 하위 `5_merged/` 만 인풋 가능 → 미리
+  생성해둔 병합본을 별도로 가리킬 수 있도록 Stage 6 탭에 두 PathRow 추가.
+  - **병합 폴더 직접 지정** (비우면 프로젝트/5_merged)
+  - **출력 폴더 직접 지정** (비우면 프로젝트/7_published)
+- 둘 다 채우면 공통입력의 프로젝트 폴더 없이도 실행됨
+  (`common.validate(need_proj=False)` 분기).
+- CLI 측은 기존 `--merged`/`--out` 인자 그대로 — 플러그인 UI 만 개선.
+
 ## 2026-05-19 — 검수 웹 (kostat_front) 통합 — `web/`
 
 - 행정리경계 검수용 React + Vite + OpenLayers 페이지를 같은 저장소

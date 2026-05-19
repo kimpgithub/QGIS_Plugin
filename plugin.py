@@ -148,14 +148,15 @@ class CommonInputs(QGroupBox):
         note.setWordWrap(True)
         v.addWidget(note)
 
-    def validate(self, need_pdf=True, need_scan=True, need_shp=True):
+    def validate(self, need_pdf=True, need_scan=True, need_shp=True,
+                 need_proj=True):
         if need_pdf and not self.pdf_input.text():
             raise ValueError('입력 PDF 폴더 지정 필요')
         if need_scan and not self.scan_input.text():
             raise ValueError('입력 스캔 폴더 지정 필요')
         if need_shp and not self.shp.text():
             raise ValueError('SHP 파일 지정 필요')
-        if not self.project_dir.text():
+        if need_proj and not self.project_dir.text():
             raise ValueError('프로젝트 폴더 지정 필요')
 
     def sub(self, name):
@@ -1042,22 +1043,55 @@ class Stage6Tab(StageTab):
         self.stage_module = stage6_publish
         super().__init__(common)
 
-    def io_summary(self):
+    def build_options(self):
+        """외부 병합 폴더 / 출력 폴더 override.
+
+        - 비워두면 공통입력의 프로젝트 폴더 하위(5_merged, 7_published) 를 사용
+        - 둘 다 지정하면 공통입력의 프로젝트 폴더 없이도 실행 가능
+        """
+        self.merged_override = PathRow(
+            '병합 폴더 직접 지정 (비우면 프로젝트/5_merged)', 'dir')
+        self.out_override = PathRow(
+            '출력 폴더 직접 지정 (비우면 프로젝트/7_published)', 'dir')
+        self.opt_layout.addRow(self.merged_override)
+        self.opt_layout.addRow(self.out_override)
+        self.merged_override.edit.textChanged.connect(self._update_io_label)
+        self.out_override.edit.textChanged.connect(self._update_io_label)
+
+    def _merged_dir(self):
+        ov = self.merged_override.text()
+        if ov:
+            return ov
         proj = self.common.project_dir.text()
-        return ([('Stage 4 병합 출력',
-                  self.common.sub(SUB_MERGED) if proj else ''),
+        return os.path.join(proj, SUB_MERGED) if proj else ''
+
+    def io_summary(self):
+        return ([('Stage 4 병합 출력', self._merged_dir()),
                  ('서버 설정',
                   'DB 작업 > 서버 연결 탭에서 저장한 URL/토큰/S3 키 사용')],
                 self.get_out_dir())
 
     def get_out_dir(self):
+        ov = self.out_override.text()
+        if ov:
+            return ov
         p = self.common.project_dir.text()
         return os.path.join(p, SUB_PUBLISHED) if p else ''
 
     def get_argv(self):
-        self.common.validate(need_pdf=False, need_scan=False, need_shp=False)
-        argv = ['--merged', self.common.sub(SUB_MERGED),
-                '--out', self.get_out_dir()]
+        # 병합/출력 둘 다 override 면 project_dir 불필요
+        need_proj = not (self.merged_override.text() and self.out_override.text())
+        self.common.validate(need_pdf=False, need_scan=False, need_shp=False,
+                             need_proj=need_proj)
+        merged = self._merged_dir()
+        if not merged:
+            raise ValueError('병합 폴더가 비어 있음 — 직접 지정하거나 '
+                             '프로젝트 폴더를 입력하세요')
+        out = self.get_out_dir()
+        if not out:
+            raise ValueError('출력 폴더가 비어 있음 — 직접 지정하거나 '
+                             '프로젝트 폴더를 입력하세요')
+        argv = ['--merged', merged, '--out', out]
         shp = self.common.shp.text().strip()
         if shp:
             argv += ['--shp', shp]
