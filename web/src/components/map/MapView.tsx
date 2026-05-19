@@ -59,6 +59,7 @@ export default function MapView({
   const markupLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
   const adminLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
   const adminSrcRef = useRef<VectorSource | null>(null);
+  const cogBboxRef = useRef<[number, number, number, number] | null>(null);
 
   // map init (once)
   useEffect(() => {
@@ -130,12 +131,21 @@ export default function MapView({
     const handle: MapHandle = {
       getMap: () => mapRef.current,
       fitToBoundary: () => {
-        const src = boundarySrcRef.current;
         const m = mapRef.current;
-        if (!src || !m) return;
-        const ext = src.getExtent();
-        if (!ext || !isFinite(ext[0])) return;
-        m.getView().fit(ext, { padding: [40, 40, 40, 40], duration: 400 });
+        if (!m) return;
+        const opts = { padding: [40, 40, 40, 40], duration: 400 };
+        const src = boundarySrcRef.current;
+        const bExt = src?.getExtent();
+        if (bExt && isFinite(bExt[0])) {
+          m.getView().fit(bExt, opts);
+          return;
+        }
+        // fallback: COG bbox
+        const bb = cogBboxRef.current;
+        if (bb) {
+          const cExt = transformExtent(bb, 'EPSG:4326', 'EPSG:3857');
+          if (isFinite(cExt[0])) m.getView().fit(cExt, opts);
+        }
       },
     };
     onMapReady?.(handle);
@@ -149,8 +159,10 @@ export default function MapView({
   }, []);
 
   // COG URL 변경 시 source 교체 + 가시성. bbox 가 있고 boundary 가 비어있으면
-  // COG 범위로 fit (boundary 가 있으면 그쪽 useEffect 가 우선 fit).
+  // COG 범위로 fit (boundary 가 있으면 그쪽 useEffect 가 우선 fit). bbox 는 ref 에도
+  // 보관 — '범위 맞춤' 버튼이 boundary 없을 때 fallback 으로 사용.
   useEffect(() => {
+    cogBboxRef.current = cogBbox ?? null;
     const l = cogRef.current;
     if (!l) return;
     if (cogTileUrl) {
