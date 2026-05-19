@@ -1,29 +1,30 @@
 """
-검수 웹 API — FastAPI
-인증 2종:
-  - require_review : 발주자 웹 (공유 비밀번호 → HMAC 서명 쿠키)
-  - require_plugin : 대전 QGIS 플러그인 (Bearer 토큰 1개)
-  - require_any    : 둘 중 하나 (데이터 GET 엔드포인트)
-데이터 흐름: 대전↔서버는 전부 Funnel HTTPS 경유. 좌표계 DB=EPSG:5179.
-빈 DB에서도 에러 없이 동작.
+GIS 검수 API — FastAPI.
+
+인증: 단일 Bearer 헤더.
+  - 값이 PLUGIN_TOKEN 과 일치 → plugin (대전 QGIS): 전국 접근, write 권한
+  - 그 외: JWT 디코드 시도 (HS256). payload.sub=admin_cd, payload.role=normal|master
+    normal 은 본인 adm_cd 만, master 는 전국 접근
+
+좌표계: DB=EPSG:5179, API=EPSG:4326. 빈 DB 에서도 에러 없이 동작.
+프론트엔드 contract: web/src/api/*.ts, web/src/types/index.ts.
 """
-import base64
-import hashlib
-import hmac
+import hmac as _hmac
 import json
 import os
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from passlib.context import CryptContext
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
-
-from . import web as web_router
 
 # ---------------------------------------------------------------- config
 DB_HOST = os.environ.get("DB_HOST", "db")
@@ -31,15 +32,16 @@ DB_PORT = os.environ.get("DB_PORT", "5432")
 DB_USER = os.environ["POSTGRES_USER"]
 DB_PASS = os.environ["POSTGRES_PASSWORD"]
 DB_NAME = os.environ["POSTGRES_DB"]
-REVIEW_PASSWORD = os.environ["REVIEW_PASSWORD"]
-SESSION_SECRET = os.environ["SESSION_SECRET"].encode()
 PLUGIN_TOKEN = os.environ["PLUGIN_TOKEN"]
+JWT_SECRET = os.environ["JWT_SECRET"]
+JWT_EXPIRES_MIN = int(os.environ.get("JWT_EXPIRES_MIN", "480"))
+JWT_ALGO = "HS256"
 S3_BUCKET = os.environ.get("S3_BUCKET", "gis-scan")
 TITILER_PREFIX = os.environ.get("TITILER_PREFIX", "/tiles")
-SESSION_MAX_AGE = 7 * 24 * 3600  # 7일
 
 CONNINFO = f"host={DB_HOST} port={DB_PORT} user={DB_USER} password={DB_PASS} dbname={DB_NAME}"
-
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+bearer = HTTPBearer(auto_error=False)
 pool: ConnectionPool | None = None
 
 
@@ -48,17 +50,11 @@ async def lifespan(app: FastAPI):
     global pool
     pool = ConnectionPool(CONNINFO, min_size=1, max_size=8, kwargs={"row_factory": dict_row})
     pool.wait(timeout=30)
-    web_router.init(pool)
     yield
     pool.close()
 
 
 app = FastAPI(title="GIS 검수 API", lifespan=lifespan)
-app.include_router(web_router.router)
-
-# CORS — OpenLayers 프론트 로컬 개발 지원.
-# allow_credentials=True 와 allow_origins=["*"] 는 양립 불가하므로
-# localhost / 127.0.0.1 의 모든 포트를 정규식으로 허용. 운영 단계 축소는 추후.
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
@@ -68,75 +64,7 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------- auth
-def _sign(msg: str) -> str:
-    return hmac.new(SESSION_SECRET, msg.encode(), hashlib.sha256).hexdigest()
-
-
-def make_token() -> str:
-    ts = str(int(time.time()))
-    return f"{ts}.{_sign(ts)}"
-
-
-def verify_token(token: str | None) -> bool:
-    if not token or "." not in token:
-        return False
-    ts, sig = token.split(".", 1)
-    if not hmac.compare_digest(sig, _sign(ts)):
-        return False
-    try:
-        return (time.time() - int(ts)) < SESSION_MAX_AGE
-    except ValueError:
-        return False
-
-
-def is_plugin(authorization: str | None) -> bool:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return False
-    return hmac.compare_digest(authorization[7:].strip(), PLUGIN_TOKEN)
-
-
-def require_review(gis_session: str | None = Cookie(default=None)):
-    """발주자 웹 전용."""
-    if not verify_token(gis_session):
-        raise HTTPException(status_code=401, detail="인증이 필요합니다")
-    return "reviewer"
-
-
-def require_plugin(authorization: str | None = Header(default=None)):
-    """대전 플러그인 전용 (Bearer 토큰)."""
-    if not is_plugin(authorization):
-        raise HTTPException(status_code=401, detail="플러그인 토큰이 필요합니다")
-    return "plugin"
-
-
-def require_any(
-    gis_session: str | None = Cookie(default=None),
-    authorization: str | None = Header(default=None),
-):
-    """발주자 쿠키 또는 플러그인 Bearer 둘 중 하나."""
-    if verify_token(gis_session):
-        return "reviewer"
-    if is_plugin(authorization):
-        return "plugin"
-    raise HTTPException(status_code=401, detail="인증이 필요합니다")
-
-
-# ---------------------------------------------------------------- models
-class LoginBody(BaseModel):
-    password: str
-
-
-class CogRegister(BaseModel):
-    adm_cd: str
-    s3_key: str
-    bounds: dict | list           # GeoJSON Polygon 또는 [minx,miny,maxx,maxy]
-    width: int | None = None
-    height: int | None = None
-    srid: int = 5179              # bounds 좌표계 (COG는 보통 5179)
-
-
-# ---------------------------------------------------------------- db helpers
+# ---------------------------------------------------------------- db
 def fetchone(sql: str, params=()):
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
@@ -158,7 +86,67 @@ def execute(sql: str, params=()):
         return row
 
 
-# ---------------------------------------------------------------- routes: auth
+# ---------------------------------------------------------------- auth
+def get_user(creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> dict:
+    """Bearer 토큰 검사. plugin/normal/master 중 하나로 식별."""
+    if not creds or creds.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Bearer 토큰이 필요합니다")
+    tok = creds.credentials
+    if _hmac.compare_digest(tok, PLUGIN_TOKEN):
+        return {"role": "plugin", "admin_cd": None}
+    try:
+        payload = jwt.decode(tok, JWT_SECRET, algorithms=[JWT_ALGO])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="토큰이 만료되었습니다") from None
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="토큰이 유효하지 않습니다") from None
+    role = payload.get("role")
+    if role not in ("normal", "master"):
+        raise HTTPException(status_code=401, detail="토큰 페이로드가 유효하지 않습니다")
+    return {"role": role, "admin_cd": payload.get("sub")}
+
+
+def require_plugin(user: dict = Depends(get_user)) -> dict:
+    if user["role"] != "plugin":
+        raise HTTPException(status_code=403, detail="플러그인 권한이 필요합니다")
+    return user
+
+
+def check_admin_access(user: dict, adm_cd: str):
+    """plugin/master 는 전국 허용, normal 은 본인 adm_cd 만."""
+    if user["role"] in ("plugin", "master"):
+        return
+    if user["admin_cd"] != adm_cd:
+        raise HTTPException(status_code=403, detail="본인 adm_cd 외 접근 불가")
+
+
+# ---------------------------------------------------------------- models
+class LoginBody(BaseModel):
+    id: str
+    password: str
+
+
+class MarkupCreate(BaseModel):
+    adm_cd: str
+    kind: str
+    geometry: dict
+    attrs: dict | None = None
+
+
+class RejectBody(BaseModel):
+    reason: str
+
+
+class CogRegister(BaseModel):
+    adm_cd: str
+    s3_key: str
+    bounds: dict | list           # GeoJSON Polygon 또는 [minx,miny,maxx,maxy]
+    width: int | None = None
+    height: int | None = None
+    srid: int = 5179
+
+
+# ---------------------------------------------------------------- health
 @app.get("/api/health")
 def health():
     try:
@@ -168,51 +156,70 @@ def health():
         return JSONResponse(status_code=503, content={"status": "degraded", "db": str(e)})
 
 
+# ---------------------------------------------------------------- login
 @app.post("/api/login")
-def login(body: LoginBody, response: Response):
-    if not hmac.compare_digest(body.password, REVIEW_PASSWORD):
-        raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다")
-    response.set_cookie(
-        "gis_session", make_token(),
-        max_age=SESSION_MAX_AGE, httponly=True, samesite="lax",
+def login(body: LoginBody, request: Request):
+    row = fetchone(
+        "SELECT admin_cd, password_hash, role FROM auth WHERE admin_cd = %s",
+        (body.id,),
     )
-    return {"ok": True}
+    ok = False
+    if row:
+        try:
+            ok = pwd_ctx.verify(body.password, row["password_hash"])
+        except Exception:  # noqa: BLE001
+            ok = False
+    else:
+        pwd_ctx.dummy_verify()
+    fwd = request.headers.get("x-forwarded-for")
+    ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None)
+    ua = request.headers.get("user-agent")
+    try:
+        execute(
+            "INSERT INTO login_log (admin_cd, ip, user_agent) VALUES (%s, %s, %s)",
+            (body.id[:8], ip, ua),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    if not ok:
+        raise HTTPException(status_code=401, detail="ID 또는 비밀번호가 올바르지 않습니다")
+    admin_cd = row["admin_cd"].strip()
+    db_role = row["role"]                                    # normal | master
+    fe_role = "master" if db_role == "master" else "user"    # 프론트 UserRole
+    now = int(time.time())
+    token = jwt.encode(
+        {"sub": admin_cd, "role": db_role, "iat": now, "exp": now + JWT_EXPIRES_MIN * 60},
+        JWT_SECRET, algorithm=JWT_ALGO,
+    )
+    user_obj: dict = {"id": admin_cd, "role": fe_role}
+    if db_role != "master":
+        node = fetchone("SELECT adm_nm FROM admin_node WHERE adm_cd = %s", (admin_cd,))
+        user_obj["adm_cd"] = admin_cd
+        user_obj["adm_nm"] = node["adm_nm"] if node else None
+    return {"token": token, "user": user_obj}
 
 
-@app.post("/api/logout")
-def logout(response: Response):
-    response.delete_cookie("gis_session")
-    return {"ok": True}
-
-
-@app.get("/api/me")
-def me(gis_session: str | None = Cookie(default=None)):
-    return {"authenticated": verify_token(gis_session)}
-
-
-# ---------------------------------------------------------------- routes: read (web + plugin)
+# ---------------------------------------------------------------- admins
 @app.get("/api/admins")
-def list_admins(_: str = Depends(require_any)):
-    """cog_catalog 기반 검수 대상 admin 목록. 빈 카탈로그면 []."""
+def list_admins(_: dict = Depends(get_user)):
+    """admin_node 의 행정읍면 목록 (AdminUnit[])."""
     rows = fetchall(
         """
-        SELECT c.adm_cd, b.adm_nm, c.s3_key, c.width, c.height, c.published_at,
-               ST_AsGeoJSON(ST_Transform(c.bounds, 4326))::json AS bounds_geojson,
-               (SELECT count(*) FROM review_markup m
-                  WHERE m.adm_cd = c.adm_cd AND m.status = 'pending') AS open_markups
-        FROM cog_catalog c
-        LEFT JOIN LATERAL (
-            SELECT adm_nm FROM boundary WHERE adm_cd = c.adm_cd LIMIT 1
-        ) b ON true
-        ORDER BY c.adm_cd
+        SELECT adm_cd, adm_nm,
+               sgg_cd AS sigungu_cd, sgg_nm AS sigungu_nm,
+               sido_cd, sido_nm
+        FROM admin_node
+        ORDER BY sido_cd, sgg_cd, adm_cd
         """
     )
-    return {"admins": rows}
+    return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]
 
 
+# ---------------------------------------------------------------- boundary
 @app.get("/api/boundary")
-def get_boundary(adm_cd: str, _: str = Depends(require_any)):
-    """해당 admin 경계 → GeoJSON FeatureCollection (EPSG:4326). 없으면 빈 FC."""
+def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
+    """해당 admin 행정리 경계 → GeoJSON FC (EPSG:4326). 없으면 빈 FC."""
+    check_admin_access(user, adm_cd)
     row = fetchone(
         """
         SELECT json_build_object(
@@ -233,83 +240,13 @@ def get_boundary(adm_cd: str, _: str = Depends(require_any)):
     return row["fc"]
 
 
-@app.get("/api/cog/{adm_cd}")
-def get_cog(adm_cd: str, _: str = Depends(require_any)):
-    """cog_catalog의 s3_key + titiler 타일 URL 템플릿."""
-    row = fetchone(
-        """
-        SELECT adm_cd, s3_key, width, height, published_at,
-               ST_AsGeoJSON(ST_Transform(bounds, 4326))::json AS bounds_geojson,
-               Box2D(ST_Transform(bounds, 4326))::text AS bbox_text
-        FROM cog_catalog WHERE adm_cd = %s
-        """,
-        (adm_cd,),
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="해당 admin의 COG가 아직 없습니다")
-
-    s3_url = f"s3://{S3_BUCKET}/{row['s3_key']}"
-    enc = quote(s3_url, safe="")
-    bbox = None
-    bt = row.get("bbox_text")
-    if bt and bt.startswith("BOX("):
-        bbox = [float(x) for x in bt[4:-1].replace(",", " ").split()]
-    return {
-        "adm_cd": row["adm_cd"], "s3_key": row["s3_key"], "s3_url": s3_url,
-        "width": row["width"], "height": row["height"],
-        "published_at": row["published_at"], "bounds_geojson": row["bounds_geojson"],
-        "bbox": bbox,
-        "tile_url": f"{TITILER_PREFIX}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?url={enc}",
-        "tilejson_url": f"{TITILER_PREFIX}/cog/WebMercatorQuad/tilejson.json?url={enc}",
-    }
-
-
-@app.get("/api/markup")
-def get_markup(adm_cd: str | None = None, _: str = Depends(require_any)):
-    """마크업 GeoJSON FeatureCollection (EPSG:4326). 대전 플러그인의 마크업 회수용.
-    신규 스키마: kind add/delete/attr, status pending/applied/rejected, attrs JSONB.
-    플러그인은 보통 status='applied' 만 회수해 PostGIS 본체에 반영."""
-    where, params = "", ()
-    if adm_cd:
-        where, params = "WHERE adm_cd = %s", (adm_cd,)
-    row = fetchone(
-        f"""
-        SELECT json_build_object(
-          'type', 'FeatureCollection',
-          'features', COALESCE(json_agg(json_build_object(
-            'type', 'Feature', 'id', id,
-            'geometry', ST_AsGeoJSON(ST_Transform(geom, 4326))::json,
-            'properties', json_build_object(
-              'id', id, 'kind', kind, 'attrs', attrs,
-              'adm_cd', adm_cd, 'status', status,
-              'reject_reason', reject_reason,
-              'created_by', created_by, 'created_at', created_at,
-              'applied_at', applied_at, 'rejected_at', rejected_at)
-          )) FILTER (WHERE id IS NOT NULL), '[]'::json)
-        ) AS fc
-        FROM review_markup {where}
-        """,
-        params,
-    )
-    return row["fc"]
-
-
-# 구 POST /api/markup, PATCH /api/markup/{id} 제거 (2026-05-18).
-# 검수자 측 마크업 CRUD 는 /web/markup 으로 이관. 플러그인측 신규 PATCH 가 필요해지면
-# /api/markup/{id} (Bearer) 로 신규 스키마 기반 재신설 예정.
-
-
-# ---------------------------------------------------------------- routes: plugin write
 @app.put("/api/boundary")
-def upsert_boundary(body: dict, srid: int = 4326, _: str = Depends(require_plugin)):
-    """대전 플러그인이 보낸 GeoJSON FeatureCollection을 boundary 테이블에 upsert.
-    키: adm_cd + ri_cd. 입력 좌표계는 ?srid= 로 지정 (4326 기본, 5179 허용).
-    geometry는 Polygon/MultiPolygon 모두 허용 → MultiPolygon으로 강제."""
+def upsert_boundary(body: dict, srid: int = 4326, _: dict = Depends(require_plugin)):
+    """플러그인 전용 — GeoJSON FC 를 boundary 테이블에 upsert (adm_cd+ri_cd 키)."""
     if srid not in (4326, 5179):
         raise HTTPException(status_code=400, detail="srid는 4326 또는 5179만 허용")
     if body.get("type") != "FeatureCollection" or not isinstance(body.get("features"), list):
         raise HTTPException(status_code=400, detail="GeoJSON FeatureCollection이 필요합니다")
-
     inserted = updated = 0
     with pool.connection() as conn:
         with conn.cursor() as cur:
@@ -324,7 +261,6 @@ def upsert_boundary(body: dict, srid: int = 4326, _: str = Depends(require_plugi
                 ri_cd = props.get("ri_cd")
                 params_geom = (json.dumps(geom), srid)
                 geom_sql = "ST_Multi(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(%s), %s), 5179))"
-                # UPDATE 시도 (ri_cd NULL 도 매칭)
                 cur.execute(
                     f"""
                     UPDATE boundary
@@ -353,13 +289,47 @@ def upsert_boundary(body: dict, srid: int = 4326, _: str = Depends(require_plugi
                     )
                     inserted += 1
         conn.commit()
-    return {"ok": True, "inserted": inserted, "updated": updated,
+    return {"affected": inserted + updated, "inserted": inserted, "updated": updated,
             "features": len(body["features"])}
 
 
+# ---------------------------------------------------------------- cog
+@app.get("/api/cog/{adm_cd}")
+def get_cog(adm_cd: str, user: dict = Depends(get_user)):
+    """cog_catalog 의 s3_key + titiler 타일 URL 템플릿."""
+    if len(adm_cd) != 8:
+        raise HTTPException(status_code=400, detail="adm_cd는 8자")
+    check_admin_access(user, adm_cd)
+    row = fetchone(
+        """
+        SELECT adm_cd, s3_key, width, height, published_at,
+               ST_AsGeoJSON(ST_Transform(bounds, 4326))::json AS bounds_geojson,
+               Box2D(ST_Transform(bounds, 4326))::text AS bbox_text
+        FROM cog_catalog WHERE adm_cd = %s
+        """,
+        (adm_cd,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="해당 admin의 COG가 아직 없습니다")
+    s3_url = f"s3://{S3_BUCKET}/{row['s3_key']}"
+    enc = quote(s3_url, safe="")
+    bbox = None
+    bt = row.get("bbox_text")
+    if bt and bt.startswith("BOX("):
+        bbox = [float(x) for x in bt[4:-1].replace(",", " ").split()]
+    return {
+        "adm_cd": row["adm_cd"].strip(), "s3_key": row["s3_key"], "s3_url": s3_url,
+        "width": row["width"], "height": row["height"],
+        "published_at": row["published_at"], "bounds_geojson": row["bounds_geojson"],
+        "bbox": bbox,
+        "tile_url": f"{TITILER_PREFIX}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?url={enc}",
+        "tilejson_url": f"{TITILER_PREFIX}/cog/WebMercatorQuad/tilejson.json?url={enc}",
+    }
+
+
 @app.post("/api/cog")
-def register_cog(body: CogRegister, _: str = Depends(require_plugin)):
-    """플러그인이 COG 업로드(S3) 후 호출 → cog_catalog 등록/갱신 (adm_cd PK upsert)."""
+def register_cog(body: CogRegister, _: dict = Depends(require_plugin)):
+    """플러그인 전용 — COG S3 업로드 후 cog_catalog 등록 (adm_cd PK upsert)."""
     if body.srid not in (4326, 5179):
         raise HTTPException(status_code=400, detail="srid는 4326 또는 5179만 허용")
     if isinstance(body.bounds, list):
@@ -383,3 +353,120 @@ def register_cog(body: CogRegister, _: str = Depends(require_plugin)):
         (body.adm_cd, body.s3_key, *bparams, body.width, body.height),
     )
     return {"ok": True, **row}
+
+
+# ---------------------------------------------------------------- markup
+_KIND_GEOM = {
+    "add":         ("LineString",),
+    "delete":      ("LineString",),
+    "attr":        ("Point",),
+    "delete_mark": ("Point",),
+}
+
+
+@app.get("/api/markup")
+def list_markup(
+    adm_cd: str | None = None,
+    status: str | None = None,
+    user: dict = Depends(get_user),
+):
+    """수정요청 GeoJSON FC. adm_cd 지정 시 role 검증."""
+    if adm_cd:
+        check_admin_access(user, adm_cd)
+    conds: list[str] = []
+    params: list = []
+    if adm_cd:
+        conds.append("adm_cd = %s")
+        params.append(adm_cd)
+    if status:
+        if status not in ("pending", "applied", "rejected"):
+            raise HTTPException(status_code=400, detail="status는 pending/applied/rejected 중 하나")
+        conds.append("status = %s")
+        params.append(status)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    row = fetchone(
+        f"""
+        SELECT json_build_object(
+          'type', 'FeatureCollection',
+          'features', COALESCE(json_agg(json_build_object(
+            'type', 'Feature', 'id', id,
+            'geometry', ST_AsGeoJSON(ST_Transform(geom, 4326))::json,
+            'properties', json_build_object(
+              'id', id, 'kind', kind, 'attrs', attrs,
+              'adm_cd', adm_cd, 'status', status,
+              'reject_reason', reject_reason,
+              'created_by', created_by, 'created_at', created_at,
+              'applied_at', applied_at, 'rejected_at', rejected_at)
+          )) FILTER (WHERE id IS NOT NULL), '[]'::json)
+        ) AS fc
+        FROM review_markup {where}
+        """,
+        tuple(params),
+    )
+    return row["fc"]
+
+
+@app.post("/api/markup", status_code=201)
+def create_markup(body: MarkupCreate, user: dict = Depends(get_user)):
+    if len(body.adm_cd) != 8:
+        raise HTTPException(status_code=400, detail="adm_cd는 8자")
+    check_admin_access(user, body.adm_cd)
+    if body.kind not in _KIND_GEOM:
+        raise HTTPException(status_code=400, detail="kind는 add/delete/attr/delete_mark 중 하나")
+    gtype = body.geometry.get("type")
+    if gtype not in _KIND_GEOM[body.kind]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind={body.kind} 는 geometry type {_KIND_GEOM[body.kind]} 만 허용",
+        )
+    creator = user["admin_cd"] or "plugin"
+    row = execute(
+        """
+        INSERT INTO review_markup (adm_cd, kind, geom, attrs, created_by)
+        VALUES (%s, %s,
+                ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), 5179),
+                %s::jsonb, %s)
+        RETURNING id
+        """,
+        (body.adm_cd, body.kind, json.dumps(body.geometry),
+         json.dumps(body.attrs) if body.attrs is not None else None,
+         creator),
+    )
+    return {"id": row["id"]}
+
+
+@app.patch("/api/markup/{markup_id}/apply")
+def apply_markup(markup_id: int, user: dict = Depends(get_user)):
+    cur = fetchone("SELECT adm_cd FROM review_markup WHERE id = %s", (markup_id,))
+    if not cur:
+        raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
+    check_admin_access(user, cur["adm_cd"].strip())
+    execute(
+        """
+        UPDATE review_markup
+           SET status = 'applied', applied_at = now(), reject_reason = NULL
+         WHERE id = %s
+        """,
+        (markup_id,),
+    )
+    return Response(status_code=204)
+
+
+@app.patch("/api/markup/{markup_id}/reject")
+def reject_markup(markup_id: int, body: RejectBody, user: dict = Depends(get_user)):
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(status_code=400, detail="reason 필수")
+    cur = fetchone("SELECT adm_cd FROM review_markup WHERE id = %s", (markup_id,))
+    if not cur:
+        raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
+    check_admin_access(user, cur["adm_cd"].strip())
+    execute(
+        """
+        UPDATE review_markup
+           SET status = 'rejected', rejected_at = now(),
+               reject_reason = %s
+         WHERE id = %s
+        """,
+        (body.reason.strip(), markup_id),
+    )
+    return Response(status_code=204)
