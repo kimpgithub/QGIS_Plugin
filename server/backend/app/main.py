@@ -202,14 +202,17 @@ def login(body: LoginBody, request: Request):
 # ---------------------------------------------------------------- admins
 @app.get("/api/admins")
 def list_admins(_: dict = Depends(get_user)):
-    """admin_node 의 행정읍면 목록 (AdminUnit[])."""
+    """COG 가 업로드된 admin 만 (AdminUnit[]).
+    admin_node ⨯ cog_catalog INNER JOIN — picker 에 검수 대상만 노출.
+    플러그인의 /api/admins 연결 테스트는 list length 만 보므로 호환."""
     rows = fetchall(
         """
-        SELECT adm_cd, adm_nm,
-               sgg_cd AS sigungu_cd, sgg_nm AS sigungu_nm,
-               sido_cd, sido_nm
-        FROM admin_node
-        ORDER BY sido_cd, sgg_cd, adm_cd
+        SELECT n.adm_cd, n.adm_nm,
+               n.sgg_cd AS sigungu_cd, n.sgg_nm AS sigungu_nm,
+               n.sido_cd, n.sido_nm
+        FROM admin_node n
+        JOIN cog_catalog c ON c.adm_cd = n.adm_cd
+        ORDER BY n.sido_cd, n.sgg_cd, n.adm_cd
         """
     )
     return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]
