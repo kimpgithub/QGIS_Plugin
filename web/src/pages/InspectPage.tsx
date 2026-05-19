@@ -11,9 +11,15 @@ import AdminPickerModal from '../components/modal/AdminPickerModal';
 import { listMarkup, createMarkup, applyMarkup, rejectMarkup } from '../api/markup';
 import { getBoundary } from '../api/boundary';
 import { listAdmins } from '../api/admins';
+import { getCog } from '../api/cog';
+import {
+  getAdminOutline,
+  type AdminOutlineCollection,
+} from '../api/admin_outline';
 import { attachTool, type ActiveTool } from '../components/map/tools';
 import type {
   AdminUnit,
+  CogInfo,
   GjFeatureCollection,
   GjGeometry,
   Markup,
@@ -62,6 +68,8 @@ export default function InspectPage() {
   // 데이터
   const [boundary, setBoundary] = useState<GjFeatureCollection | null>(null);
   const [items, setItems] = useState<Markup[]>([]);
+  const [cog, setCog] = useState<CogInfo | null>(null);
+  const [adminOutline, setAdminOutline] = useState<AdminOutlineCollection | null>(null);
   const [loading, setLoading] = useState(false);
 
   // 필터 + 선택
@@ -72,34 +80,42 @@ export default function InspectPage() {
   });
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
-  // admin 선택 시 boundary + markup 로드
+  // admin 선택 시 boundary + markup + cog + admin_outline 로드
+  // (cog/admin_outline 은 미존재 시 404/400 → null)
   useEffect(() => {
     if (!admin) return;
     setLoading(true);
     Promise.all([
       getBoundary(admin.adm_cd).catch(() => null),
       listMarkup(admin.adm_cd, 'all').catch(() => null),
+      getCog(admin.adm_cd).catch(() => null),
+      getAdminOutline(admin.adm_cd).catch(() => null),
     ])
-      .then(([b, mk]) => {
+      .then(([b, mk, c, ao]) => {
         setBoundary(b);
         setItems(
           mk
             ? mk.features.map((f) => ({ ...f.properties, geometry: f.geometry }))
             : []
         );
+        setCog(c);
+        setAdminOutline(ao);
       })
       .finally(() => setLoading(false));
   }, [admin]);
 
-  // markup 을 FC 형태로 MapView 에 전달
+  // markup 을 FC 형태로 MapView 에 전달.
+  // properties 에 geometry 가 들어있으면 ol/format/GeoJSON.readFeatures 가
+  // setProperties 단계에서 OL Geometry slot 을 raw GeoJSON 으로 덮어써
+  // 다음 addFeaturesInternal 에서 getExtent is not a function 으로 터짐.
   const markupFC = useMemo<MarkupCollection | null>(() => {
     if (!items.length) return null;
     return {
       type: 'FeatureCollection',
-      features: items.map((m) => ({
+      features: items.map(({ geometry, ...rest }) => ({
         type: 'Feature',
-        geometry: m.geometry,
-        properties: m,
+        geometry,
+        properties: rest,
       })),
     };
   }, [items]);
@@ -260,7 +276,9 @@ export default function InspectPage() {
         <div style={styles.mapWrap}>
           <MapView
             visible={visible}
-            cogTileUrl={null /* TODO: COG tile URL 연결 */}
+            cogTileUrl={cog?.tile_url ?? null}
+            cogBbox={cog?.bbox ?? null}
+            adminOutline={adminOutline}
             boundary={boundary}
             markup={markupFC}
             onMapReady={(h) => (mapHandleRef.current = h)}

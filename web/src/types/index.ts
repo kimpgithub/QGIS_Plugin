@@ -62,8 +62,12 @@ export type Markup = {
   reject_reason?: string | null;
 };
 
-// 서버 응답: GeoJSON FeatureCollection (properties = Markup)
-export type MarkupCollection = GjFeatureCollection<Markup>;
+// 서버 응답: GeoJSON FeatureCollection.
+// properties 에 geometry 가 같이 들어있으면 ol/format/GeoJSON 가
+// setProperties 단계에서 OL Geometry slot 을 raw GeoJSON 으로 덮어쓰므로
+// 반드시 Omit. geometry 는 Feature 의 top-level slot 에만 둔다.
+export type MarkupProps = Omit<Markup, 'geometry'>;
+export type MarkupCollection = GjFeatureCollection<MarkupProps>;
 
 // 새 마크업 등록 payload
 export type MarkupCreate = {
@@ -71,4 +75,18 @@ export type MarkupCreate = {
   kind: MarkupKind;
   geometry: GjGeometry;
   attrs?: Markup['attrs'];
+};
+
+// /api/cog/{adm_cd} 응답
+export type CogInfo = {
+  adm_cd: string;
+  s3_key: string;
+  s3_url: string;
+  width: number;
+  height: number;
+  published_at: string;
+  bounds_geojson: GjGeometry | null;
+  bbox: [number, number, number, number] | null;   // [minLon, minLat, maxLon, maxLat] in EPSG:4326
+  tile_url: string;                                  // {z}/{x}/{y} 템플릿 (same-origin /tiles/...)
+  tilejson_url: string;
 };
