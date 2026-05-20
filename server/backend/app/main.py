@@ -308,6 +308,37 @@ def upsert_boundary(body: dict, srid: int = 4326, _: dict = Depends(require_plug
         raise HTTPException(status_code=400, detail="srid는 4326 또는 5179만 허용")
     if body.get("type") != "FeatureCollection" or not isinstance(body.get("features"), list):
         raise HTTPException(status_code=400, detail="GeoJSON FeatureCollection이 필요합니다")
+
+    def _norm_ri(props: dict):
+        """빈 문자열/공백 ri_cd 를 None 으로 정규화 ('' 와 NULL 동일 취급)."""
+        v = props.get("ri_cd")
+        return (str(v).strip() or None) if v is not None else None
+
+    # 충돌 사전 검사 — upsert 키 (adm_cd, ri_cd) 가 payload 안에서 중복되면 같은
+    # 행을 서로 덮어써 폴리곤이 소실된다(한 admin 에 ri_cd 누락이 여러 건일 때
+    # 특히 위험: 전부 (adm_cd, NULL) 한 키로 뭉개짐). 조용히 잃지 말고 거부한다.
+    seen: set = set()
+    dups: set = set()
+    for feat in body["features"]:
+        if not feat.get("geometry"):
+            continue
+        props = feat.get("properties") or {}
+        adm_cd = props.get("adm_cd")
+        if not adm_cd:
+            raise HTTPException(status_code=400, detail="각 feature는 properties.adm_cd 필요")
+        key = (adm_cd, _norm_ri(props))
+        if key in seen:
+            dups.add(adm_cd)
+        seen.add(key)
+    if dups:
+        sample = ", ".join(sorted(dups)[:10])
+        raise HTTPException(
+            status_code=400,
+            detail=(f"(adm_cd, ri_cd) 키가 중복됩니다 — ri_cd 누락/중복 시 폴리곤이 "
+                    f"서로 덮어써져 소실됩니다. 각 폴리곤에 admin 내 유일한 ri_cd 를 "
+                    f"부여하세요. 해당 adm_cd({len(dups)}개): {sample}"),
+        )
+
     inserted = updated = 0
     with pool.connection() as conn:
         with conn.cursor() as cur:
@@ -319,7 +350,7 @@ def upsert_boundary(body: dict, srid: int = 4326, _: dict = Depends(require_plug
                 adm_cd = props.get("adm_cd")
                 if not adm_cd:
                     raise HTTPException(status_code=400, detail="각 feature는 properties.adm_cd 필요")
-                ri_cd = props.get("ri_cd")
+                ri_cd = _norm_ri(props)
                 params_geom = (json.dumps(geom), srid)
                 geom_sql = "ST_Multi(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(%s), %s), 5179))"
                 cur.execute(

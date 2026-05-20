@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-05-20 — 서버 `PUT /api/boundary` ri_cd 충돌 거부 (안전망)
+
+클라이언트 보정([[ensure_unique_ri_cd]])과 별개로, 직접 API 호출 등 어떤
+경로로 들어와도 조용한 데이터 손실이 없도록 백엔드에 가드 추가.
+
+- `PUT /api/boundary` 가 payload 안의 `(adm_cd, ri_cd)` 키 중복을 사전 검사 →
+  중복(특히 한 admin 에 ri_cd 누락 다발) 시 **400 거부** + 해당 adm_cd 안내.
+  기존엔 upsert (adm_cd, ri_cd) 가 같은 행을 덮어써 365→17 처럼 조용히 소실.
+- 빈 문자열/공백 `ri_cd` 를 `None` 으로 정규화 — `''` 와 `NULL` 동일 취급.
+- admin 당 폴리곤 1건(ri_cd 없음)인 정상 케이스는 그대로 허용(거부 아님).
+
 ## 2026-05-20 — 경계 제출 시 ri_cd 유일성 보정 (데이터 손실 차단)
 
 작업 SHP 의 ri_cd 가 비어 있으면(또는 admin 내 중복) 서버 boundary
