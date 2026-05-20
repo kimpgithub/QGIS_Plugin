@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-20 — API_REFERENCE.md 실제 구현 기준 전면 갱신
+
+- 문서가 설계안 상태(쿠키 세션 + 공유 비밀번호 §1~6, 미구현 `/web/*` §7)로 굳어
+  실제 백엔드(`backend/app/main.py`)와 어긋나 있어 전면 재작성.
+- 인증: 쿠키 세션 → **단일 Bearer(JWT) 헤더**(localStorage `auth_token`). `/api/me`·`/api/logout`·
+  `Set-Cookie` 설명 제거. 로그인은 `{id,password}` → `{token,user}`.
+- `/web/*`(§7) 통째로 삭제 — 해당 기능은 전부 `/api/*` 로 구현됨(프론트 `web/src/api/*.ts` 와 일치).
+- `/api/admins` 응답을 실제대로 정정: `{"admins":[...]}` 래퍼 → **순수 배열**(adm_cd/adm_nm/sido/sigungu).
+- `/api/admin_outline`(이웃/bbox), `PUT /api/boundary`, `POST /api/cog`, markup `kind=delete_mark`,
+  `POST /api/markup`·`PATCH .../apply`·`PATCH .../reject`(204) 추가/정정.
+- 배포 섹션: 정적 루트 `/srv/gis/web/html`(MapLibre) → `web/dist`(React+Vite+OpenLayers)로 갱신,
+  nginx 라우팅 표(`/web/` 는 backend 미구현 사장 라우트 명시), 부록 파일 경로 정정.
+
 ## 2026-05-19 — DB 작업 명부 패널 4종 개선
 
 - **split 후 area 자동 재계산** — `attach_autofill` 에 `featureAdded`
