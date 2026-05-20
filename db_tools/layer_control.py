@@ -477,7 +477,7 @@ def get_current_ri():
 _active_callbacks = {}   # layer_id → (added_slot, geom_slot)
 
 
-def _recalc_area(layer, fid):
+def recalc_area(layer, fid):
     """fid 의 geometry 면적 (㎡, 정수) 을 'area' 필드에 기록.
 
     필드명 area 가 없거나 geometry 가 없으면 무시.
@@ -520,11 +520,11 @@ def attach_autofill(layer, target_layer_names=EDIT_LAYER_NAMES):
                 idx = idx_of.get(col, -1)
                 if idx >= 0 and val:
                     _layer.changeAttributeValue(fid, idx, val)
-        _recalc_area(_layer, fid)
+        recalc_area(_layer, fid)
 
     def _on_geom_changed(fid, _geom=None, _layer=layer):
         # split 시 원본 폴리곤 축소 케이스 — area 같이 갱신
-        _recalc_area(_layer, fid)
+        recalc_area(_layer, fid)
 
     layer.featureAdded.connect(_on_added)
     layer.geometryChanged.connect(_on_geom_changed)

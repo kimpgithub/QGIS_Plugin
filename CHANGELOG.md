@@ -11,6 +11,17 @@
 - 빈 문자열/공백 `ri_cd` 를 `None` 으로 정규화 — `''` 와 `NULL` 동일 취급.
 - admin 당 폴리곤 1건(ri_cd 없음)인 정상 케이스는 그대로 허용(거부 아님).
 
+## 2026-05-20 — 행정리 작업: split→팝업 폐기, 선택 폴리곤 일괄 부여로 전환
+
+분할할 때마다 `RiAssignDialog` 팝업이 떠 연속 분할이 끊기던 흐름을 변경.
+
+- **분할은 자유롭게** — split/도형변경 시 area 필드만 자동 재계산
+  (`layer_control.recalc_area`, featureAdded + geometryChanged 훅). 팝업 없음.
+- **부여는 [선택 폴리곤에 행정리 부여] 버튼** — 지도에서 폴리곤(들) 선택 +
+  명부 행 선택 → 버튼. 다중 선택 폴리곤 모두 같은 행정리로 부여 + 명부 Y 마킹.
+- `RiAssignDialog` 클래스 제거(미사용). `recalc_area` 는 `_recalc_area` 에서
+  공개 함수로 승격.
+
 ## 2026-05-20 — 경계 제출 시 ri_cd 유일성 보정 (데이터 손실 차단)
 
 작업 SHP 의 ri_cd 가 비어 있으면(또는 admin 내 중복) 서버 boundary
