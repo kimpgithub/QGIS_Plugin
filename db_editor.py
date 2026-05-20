@@ -1192,6 +1192,12 @@ class WorkListTab(QWidget):
         if n == 0:
             QMessageBox.warning(self, '경고', '제출할 경계(geom)가 없습니다.')
             return
+        # admin 안에서 ri_cd 유일성 보정 — 빈/중복이면 일련번호 자동부여
+        # (서버 upsert 키가 (adm_cd, ri_cd) 라 중복 시 폴리곤 손실)
+        n_seq = layer_control.ensure_unique_ri_cd(geojson)
+        if n_seq:
+            self.status.setText(
+                f'ri_cd 빈/중복 {n_seq}건 일련번호 자동부여 후 제출')
         if QMessageBox.question(
                 self, '제출 확인',
                 f'경계 {n}건을 서버에 제출합니다. 계속할까요?',
@@ -1498,7 +1504,13 @@ class CompletedUploadTab(QWidget):
                     self.log.append(f'[건너뜀] SHP 무효: {shp}')
                     continue
                 gj = layer_control.boundary_to_geojson(lyr)
+                # admin 안에서 ri_cd 유일성 보정 (빈/중복 → 일련번호)
+                n_seq = layer_control.ensure_unique_ri_cd(gj)
                 n = len(gj.get('features', []))
+                if n_seq:
+                    self.log.append(
+                        f'[보정] {os.path.basename(shp)} — ri_cd 빈/중복 '
+                        f'{n_seq}건 일련번호 자동부여')
                 if n:
                     boundary_tasks.append((os.path.basename(shp), gj, n))
 
