@@ -13,6 +13,24 @@
 - 배포 섹션: 정적 루트 `/srv/gis/web/html`(MapLibre) → `web/dist`(React+Vite+OpenLayers)로 갱신,
   nginx 라우팅 표(`/web/` 는 backend 미구현 사장 라우트 명시), 부록 파일 경로 정정.
 
+## 2026-05-20 — DB 작업: 완료 데이터 업로드 탭 신규
+
+작업 완료 데이터를 폴더째 물려 일괄 업로드하는 [3. 완료 데이터 업로드]
+탭 추가. 기존 [2. 행정리 작업] 의 [제출] 은 *세션에 로드된 레이어* 만
+가능했음 — 이미 완성해둔 SHP/이미지를 별도 경로로 올릴 수 없었던 한계 해소.
+
+- **폴더 구조** (`01_data` 규약):
+  - `02_행정리경계/{시도}/{시도}_bnd_job_pg.shp` — 경계 (시도당 1 SHP)
+  - `03_스캔이미지/{시도}/{시군구}/{adm}_scan_merged.jpg` — merge 이미지
+- **[인식]** — 경계 SHP / 이미지 수집 + adm_cd 매칭표(경계○/이미지○) 표시
+- **체크박스** `[경계 제출]` `[COG 업로드]` (둘 다 기본 ON, 한쪽만도 가능)
+- **업로드** (`CompletedUploadWorker(QThread)`, 백그라운드):
+  - 경계: SHP → `boundary_to_geojson`(메인스레드, RI_CD 소문자 정규화) →
+    SHP 통째로 1번 `submit_boundary` (adm_cd+ri_cd upsert)
+  - 이미지: `stage6_publish.publish_one` 재사용 (jpg→COG scale 0.5→S3→
+    cog_catalog). S3 key = `cog/{시도}/{시군구}/{adm}.tif`
+- 서버 설정은 [1. 서버 연결] 탭 값 사용. 결과 `_upload_status.csv` 기록.
+
 ## 2026-05-19 — DB 작업 명부 패널 4종 개선
 
 - **split 후 area 자동 재계산** — `attach_autofill` 에 `featureAdded`

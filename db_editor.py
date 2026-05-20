@@ -17,7 +17,7 @@ from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QTextEdit, QMessageBox, QGroupBox, QApplication, QFileDialog,
-    QTableWidget, QTableWidgetItem, QDockWidget, QComboBox,
+    QTableWidget, QTableWidgetItem, QDockWidget, QComboBox, QCheckBox,
 )
 
 from .db_tools import api_client, excel_loader, layer_control
@@ -1217,6 +1217,334 @@ class WorkListTab(QWidget):
 # 메인 다이얼로그
 # ============================================================
 
+# ============================================================
+# 완료 데이터 업로드 — 폴더 직접 물림 (경계 SHP + merge 이미지 COG)
+# ============================================================
+
+def scan_completed_folder(root):
+    """01_data 구조 폴더에서 업로드 대상 수집.
+
+    구조:
+        02_행정리경계/{시도}/{시도}_bnd_job_pg.shp   ← 경계 (시도당 1 SHP)
+        03_스캔이미지/{시도}/{시군구}/{adm}_scan_merged.jpg ← merge 이미지
+
+    Returns dict:
+        boundary_shps: [shp 경로, …]
+        images:        [jpg 경로, …]   (jgw 동반된 것만)
+        img_root:      03_스캔이미지 절대경로 (COG rel 경로 기준점)
+    """
+    import glob
+    out = {'boundary_shps': [], 'images': [], 'img_root': None}
+    bnd_dir = os.path.join(root, '02_행정리경계')
+    if os.path.isdir(bnd_dir):
+        out['boundary_shps'] = sorted(glob.glob(
+            os.path.join(bnd_dir, '**', '*_bnd_job_pg.shp'), recursive=True))
+    img_dir = os.path.join(root, '03_스캔이미지')
+    if os.path.isdir(img_dir):
+        out['img_root'] = img_dir
+        imgs = sorted(glob.glob(
+            os.path.join(img_dir, '**', '*_scan_merged.jpg'), recursive=True))
+        out['images'] = [p for p in imgs
+                         if os.path.exists(os.path.splitext(p)[0] + '.jgw')]
+    return out
+
+
+def _shp_adm_codes(shp_path):
+    """SHP 의 adm_cd 값 집합 (대소문자 무시 컬럼 검색)."""
+    from qgis.core import QgsVectorLayer
+    lyr = QgsVectorLayer(shp_path, 'tmp', 'ogr')
+    if not lyr.isValid():
+        return set()
+    fields = lyr.fields()
+    idx = next((i for i in range(fields.count())
+                if fields.at(i).name().lower() == 'adm_cd'), -1)
+    if idx < 0:
+        return set()
+    return {str(f.attribute(idx)).strip() for f in lyr.getFeatures()
+            if f.attribute(idx) is not None}
+
+
+def _img_adm_code(jpg_path):
+    """이미지 파일명에서 8자리 adm_cd 추출."""
+    import re
+    m = re.match(r'(\d{8})', os.path.basename(jpg_path))
+    return m.group(1) if m else ''
+
+
+class CompletedUploadWorker(QThread):
+    """경계 SHP 제출 + merge 이미지 COG 업로드를 백그라운드에서 순차 실행."""
+    progress = pyqtSignal(str)
+    finished_ok = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, cfg, boundary_tasks, image_paths, img_root,
+                 do_boundary, do_cog, scale):
+        super().__init__()
+        self.cfg = cfg
+        self.boundary_tasks = boundary_tasks   # [(label, geojson, n), …]
+        self.image_paths = image_paths
+        self.img_root = img_root
+        self.do_boundary = do_boundary
+        self.do_cog = do_cog
+        self.scale = scale
+
+    def run(self):
+        import csv
+        import tempfile
+        try:
+            from .tools import stage6_publish
+        except ImportError:
+            from gis_scan_tools.tools import stage6_publish
+
+        rows = []
+        ok = err = 0
+
+        if self.do_boundary:
+            for label, geojson, n in self.boundary_tasks:
+                self.progress.emit(f'[경계] {label} — {n}건 제출 중…')
+                try:
+                    affected, msg = api_client.submit_boundary(
+                        self.cfg, geojson)
+                    ok += 1
+                    self.progress.emit(f'  ✅ {msg}')
+                    rows.append(['boundary', label, 'OK', msg])
+                except Exception as e:
+                    err += 1
+                    self.progress.emit(f'  ❌ {e}')
+                    rows.append(['boundary', label, 'ERROR', str(e)])
+
+        if self.do_cog and self.image_paths:
+            tmp_out = tempfile.mkdtemp(prefix='gst_cog_')
+            self.progress.emit(f'[COG] 임시 출력 폴더: {tmp_out}')
+            for i, jpg in enumerate(self.image_paths, 1):
+                name = os.path.basename(jpg)
+                self.progress.emit(
+                    f'[COG {i}/{len(self.image_paths)}] {name} 변환·업로드 중…')
+                try:
+                    r = stage6_publish.publish_one(
+                        jpg, self.img_root, tmp_out, self.cfg,
+                        scale=self.scale)
+                    if r.get('status') == 'OK':
+                        ok += 1
+                        self.progress.emit(f'  ✅ {r.get("message", "")}')
+                        rows.append(['cog', name, 'OK', r.get('message', '')])
+                    else:
+                        err += 1
+                        self.progress.emit(f'  ❌ {r.get("message", "")}')
+                        rows.append(['cog', name, 'ERROR',
+                                     r.get('message', '')])
+                except Exception as e:
+                    err += 1
+                    self.progress.emit(f'  ❌ {e}')
+                    rows.append(['cog', name, 'ERROR', str(e)])
+
+        # 상태 CSV — img_root 가 있으면 그 상위(완료 데이터 루트)에, 없으면 임시폴더
+        try:
+            base = (os.path.dirname(self.img_root) if self.img_root
+                    else tempfile.gettempdir())
+            csv_path = os.path.join(base, '_upload_status.csv')
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                wr = csv.writer(f)
+                wr.writerow(['kind', 'target', 'status', 'message'])
+                wr.writerows(rows)
+            self.progress.emit(f'[상태] {csv_path}')
+        except Exception:
+            pass
+
+        self.finished_ok.emit(f'완료 — 성공 {ok}, 실패 {err}')
+
+
+class CompletedUploadTab(QWidget):
+    """작업 완료 데이터 업로드 — 폴더(01_data 구조) 물림 → 경계 + COG 일괄.
+
+    1. 폴더 선택 → [인식] 으로 경계 SHP / merge 이미지 수집 + adm_cd 매칭표
+    2. [경계 제출] [COG 업로드] 체크 (둘 다 기본 ON)
+    3. [업로드] — 백그라운드 순차 실행, 로그 표시
+    서버 설정은 [1. 서버 연결] 탭 값을 그대로 사용.
+    """
+
+    def __init__(self, parent_dialog):
+        super().__init__()
+        self.parent_dialog = parent_dialog
+        self._scan = {'boundary_shps': [], 'images': [], 'img_root': None}
+        self._worker = None
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+
+        help_label = QLabel(
+            '<i>작업 완료 데이터 폴더를 물려 일괄 업로드합니다. 폴더 구조:'
+            '<br><code>02_행정리경계/{시도}/{시도}_bnd_job_pg.shp</code> (경계)'
+            '<br><code>03_스캔이미지/{시도}/{시군구}/{adm}_scan_merged.jpg</code> (이미지)'
+            '<br>서버 설정은 [1. 서버 연결] 탭 값을 사용합니다.</i>')
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet(
+            'QLabel { padding: 6px; background: #f0f0f0; border-radius: 3px; }')
+        layout.addWidget(help_label)
+
+        # 폴더 선택
+        row = QHBoxLayout()
+        row.addWidget(QLabel('완료 데이터 폴더:'))
+        self.folder_edit = QLineEdit()
+        self.folder_edit.setPlaceholderText('01_data 루트 폴더')
+        row.addWidget(self.folder_edit, 1)
+        btn_browse = QPushButton('찾아보기')
+        btn_browse.clicked.connect(self._browse)
+        row.addWidget(btn_browse)
+        btn_detect = QPushButton('인식')
+        btn_detect.clicked.connect(self._detect)
+        row.addWidget(btn_detect)
+        layout.addLayout(row)
+
+        # 옵션 체크박스
+        opt_row = QHBoxLayout()
+        self.cb_boundary = QCheckBox('경계 제출 (PUT /api/boundary)')
+        self.cb_boundary.setChecked(True)
+        self.cb_cog = QCheckBox('COG 업로드 (S3 + cog_catalog)')
+        self.cb_cog.setChecked(True)
+        opt_row.addWidget(self.cb_boundary)
+        opt_row.addWidget(self.cb_cog)
+        opt_row.addStretch()
+        layout.addLayout(opt_row)
+
+        # 매칭표
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(['adm_cd', '경계', '이미지'])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setMinimumHeight(180)
+        layout.addWidget(self.table, 1)
+
+        # 업로드 버튼
+        btn_row = QHBoxLayout()
+        self.btn_upload = QPushButton('업로드')
+        self.btn_upload.clicked.connect(self._on_upload)
+        self.btn_upload.setEnabled(False)
+        btn_row.addWidget(self.btn_upload)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # 로그
+        self.log = QTextEdit(); self.log.setReadOnly(True)
+        self.log.setMinimumHeight(140)
+        self.log.setStyleSheet('QTextEdit { font-family: monospace; }')
+        layout.addWidget(QLabel('진행 상황:'))
+        layout.addWidget(self.log)
+
+        self.status = QLabel('폴더 미지정')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(
+            self, '완료 데이터 폴더 선택', self.folder_edit.text())
+        if d:
+            self.folder_edit.setText(d)
+            self._detect()
+
+    def _detect(self):
+        root = self.folder_edit.text().strip()
+        if not root or not os.path.isdir(root):
+            QMessageBox.warning(self, '경고', '유효한 폴더를 선택하세요.')
+            return
+        self._scan = scan_completed_folder(root)
+        # 경계 adm_cd / 이미지 adm_cd 교차
+        bnd_codes = set()
+        for shp in self._scan['boundary_shps']:
+            bnd_codes |= _shp_adm_codes(shp)
+        img_codes = {_img_adm_code(p) for p in self._scan['images']}
+        img_codes.discard('')
+        all_codes = sorted(bnd_codes | img_codes)
+
+        self.table.setRowCount(len(all_codes))
+        for i, code in enumerate(all_codes):
+            self.table.setItem(i, 0, QTableWidgetItem(code))
+            self.table.setItem(
+                i, 1, QTableWidgetItem('○' if code in bnd_codes else '—'))
+            self.table.setItem(
+                i, 2, QTableWidgetItem('○' if code in img_codes else '—'))
+        self.table.resizeColumnsToContents()
+
+        n_shp = len(self._scan['boundary_shps'])
+        n_img = len(self._scan['images'])
+        self.status.setText(
+            f'인식: 경계 SHP {n_shp}개, 이미지 {n_img}장, '
+            f'adm_cd {len(all_codes)}개 (경계 {len(bnd_codes)} / '
+            f'이미지 {len(img_codes)})')
+        self.btn_upload.setEnabled(n_shp > 0 or n_img > 0)
+
+    def _on_upload(self):
+        do_boundary = self.cb_boundary.isChecked()
+        do_cog = self.cb_cog.isChecked()
+        if not (do_boundary or do_cog):
+            QMessageBox.warning(self, '경고', '업로드 대상을 하나 이상 선택하세요.')
+            return
+        cfg = self.parent_dialog.server_config
+        if cfg is None:
+            cfg = self.parent_dialog.tabs.widget(0).current_config()
+        if not cfg.base_url:
+            QMessageBox.warning(
+                self, '경고', '[1. 서버 연결] 탭에서 서버 URL/토큰을 먼저 저장하세요.')
+            return
+
+        # 경계 geojson 은 메인스레드에서 추출 (QGIS 객체)
+        boundary_tasks = []
+        if do_boundary:
+            from qgis.core import QgsVectorLayer
+            for shp in self._scan['boundary_shps']:
+                lyr = QgsVectorLayer(shp, os.path.basename(shp), 'ogr')
+                if not lyr.isValid():
+                    self.log.append(f'[건너뜀] SHP 무효: {shp}')
+                    continue
+                gj = layer_control.boundary_to_geojson(lyr)
+                n = len(gj.get('features', []))
+                if n:
+                    boundary_tasks.append((os.path.basename(shp), gj, n))
+
+        n_total = (len(boundary_tasks) if do_boundary else 0) + \
+                  (len(self._scan['images']) if do_cog else 0)
+        if n_total == 0:
+            QMessageBox.warning(self, '경고', '업로드할 항목이 없습니다.')
+            return
+        if QMessageBox.question(
+                self, '업로드 확인',
+                f'경계 {len(boundary_tasks)}건 + 이미지 '
+                f'{len(self._scan["images"]) if do_cog else 0}장을 '
+                f'서버에 업로드합니다. 계속할까요?',
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        self.log.clear()
+        self.log.append('=== 업로드 시작 ===')
+        self.btn_upload.setEnabled(False)
+        self._worker = CompletedUploadWorker(
+            cfg, boundary_tasks,
+            self._scan['images'] if do_cog else [],
+            self._scan['img_root'],
+            do_boundary, do_cog, scale=0.5)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished_ok.connect(self._on_finished)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_progress(self, line):
+        self.log.append(line)
+        self.log.verticalScrollBar().setValue(
+            self.log.verticalScrollBar().maximum())
+
+    def _on_finished(self, summary):
+        self.log.append(f'\n=== {summary} ===')
+        self.status.setText(summary)
+        self.btn_upload.setEnabled(True)
+        QMessageBox.information(self, '업로드 완료', summary)
+
+    def _on_failed(self, msg):
+        self.log.append(f'\n[ERROR] {msg}')
+        self.btn_upload.setEnabled(True)
+        QMessageBox.critical(self, '업로드 실패', msg[:500])
+
+
 class DBEditorDock(QDockWidget):
     """QGIS 메인 윈도우에 도킹되는 DB 작업 위젯.
 
@@ -1240,6 +1568,7 @@ class DBEditorDock(QDockWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(ServerConnectionTab(self), '1. 서버 연결')
         self.tabs.addTab(WorkListTab(self), '2. 행정리 작업')
+        self.tabs.addTab(CompletedUploadTab(self), '3. 완료 데이터 업로드')
         layout.addWidget(self.tabs)
         self.setWidget(container)
         self.setMinimumWidth(540)
