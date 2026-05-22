@@ -59,6 +59,7 @@ export default function InspectPage() {
 
   // 레이어 가시성
   const [visible, setVisible] = useState<LayerVisibility>({
+    base: false,   // 배경지도 기본 off — 백지에서 시작, 좌측에서 토글
     cog: true,
     admin: true,
     ri: true,

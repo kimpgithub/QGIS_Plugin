@@ -15,8 +15,8 @@ import type { AdminOutlineCollection } from '../../api/admin_outline';
 const VWORLD_KEY =
   import.meta.env.VITE_VWORLD_KEY || '55A24471-C374-3A22-8652-6E8D55D53E08';
 
-// 좌측 범례 체크박스가 토글할 레이어 id
-export type LayerKey = 'cog' | 'admin' | 'ri' | 'markup';
+// 좌측 범례 체크박스가 토글할 레이어 id ('base' = vworld 배경지도)
+export type LayerKey = 'base' | 'cog' | 'admin' | 'ri' | 'markup';
 
 export type LayerVisibility = Record<LayerKey, boolean>;
 
@@ -52,6 +52,7 @@ export default function MapView({
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
+  const baseRef = useRef<TileLayer<XYZ> | null>(null);
   const cogRef = useRef<TileLayer<XYZ> | null>(null);
   const boundarySrcRef = useRef<VectorSource | null>(null);
   const markupSrcRef = useRef<VectorSource | null>(null);
@@ -67,11 +68,14 @@ export default function MapView({
 
     const view = new View({ projection: 'EPSG:3857' });
 
-    const base = new TileLayer({
+    // 배경지도 (vworld Base) — 기본은 백지(off). 좌측 레이어에서 토글.
+    const base = new TileLayer<XYZ>({
       source: new XYZ({
         url: `/vworld/req/wmts/1.0.0/${VWORLD_KEY}/Base/{z}/{y}/{x}.png`,
       }),
+      visible: false,
     });
+    baseRef.current = base;
 
     // COG 베이스 — cogTileUrl 주어지면 source 갱신
     const cog = new TileLayer<XYZ>({ visible: false, opacity: 0.9 });
@@ -230,6 +234,7 @@ export default function MapView({
 
   // 가시성 토글
   useEffect(() => {
+    baseRef.current?.setVisible(visible.base);
     adminLayerRef.current?.setVisible(visible.admin);
     boundaryLayerRef.current?.setVisible(visible.ri);
     markupLayerRef.current?.setVisible(visible.markup);

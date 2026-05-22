@@ -11,6 +11,7 @@ const ROWS: { key: LayerKey; label: string }[] = [
   { key: 'ri', label: '행정리 경계' },
   { key: 'admin', label: '행정읍면 라인' },
   { key: 'cog', label: '스캔 이미지' },
+  { key: 'base', label: '배경지도' },
 ];
 
 export default function LayerControls({ visible, onToggle, onFitBoundary }: Props) {
