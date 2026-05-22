@@ -47,9 +47,13 @@ export default function InspectPage() {
     }
   }, [user, isMaster]);
 
-  // 마스터용 admin 목록 (picker 모달)
+  // 마스터용 admin 목록 (picker 모달). 마스터는 로그인 직후 백지 상태이므로
+  // 행정읍면 미선택이면 picker 를 자동으로 띄운다.
   const [admins, setAdmins] = useState<AdminUnit[]>([]);
   const [adminPickerOpen, setAdminPickerOpen] = useState(false);
+  useEffect(() => {
+    if (isMaster && !admin) setAdminPickerOpen(true);
+  }, [isMaster, admin]);
   useEffect(() => {
     if (!isMaster) return;
     listAdmins()
