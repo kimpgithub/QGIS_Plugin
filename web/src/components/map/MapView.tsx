@@ -69,9 +69,11 @@ export default function MapView({
     const view = new View({ projection: 'EPSG:3857' });
 
     // 배경지도 (vworld Base) — 기본은 백지(off). 좌측 레이어에서 토글.
+    // transition:0 — 확대/축소 시 타일 페이드인 깜빡임 제거(OL 기본 250ms 페이드).
     const base = new TileLayer<XYZ>({
       source: new XYZ({
         url: `/vworld/req/wmts/1.0.0/${VWORLD_KEY}/Base/{z}/{y}/{x}.png`,
+        transition: 0,
       }),
       visible: false,
     });
@@ -170,7 +172,8 @@ export default function MapView({
     const l = cogRef.current;
     if (!l) return;
     if (cogTileUrl) {
-      l.setSource(new XYZ({ url: cogTileUrl }));
+      // transition:0 — 반투명(opacity 0.9) COG 타일의 줌 시 페이드 깜빡임 제거.
+      l.setSource(new XYZ({ url: cogTileUrl, transition: 0 }));
       l.setVisible(visible.cog);
       if (cogBbox && !boundary?.features?.length) {
         const ext = transformExtent(cogBbox, 'EPSG:4326', 'EPSG:3857');
