@@ -804,49 +804,61 @@ class RecoveryTab(QWidget):
         self.count_label.setText(f'대상: {self.file_list.count()}건')
 
     def _collect_identified_dups(self):
-        """identified/ 에서 같은 (code,sid) 로 중복 저장된 그룹(_2 등)을 찾아
-        그룹 전원을 _unmatched/ 로 이동 → 자동 식별을 신뢰하지 않고 사람이
-        각각 재확인하도록 큐에 올린다 (어느 쪽이 맞는지 보장 없음)."""
+        """같은 (code,sid) 로 중복된 그룹을 identified/ 와 _unmatched/ 에 걸쳐
+        찾아, identified/ 에 있는 쪽을 _unmatched/ 로 끌어낸다.
+
+        OCR 오식별로 하나는 성공(identified/)·다른 하나는 _unmatched/(_2)로
+        갈리면, 성공분은 리스트에 안 떠 비교가 안 된다. 두 폴더를 합쳐 같은
+        키가 2개 이상이면 전원을 _unmatched/ 에 모아 사람이 각각 재확인한다."""
         import re as _re
         import shutil as _sh
         proj = self.common.project_dir.text()
         if not proj:
             self.status_label.setText('프로젝트 폴더를 지정하세요 (공통설정)')
             return
-        idroot = os.path.join(proj, SUB_SCAN_ID, 'identified')
-        if not os.path.isdir(idroot):
-            self.status_label.setText('identified/ 폴더 없음 (Stage 2 먼저 실행)')
+        scan_id = os.path.join(proj, SUB_SCAN_ID)
+        idroot = os.path.join(scan_id, 'identified')
+        umroot = os.path.join(scan_id, '_unmatched')
+        if not os.path.isdir(idroot) and not os.path.isdir(umroot):
+            self.status_label.setText('2_scan_id 폴더 없음 (Stage 2 먼저 실행)')
             return
         pat = _re.compile(r'^(\d{8}_\d+-\d+)(?:_\d+)?\.(jpg|jpeg|png)$', _re.I)
-        groups = {}
-        for root, _, files in os.walk(idroot):
-            for f in files:
+        # 키별로 identified/ 경로와 _unmatched/ 존재 여부를 수집
+        in_ident, in_unm = {}, {}
+        if os.path.isdir(idroot):
+            for root, _, files in os.walk(idroot):
+                for f in files:
+                    m = pat.match(f)
+                    if m:
+                        in_ident.setdefault(m.group(1), []).append(
+                            os.path.join(root, f))
+        if os.path.isdir(umroot):
+            for f in os.listdir(umroot):
                 m = pat.match(f)
                 if m:
-                    groups.setdefault(m.group(1), []).append(
-                        os.path.join(root, f))
-        dst = os.path.join(proj, SUB_SCAN_ID, '_unmatched')
+                    in_unm.setdefault(m.group(1), []).append(f)
         ndup = moved = 0
-        for paths in groups.values():
-            if len(paths) < 2:
+        for key, ident_paths in in_ident.items():
+            total = len(ident_paths) + len(in_unm.get(key, []))
+            if total < 2:
                 continue
             ndup += 1
-            os.makedirs(dst, exist_ok=True)
-            for p in paths:
+            os.makedirs(umroot, exist_ok=True)
+            for p in ident_paths:
                 name = os.path.basename(p)
-                d = os.path.join(dst, name)
+                d = os.path.join(umroot, name)
                 k = 2
                 while os.path.exists(d):
                     stem, ext = os.path.splitext(name)
-                    d = os.path.join(dst, f'{stem}_{k}{ext}')
+                    d = os.path.join(umroot, f'{stem}_{k}{ext}')
                     k += 1
                 _sh.move(p, d)
                 moved += 1
         self.refresh_list()
         self.status_label.setText(
-            f'중복 그룹 {ndup}개 / 파일 {moved}건을 _unmatched/ 로 이동했습니다. '
-            '각 파일을 확인해 올바른 이름으로 재지정하세요.'
-            if ndup else 'identified/ 에 중복 그룹이 없습니다.')
+            f'중복 그룹 {ndup}개 — identified/ 원본 {moved}건을 _unmatched/ 로 '
+            '끌어왔습니다. 각 파일을 확인해 올바른 이름으로 재지정하세요.'
+            if ndup else '중복 그룹이 없습니다.')
 
     # ------------------------------------------------------------ 이벤트
     def _on_file_selected(self, item, _prev=None):
