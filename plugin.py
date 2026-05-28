@@ -21,8 +21,11 @@ from qgis.PyQt.QtWidgets import (
     QTableWidget, QTableWidgetItem, QCheckBox, QDoubleSpinBox,
     QGroupBox, QComboBox, QListWidget, QListWidgetItem,
     QCompleter, QSpinBox,
+    QGraphicsView, QGraphicsScene,
 )
-from qgis.PyQt.QtGui import QIcon, QPixmap
+from qgis.PyQt.QtGui import (
+    QIcon, QPixmap, QImage, QPainter, QPen, QBrush, QColor,
+)
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QSize
 
 
@@ -515,72 +518,191 @@ class Stage2Tab(StageTab):
 # 미식별 보강 (Stage 2 FAIL 수동 복구)
 # ============================================================
 
-class RecoveryTab(QWidget):
-    """_unmatched/ 파일에 admin_code + sheet_id를 수동 지정 → identified/로 이동.
+class ScanCornerView(QGraphicsView):
+    """스캔 표시 + 좌클릭으로 지도영역 4꼭지점(TL→TR→BR→BL) 지정.
 
-    CSV 편집 없이 드롭다운 UI로 간단 처리.
+    scene 좌표는 표시 픽셀. points() 는 원본 스캔 픽셀로 환산해 반환.
+    휠로 줌(정밀 클릭), [초기화] 로 점 리셋.
     """
+    pointsChanged = pyqtSignal(int)
+    LABELS = ['TL', 'TR', 'BR', 'BL']
 
-    def __init__(self, common):
+    def __init__(self):
+        super().__init__()
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setMinimumSize(420, 320)
+        self.setStyleSheet('QGraphicsView { background: #222; }')
+        self._disp_scale = 1.0    # 표시/원본 비율
+        self._pix_item = None
+        self._markers = []        # [(dot, txt), ...]
+        self._pts_disp = []       # 표시 좌표 점
+        self._user_zoomed = False
+
+    def load(self, scan_path, max_disp=2200):
+        import cv2
+        from .tools.common import load_image
+        self._scene.clear()
+        self._pix_item = None
+        self._markers, self._pts_disp = [], []
+        self._user_zoomed = False
+        img = load_image(scan_path)            # BGR 원본 (한글경로 안전)
+        h, w = img.shape[:2]
+        self._disp_scale = min(1.0, max_disp / float(max(h, w)))
+        if self._disp_scale < 1.0:
+            img = cv2.resize(img, None, fx=self._disp_scale, fy=self._disp_scale,
+                             interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        dh, dw = rgb.shape[:2]
+        qimg = QImage(rgb.tobytes(), dw, dh, 3 * dw, QImage.Format_RGB888)
+        self._pix_item = self._scene.addPixmap(QPixmap.fromImage(qimg))
+        self._scene.setSceneRect(0, 0, dw, dh)
+        self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+        self.pointsChanged.emit(0)
+
+    def reset_points(self):
+        for dot, txt in self._markers:
+            self._scene.removeItem(dot)
+            self._scene.removeItem(txt)
+        self._markers, self._pts_disp = [], []
+        self.pointsChanged.emit(0)
+
+    def points(self):
+        """원본 스캔 픽셀 4점 (TL,TR,BR,BL). 4점 미만이면 None."""
+        if len(self._pts_disp) != 4:
+            return None
+        s = self._disp_scale or 1.0
+        return [(x / s, y / s) for x, y in self._pts_disp]
+
+    def mousePressEvent(self, ev):
+        if (ev.button() == Qt.LeftButton and self._pix_item is not None
+                and len(self._pts_disp) < 4):
+            sp = self.mapToScene(ev.pos())
+            n = len(self._pts_disp)
+            r = 7
+            dot = self._scene.addEllipse(sp.x() - r, sp.y() - r, 2 * r, 2 * r,
+                                         QPen(QColor('#ff3030'), 2),
+                                         QBrush(QColor(255, 48, 48, 120)))
+            txt = self._scene.addSimpleText(self.LABELS[n])
+            txt.setBrush(QBrush(QColor('#ffd000')))
+            txt.setPos(sp.x() + r, sp.y() - 2 * r)
+            self._markers.append((dot, txt))
+            self._pts_disp.append((sp.x(), sp.y()))
+            self.pointsChanged.emit(len(self._pts_disp))
+        super().mousePressEvent(ev)
+
+    def wheelEvent(self, ev):
+        if self._pix_item is None:
+            return
+        self._user_zoomed = True
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.scale(*((1.25, 1.25) if ev.angleDelta().y() > 0 else (0.8, 0.8)))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self._pix_item is not None and not self._user_zoomed:
+            self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+
+
+class RecoveryTab(QWidget):
+    """수동 정합 — 헤더 절단·OCR 실패·오식별 스캔을 사람이 직접 복구.
+
+    절차: 파일 선택 → (admin_code, sheet_id) 지정 → 스캔 위 지도영역 4꼭지점
+    클릭 → [저장]. admin 에 분할 PDF 가 있으면 'PDF 모드'(크롭만, world bbox 는
+    PDF 메타로 자동, 정합은 Stage 3 SIFT), 없으면 'GCP 모드'(지도 위 4점까지
+    찍어 직접 지오레퍼런싱, Stage 3 생략).
+    """
+    CORNER_KO = ['좌상(TL)', '우상(TR)', '우하(BR)', '좌하(BL)']
+
+    def __init__(self, common, iface=None):
         super().__init__()
         self.common = common
-        self._shp_cache = None   # (codes_list, code→name 맵)
-        self._pdf_cache = None   # {admin_code: [sheet_id list]}
+        self.iface = iface
+        self._shp_cache = None    # (items, name_map)
+        self._pdf_cache = None    # {admin_code: [sheet_id]}
+        self._sheet_cache_obj = None  # 재사용 SheetCache (PDF 재인덱싱 회피)
+        # GCP 모드 상태
+        self._map_tool = None
+        self._prev_tool = None
+        self._rubber = None
+        self._world_pts = None    # [(x,y), ...] EPSG:5179, 4점
         self._build_ui()
 
+    # ------------------------------------------------------------ UI
     def _build_ui(self):
         layout = QVBoxLayout(self)
-
         help_label = QLabel(
-            '<i>Stage 2 OCR이 실패한 파일을 수동 지정합니다. '
-            '왼쪽 리스트에서 파일 선택 → 행정코드·시트번호 지정 → '
-            '[저장]. 표준명으로 identified/ 폴더에 복사되어 다음 stage가 '
-            '자동 인식합니다.</i>')
+            '<i>헤더가 잘렸거나 OCR이 실패/오식별한 스캔을 수동 복구합니다. '
+            '파일 선택 → 행정코드·시트번호 지정 → 오른쪽 스캔에서 지도영역 '
+            '<b>4꼭지점(좌상→우상→우하→좌하)</b>을 클릭 → [저장].</i>')
         help_label.setWordWrap(True)
         help_label.setStyleSheet(
             'QLabel { padding: 4px; background: #f0f0f0; border-radius: 3px; }')
         layout.addWidget(help_label)
 
-        # 새로고침 + 출력경로
         top = QHBoxLayout()
         self.btn_refresh = QPushButton('리스트 새로고침')
         self.btn_refresh.clicked.connect(self.refresh_list)
+        self.btn_dups = QPushButton('중복 수집')
+        self.btn_dups.setToolTip(
+            'identified/ 에서 같은 이름으로 중복 저장된(_2 등) 그룹을 찾아 '
+            '전부 _unmatched/ 로 옮겨 재확인 대상으로 만듭니다.')
+        self.btn_dups.clicked.connect(self._collect_identified_dups)
+        self.btn_add = QPushButton('스캔 파일 추가…')
+        self.btn_add.clicked.connect(self._on_add_files)
         top.addWidget(self.btn_refresh)
+        top.addWidget(self.btn_dups)
+        top.addWidget(self.btn_add)
         top.addStretch()
-        self.count_label = QLabel('미식별: 0건')
+        self.count_label = QLabel('대상: 0건')
         top.addWidget(self.count_label)
         layout.addLayout(top)
 
-        # 좌(파일 리스트) + 우(편집 폼)
         body = QHBoxLayout()
         self.file_list = QListWidget()
-        self.file_list.setMinimumWidth(300)
+        self.file_list.setMinimumWidth(260)
         self.file_list.currentItemChanged.connect(self._on_file_selected)
         body.addWidget(self.file_list, 2)
 
         right = QVBoxLayout()
-        self.thumb = QLabel('파일 선택')
-        self.thumb.setMinimumSize(400, 300)
-        self.thumb.setStyleSheet(
-            'QLabel { background: #ddd; border: 1px solid #888; }')
-        self.thumb.setAlignment(Qt.AlignCenter)
-        right.addWidget(self.thumb)
+        self.scan_view = ScanCornerView()
+        self.scan_view.pointsChanged.connect(self._on_pts_changed)
+        right.addWidget(self.scan_view, 1)
+
+        pts_row = QHBoxLayout()
+        self.pts_label = QLabel('스캔 점: 0/4')
+        self.btn_reset_pts = QPushButton('점 초기화')
+        self.btn_reset_pts.clicked.connect(self.scan_view.reset_points)
+        pts_row.addWidget(self.pts_label)
+        pts_row.addStretch()
+        pts_row.addWidget(self.btn_reset_pts)
+        right.addLayout(pts_row)
 
         form = QFormLayout()
         self.admin_cb = QComboBox()
-        self.admin_cb.setEditable(True)  # 검색 가능
+        self.admin_cb.setEditable(True)
         self.admin_cb.setInsertPolicy(QComboBox.NoInsert)
         self.admin_cb.currentIndexChanged.connect(self._on_admin_changed)
         form.addRow('행정코드:', self.admin_cb)
-
         self.sheet_cb = QComboBox()
-        # PDF 후보 외 임의값 입력 허용 (N 무관, PDF 없는 admin 대응)
         self.sheet_cb.setEditable(True)
         form.addRow('시트번호:', self.sheet_cb)
         right.addLayout(form)
 
+        self.mode_label = QLabel('모드: —')
+        self.mode_label.setWordWrap(True)
+        right.addWidget(self.mode_label)
+
+        # GCP 모드 전용 (PDF 없는 admin) — 지도에서 월드 4점 찍기
+        self.btn_map_pick = QPushButton('지도에서 월드 4점 찍기 (PDF 없을 때만)')
+        self.btn_map_pick.clicked.connect(self._start_map_pick)
+        self.btn_map_pick.setEnabled(False)
+        right.addWidget(self.btn_map_pick)
+
         btn_row = QHBoxLayout()
-        self.btn_save = QPushButton('저장 (identified/로 복사)')
+        self.btn_save = QPushButton('저장')
         self.btn_save.clicked.connect(self._on_save)
         self.btn_skip = QPushButton('건너뜀')
         self.btn_skip.clicked.connect(self._on_skip)
@@ -591,13 +713,11 @@ class RecoveryTab(QWidget):
         self.status_label = QLabel('')
         self.status_label.setWordWrap(True)
         right.addWidget(self.status_label)
-        right.addStretch()
 
         body.addLayout(right, 3)
         layout.addLayout(body)
 
-    # --- 데이터 로드 ---
-
+    # ------------------------------------------------------------ 데이터
     def _load_shp_codes(self):
         if self._shp_cache is not None:
             return self._shp_cache
@@ -610,8 +730,7 @@ class RecoveryTab(QWidget):
                 gdf = gpd.read_file(shp_path, encoding='cp949')
             except Exception:
                 gdf = gpd.read_file(shp_path)
-            items = []  # (display_text, admin_code)
-            nm_map = {}
+            items, nm_map = [], {}
             for _, r in gdf.iterrows():
                 cd = str(r.get('adm_cd', '')).strip()
                 nm = str(r.get('adm_nm', '')).strip()
@@ -627,7 +746,7 @@ class RecoveryTab(QWidget):
             return None, None
 
     def _load_pdf_sheets(self):
-        """{admin_code: [sheet_id list]} — PDF 폴더에서 분할 PDF 스캔."""
+        """{admin_code: [sheet_id]} — PDF 폴더에서 분할 PDF 인덱싱."""
         if self._pdf_cache is not None:
             return self._pdf_cache
         pdf_dir = self.common.pdf_input.text()
@@ -639,40 +758,32 @@ class RecoveryTab(QWidget):
         for root, _, files in os.walk(pdf_dir):
             for f in files:
                 m = pat.match(f)
-                if not m:
-                    continue
-                admin = m.group(1)
-                sid = f'{m.group(2)}-{m.group(3)}'
-                result.setdefault(admin, set()).add(sid)
-        # set → sorted list
-        self._pdf_cache = {k: sorted(v, key=lambda s: (
-            int(s.split('-')[0]), int(s.split('-')[1]))) for k, v in result.items()}
+                if m:
+                    result.setdefault(m.group(1), set()).add(
+                        f'{m.group(2)}-{m.group(3)}')
+        self._pdf_cache = {
+            k: sorted(v, key=lambda s: (int(s.split('-')[0]),
+                                        int(s.split('-')[1])))
+            for k, v in result.items()}
         return self._pdf_cache
 
     def _unmatched_dir(self):
         p = self.common.project_dir.text()
         return os.path.join(p, SUB_SCAN_ID, '_unmatched') if p else ''
 
-    def _identified_dir(self):
-        p = self.common.project_dir.text()
-        return os.path.join(p, SUB_SCAN_ID, 'identified') if p else ''
-
-    # --- UI 이벤트 ---
-
+    # ------------------------------------------------------------ 리스트
     def refresh_list(self):
         self.file_list.clear()
-        self.thumb.setText('파일 선택')
         self.status_label.setText('')
-        self._shp_cache = None  # SHP 경로 바뀌었을 수 있음
+        self._shp_cache = None
         self._pdf_cache = None
+        self._sheet_cache_obj = None
 
-        # admin 드롭다운 채우기
         self.admin_cb.clear()
         shp_items, _ = self._load_shp_codes()
         if shp_items:
             for disp, cd in shp_items:
                 self.admin_cb.addItem(disp, cd)
-            # 자동완성
             completer = QCompleter([x[0] for x in shp_items], self.admin_cb)
             completer.setCaseSensitivity(Qt.CaseInsensitive)
             completer.setFilterMode(Qt.MatchContains)
@@ -681,135 +792,301 @@ class RecoveryTab(QWidget):
             self.status_label.setText(
                 'SHP 미설정 또는 로드 실패 — 상단 공통설정에서 SHP 지정 필요')
 
-        # 미식별 파일 리스트
         d = self._unmatched_dir()
-        if not d or not os.path.isdir(d):
-            self.count_label.setText('미식별 폴더 없음 (Stage 2 먼저 실행)')
-            return
-        files = sorted(
-            f for f in os.listdir(d)
-            if f.lower().endswith(('.jpg', '.jpeg', '.png')))
-        for f in files:
-            item = QListWidgetItem(f)
-            item.setData(Qt.UserRole, os.path.join(d, f))
-            self.file_list.addItem(item)
-        self.count_label.setText(f'미식별: {len(files)}건')
+        n = 0
+        if d and os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    it = QListWidgetItem(f)
+                    it.setData(Qt.UserRole, os.path.join(d, f))
+                    self.file_list.addItem(it)
+                    n += 1
+        self.count_label.setText(f'대상: {n}건'
+                                 + ('' if n else '  (미식별 폴더 없음/비어있음)'))
 
+    def _on_add_files(self):
+        """오식별·중복명 케이스 — 임의 스캔을 작업 리스트에 추가."""
+        start = self.common.scan_input.text() or ''
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, '스캔 파일 추가', start,
+            'Images (*.jpg *.jpeg *.png *.JPG *.JPEG *.PNG)')
+        existing = {self.file_list.item(i).data(Qt.UserRole)
+                    for i in range(self.file_list.count())}
+        for p in paths:
+            if p in existing:
+                continue
+            it = QListWidgetItem(os.path.basename(p))
+            it.setData(Qt.UserRole, p)
+            self.file_list.addItem(it)
+        self.count_label.setText(f'대상: {self.file_list.count()}건')
+
+    def _collect_identified_dups(self):
+        """identified/ 에서 같은 (code,sid) 로 중복 저장된 그룹(_2 등)을 찾아
+        그룹 전원을 _unmatched/ 로 이동 → 자동 식별을 신뢰하지 않고 사람이
+        각각 재확인하도록 큐에 올린다 (어느 쪽이 맞는지 보장 없음)."""
+        import re as _re
+        import shutil as _sh
+        proj = self.common.project_dir.text()
+        if not proj:
+            self.status_label.setText('프로젝트 폴더를 지정하세요 (공통설정)')
+            return
+        idroot = os.path.join(proj, SUB_SCAN_ID, 'identified')
+        if not os.path.isdir(idroot):
+            self.status_label.setText('identified/ 폴더 없음 (Stage 2 먼저 실행)')
+            return
+        pat = _re.compile(r'^(\d{8}_\d+-\d+)(?:_\d+)?\.(jpg|jpeg|png)$', _re.I)
+        groups = {}
+        for root, _, files in os.walk(idroot):
+            for f in files:
+                m = pat.match(f)
+                if m:
+                    groups.setdefault(m.group(1), []).append(
+                        os.path.join(root, f))
+        dst = os.path.join(proj, SUB_SCAN_ID, '_unmatched')
+        ndup = moved = 0
+        for paths in groups.values():
+            if len(paths) < 2:
+                continue
+            ndup += 1
+            os.makedirs(dst, exist_ok=True)
+            for p in paths:
+                name = os.path.basename(p)
+                d = os.path.join(dst, name)
+                k = 2
+                while os.path.exists(d):
+                    stem, ext = os.path.splitext(name)
+                    d = os.path.join(dst, f'{stem}_{k}{ext}')
+                    k += 1
+                _sh.move(p, d)
+                moved += 1
+        self.refresh_list()
+        self.status_label.setText(
+            f'중복 그룹 {ndup}개 / 파일 {moved}건을 _unmatched/ 로 이동했습니다. '
+            '각 파일을 확인해 올바른 이름으로 재지정하세요.'
+            if ndup else 'identified/ 에 중복 그룹이 없습니다.')
+
+    # ------------------------------------------------------------ 이벤트
     def _on_file_selected(self, item, _prev=None):
         if not item:
             return
         path = item.data(Qt.UserRole)
-        # 썸네일 — OCR에 쓰는 헤더 영역만 (admin_code + sheet_id 모두 포함).
-        # y: 0~22%, x: 0~55% (admin crop_header 18%/40% + sheet ROI 20%/18% 합집합 + 여유)
-        pm = self._load_header_thumbnail(path)
-        if pm is None or pm.isNull():
-            # 폴백: 전체 이미지
-            pm = QPixmap(path)
-        if not pm.isNull():
-            self.thumb.setPixmap(pm.scaled(
-                self.thumb.size(), Qt.KeepAspectRatio,
-                Qt.SmoothTransformation))
-        else:
-            self.thumb.setText(f'이미지 로드 실패: {os.path.basename(path)}')
-        self.status_label.setText(f'선택: {os.path.basename(path)}')
-
-    def _load_header_thumbnail(self, path):
-        """스캔에서 헤더 영역만 크롭해 QPixmap 반환 (OCR ROI와 동일 영역)."""
+        self._world_pts = None
         try:
-            import cv2
-            import numpy as np
-            data = np.fromfile(path, dtype=np.uint8)
-            if data.size == 0:
-                return None
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            if img is None:
-                return None
-            h, w = img.shape[:2]
-            crop = img[:int(h * 0.22), :int(w * 0.55)]
-            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            ch, cw = rgb.shape[:2]
-            from qgis.PyQt.QtGui import QImage
-            qimg = QImage(bytes(rgb.data), cw, ch, 3 * cw,
-                          QImage.Format_RGB888)
-            return QPixmap.fromImage(qimg)
-        except Exception:
-            return None
+            self.scan_view.load(path)
+        except Exception as e:
+            self.status_label.setText(f'이미지 로드 실패: {e}')
+            return
+        # 파일명에서 admin/sheet 힌트
+        import re as _re
+        base = os.path.basename(path)
+        ma = _re.search(r'(\d{8})', base)
+        if ma:
+            idx = self.admin_cb.findData(ma.group(1))
+            if idx >= 0:
+                self.admin_cb.setCurrentIndex(idx)
+        ms = _re.search(r'(\d+-\d+)', base)
+        if ms:
+            self.sheet_cb.setEditText(ms.group(1))
+        self.status_label.setText(f'선택: {base}')
 
     def _on_admin_changed(self, _idx):
-        self.sheet_cb.clear()
         code = self.admin_cb.currentData()
-        if not code:
-            return
-        sheets_map = self._load_pdf_sheets()
-        sheets = sheets_map.get(code, [])
+        cur = self.sheet_cb.currentText()
+        self.sheet_cb.clear()
+        sheets = self._load_pdf_sheets().get(code, []) if code else []
+        has_pdf = bool(sheets)
         if sheets:
             self.sheet_cb.addItems(sheets)
         else:
-            # PDF 없는 admin — 일반 후보 + 자유 입력 안내
-            self.sheet_cb.addItem('')
-            self.sheet_cb.lineEdit().setPlaceholderText(
-                '예: 4-1, 7-5 — 직접 입력 가능')
-        # 현재 선택된 파일명에서 sheet 힌트 추출 — 우선 선택
-        item = self.file_list.currentItem()
-        if item:
-            import re as _re
-            m = _re.search(r'(\d+-\d+)', os.path.basename(
-                item.data(Qt.UserRole)))
-            if m:
-                hint = m.group(1)
-                idx = self.sheet_cb.findText(hint)
-                if idx >= 0:
-                    self.sheet_cb.setCurrentIndex(idx)
-                else:
-                    self.sheet_cb.setEditText(hint)
+            self.sheet_cb.lineEdit().setPlaceholderText('예: 4-1 (직접 입력)')
+        if cur:
+            self.sheet_cb.setEditText(cur)
+        # 모드 표시 + GCP 버튼 토글
+        self.btn_map_pick.setEnabled(not has_pdf and self.iface is not None)
+        if has_pdf:
+            self.mode_label.setText(
+                '모드: <b>PDF</b> — 크롭만, world bbox 는 PDF 메타로 자동. '
+                '정합은 Stage 3 SIFT 가 수행.')
+        elif self.iface is None:
+            self.mode_label.setText('모드: GCP 필요하나 iface 없음 — PDF 폴더 확인')
+        else:
+            self.mode_label.setText(
+                '모드: <b>GCP</b> (PDF 없음) — 스캔 4점 + 지도 4점으로 직접 '
+                '지오레퍼런싱. Stage 3 생략, Stage 4 부터 잇습니다.')
 
+    def _on_pts_changed(self, n):
+        self.pts_label.setText(f'스캔 점: {n}/4')
+
+    def _on_skip(self):
+        row = self.file_list.currentRow()
+        if row >= 0:
+            self.file_list.setCurrentRow(
+                min(row + 1, self.file_list.count() - 1))
+
+    # ------------------------------------------------------------ 지도 4점 (GCP)
+    def _start_map_pick(self):
+        if self.iface is None:
+            return
+        from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
+        from qgis.core import QgsWkbTypes
+        canvas = self.iface.mapCanvas()
+        self._world_pts = None
+        self._world_canvas_pts = []
+        if self._rubber is None:
+            self._rubber = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
+            self._rubber.setColor(QColor('#ff3030'))
+            self._rubber.setIconSize(11)
+        self._rubber.reset(QgsWkbTypes.PointGeometry)
+        self._prev_tool = canvas.mapTool()
+        self._map_tool = QgsMapToolEmitPoint(canvas)
+        self._map_tool.canvasClicked.connect(self._on_map_click)
+        canvas.setMapTool(self._map_tool)
+        self.status_label.setText(
+            '지도에서 ' + ' → '.join(self.CORNER_KO) + ' 순으로 4점 클릭')
+
+    def _on_map_click(self, point, _button):
+        self._rubber.addPoint(point)
+        self._world_canvas_pts.append(point)
+        n = len(self._world_canvas_pts)
+        if n < 4:
+            self.status_label.setText(
+                f'지도 점 {n}/4 — 다음: {self.CORNER_KO[n]}')
+            return
+        canvas = self.iface.mapCanvas()
+        canvas.unsetMapTool(self._map_tool)
+        if self._prev_tool is not None:
+            canvas.setMapTool(self._prev_tool)
+        # 캔버스 CRS → EPSG:5179
+        from qgis.core import (QgsProject, QgsCoordinateReferenceSystem,
+                               QgsCoordinateTransform)
+        src = QgsProject.instance().crs()
+        dst = QgsCoordinateReferenceSystem('EPSG:5179')
+        xform = QgsCoordinateTransform(src, dst, QgsProject.instance())
+        w = [xform.transform(c) for c in self._world_canvas_pts]
+        self._world_pts = [(p.x(), p.y()) for p in w]
+        self.status_label.setText('지도 4점 완료 — [저장] 가능')
+
+    # ------------------------------------------------------------ 저장
     def _on_save(self):
         item = self.file_list.currentItem()
         if not item:
             self.status_label.setText('파일을 선택하세요')
             return
-        src = item.data(Qt.UserRole)
-        code = self.admin_cb.currentData()
-        sid = self.sheet_cb.currentText()
-        if not code or not sid or '-' not in sid:
-            self.status_label.setText('행정코드·시트번호를 올바르게 선택하세요')
+        code = self.admin_cb.currentData() or self.admin_cb.currentText().strip()
+        sid = self.sheet_cb.currentText().strip()
+        if not code or len(code) != 8 or not code.isdigit():
+            self.status_label.setText('행정코드(8자리)를 올바르게 지정하세요')
             return
-        ext = os.path.splitext(src)[1] or '.jpg'
-        sub_dir = os.path.join(self._identified_dir(), code[:2], code[:5])
-        os.makedirs(sub_dir, exist_ok=True)
-        dst = os.path.join(sub_dir, f'{code}_{sid}{ext}')
-        # 중복 방지
-        k = 2
-        while os.path.exists(dst):
-            dst = os.path.join(sub_dir, f'{code}_{sid}_{k}{ext}')
-            k += 1
-        import shutil as _sh
+        if not sid or '-' not in sid:
+            self.status_label.setText('시트번호를 올바르게 지정하세요 (예: 4-1)')
+            return
+        quad = self.scan_view.points()
+        if quad is None:
+            self.status_label.setText('스캔에서 4꼭지점을 모두 찍으세요')
+            return
+        proj = self.common.project_dir.text()
+        if not proj:
+            self.status_label.setText('프로젝트 폴더를 지정하세요 (공통설정)')
+            return
+        src = item.data(Qt.UserRole)
+        has_pdf = sid in self._load_pdf_sheets().get(code, [])
         try:
-            _sh.copy2(src, dst)
+            if has_pdf:
+                self._save_pdf_mode(src, code, sid, quad, proj)
+            else:
+                self._save_gcp_mode(src, code, sid, quad, proj)
         except Exception as e:
             self.status_label.setText(f'저장 실패: {e}')
             return
+        # 처리 끝난 원본 회수 (재목록화·재처리 방지) + 리스트에서 제거
+        self._retire_src(src, proj)
+        self.file_list.takeItem(self.file_list.currentRow())
+        self.count_label.setText(f'대상: {self.file_list.count()}건')
+        self.scan_view.reset_points()
 
-        # sheets_geo + sheet_bboxes.json 업데이트 — Stage 3/4가 의존
+    def _retire_src(self, src, proj):
+        """처리 끝난 원본을 _recovered/ 로 이동. 프로젝트(2_scan_id) 내부
+        파일만 — 외부에서 '스캔 파일 추가' 한 원본은 건드리지 않는다."""
+        import shutil as _sh
+        root = os.path.join(proj, SUB_SCAN_ID)
+        rel = os.path.relpath(src, root)
+        if rel.startswith('..') or os.path.isabs(rel) \
+                or rel.split(os.sep, 1)[0] == '_recovered':
+            return
+        if not os.path.exists(src):   # 이미 _quarantine 으로 이동됨
+            return
+        dst = os.path.join(root, '_recovered', rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        k = 2
+        while os.path.exists(dst):
+            stem, ext = os.path.splitext(dst)
+            dst = f'{stem}_{k}{ext}'
+            k += 1
+        _sh.move(src, dst)
+
+    def _save_pdf_mode(self, src, code, sid, quad, proj):
+        from .tools.manual_georef import crop_map_region
+        out = os.path.join(proj, SUB_MAP_EXTRACTED, code[:2], code[:5],
+                           f'{code}_{sid}.jpg')
+        w, h = crop_map_region(src, quad, out)
         warn = self._update_sheet_geo(code, sid)
+        # 2b(extract_map) 재실행이 이 수동 크롭을 덮어쓰지 못하게,
+        # identified/ 의 동일 시트 원본을 _recovered/ 로 격리.
+        moved = self._quarantine_identified(proj, code, sid)
+        msg = (f'[PDF 모드] 크롭 저장 {w}×{h}px → {out}\n'
+               '→ Stage 3(매칭) → Stage 4(병합) 재실행하세요.')
+        if moved:
+            msg += f'\nidentified/ 원본 {moved}건을 _recovered/ 로 격리 (2b 보호).'
+        self.status_label.setText(msg + (f'\n주의: {warn}' if warn else ''))
 
-        msg = f'저장 완료: {dst}'
-        if warn:
-            msg += f' — 주의: {warn}'
-        else:
-            msg += ' (sheets_geo + bbox 갱신)'
-        self.status_label.setText(msg)
-        # 리스트에서 현재 항목 제거
-        row = self.file_list.currentRow()
-        self.file_list.takeItem(row)
-        self.count_label.setText(f'미식별: {self.file_list.count()}건')
+    def _quarantine_identified(self, proj, code, sid):
+        """identified/ 에 있는 동일 (code, sid) 원본을 _recovered/ 로 이동.
+
+        2b(stage_extract_map)는 identified/ 를 os.walk 로 재귀 탐색·덮어쓰므로,
+        identified/ '바깥'(_recovered/)으로 옮겨야 2b 재실행에도 수동 크롭
+        (3_map_extracted/)이 보존된다.
+        Returns: 이동한 파일 수.
+        """
+        import re as _re
+        import shutil as _sh
+        base = os.path.join(proj, SUB_SCAN_ID, 'identified', code[:2], code[:5])
+        if not os.path.isdir(base):
+            return 0
+        pat = _re.compile(
+            rf'^{code}_{_re.escape(sid)}(?:_\d+)?\.(jpg|jpeg|png)$', _re.I)
+        dst_dir = os.path.join(proj, SUB_SCAN_ID, '_recovered',
+                               code[:2], code[:5])
+        moved = 0
+        for f in os.listdir(base):
+            if not pat.match(f):
+                continue
+            os.makedirs(dst_dir, exist_ok=True)
+            dst = os.path.join(dst_dir, f)
+            k = 2
+            while os.path.exists(dst):
+                stem, ext = os.path.splitext(f)
+                dst = os.path.join(dst_dir, f'{stem}_{k}{ext}')
+                k += 1
+            _sh.move(os.path.join(base, f), dst)
+            moved += 1
+        return moved
+
+    def _save_gcp_mode(self, src, code, sid, quad, proj):
+        if not self._world_pts or len(self._world_pts) != 4:
+            raise ValueError('PDF 없는 admin — 지도에서 월드 4점을 먼저 찍으세요')
+        from .tools.manual_georef import georef_from_gcps
+        out = os.path.join(proj, SUB_WARPED, code[:2], code[:5],
+                           f'{code}_{sid}', f'{code}_{sid}.jpg')
+        bbox = georef_from_gcps(src, quad, self._world_pts, out)
+        self._write_bbox_entry(proj, code, sid, bbox)
+        self._world_pts = None
+        self.status_label.setText(
+            f'[GCP 모드] 지오레퍼런싱 저장 → {out}\n'
+            '→ Stage 4(병합) 재실행하세요 (Stage 3 불필요).')
 
     def _update_sheet_geo(self, code, sid):
-        """Stage 2 SheetCache 로 sheets_geo/{code}_{sid}.jpg|jgw 생성 및
-        sheet_bboxes.json 항목 업데이트.
-
-        Returns: 경고 메시지 (성공 시 None).
-        """
+        """PDF 메타로 sheets_geo/{code}_{sid} + sheet_bboxes.json 갱신.
+        Returns: 경고 메시지 (성공 시 None)."""
         proj = self.common.project_dir.text()
         pdf_input = self.common.pdf_input.text()
         if not proj or not pdf_input:
@@ -821,15 +1098,8 @@ class RecoveryTab(QWidget):
             return f'Stage 1 출력 폴더 없음: {pdf_main}'
         os.makedirs(sheets_geo, exist_ok=True)
         try:
-            from .tools.stage2_scan_identify import SheetCache
-            sheet_cache_dir = os.path.join(proj, SUB_SCAN_ID, '_sheet_cache')
-            cache = SheetCache(pdf_input, pdf_main,
-                               cache_dir=sheet_cache_dir,
-                               bbox_cache_path=(bbox_json
-                                                if os.path.exists(bbox_json)
-                                                else None))
-            bbox = cache.compute_sheet_world_bbox(code, sid)
-            if bbox is None:
+            cache = self._get_sheet_cache(pdf_input, pdf_main, bbox_json)
+            if cache.compute_sheet_world_bbox(code, sid) is None:
                 return f'sheet bbox 계산 실패: {code} {sid}'
             cache.export_sheet_geo(code, sid, sheets_geo)
             import json as _json
@@ -839,12 +1109,34 @@ class RecoveryTab(QWidget):
             return f'sheets_geo 생성 실패: {e}'
         return None
 
-    def _on_skip(self):
-        row = self.file_list.currentRow()
-        if row >= 0:
-            next_row = min(row + 1, self.file_list.count() - 1)
-            self.file_list.setCurrentRow(next_row)
+    def _get_sheet_cache(self, pdf_input, pdf_main, bbox_json):
+        """SheetCache 1회 생성·재사용 — 시트마다 PDF 폴더 재인덱싱 회피.
+        (refresh_list 에서 무효화)."""
+        if self._sheet_cache_obj is None:
+            from .tools.stage2_scan_identify import SheetCache
+            proj = self.common.project_dir.text()
+            self._sheet_cache_obj = SheetCache(
+                pdf_input, pdf_main,
+                cache_dir=os.path.join(proj, SUB_SCAN_ID, '_sheet_cache'),
+                bbox_cache_path=(bbox_json if os.path.exists(bbox_json)
+                                 else None))
+        return self._sheet_cache_obj
 
+    def _write_bbox_entry(self, proj, code, sid, bbox):
+        """GCP 모드 — sheet_bboxes.json 에 단일 항목 병합."""
+        import json as _json
+        path = os.path.join(proj, SUB_SCAN_ID, 'sheet_bboxes.json')
+        data = {}
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    data = _json.load(f)
+            except Exception:
+                data = {}
+        data.setdefault(code, {})[sid] = list(bbox)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            _json.dump(data, f, indent=2)
 
 # ============================================================
 # 지도영역 추출 (화면정의서 S7) — Stage 2와 Stage 3 사이의 독립 탭
@@ -1122,7 +1414,7 @@ class GISScanToolsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(Stage1Tab(self.common), '1. PDF 좌표생성')
         self.tabs.addTab(Stage2Tab(self.common), '2. 스캔 식별')
-        self.tabs.addTab(RecoveryTab(self.common), '2a. 미식별 보강')
+        self.tabs.addTab(RecoveryTab(self.common, self.iface), '2a. 수동 정합')
         self.tabs.addTab(ExtractMapTab(self.common), '2b. 지도영역 추출')
         self.tabs.addTab(Stage3Tab(self.common), '3. 매칭+워핑')
         self.tabs.addTab(Stage4Tab(self.common), '4. 사분면 병합')

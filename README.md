@@ -27,7 +27,7 @@ QGIS 툴바에 아이콘 3개 + 전용 편집 툴바:
 |---|---|---|
 | **1. PDF 좌표생성** | 메인 PDF에 JGW 부여 | PDF 메타(축척+분할도 라벨) + SHP admin bbox — 즉시, ≤4m. SIFT/Powell 폴백 |
 | **2. 스캔 식별** | 스캔의 (admin_code, sheet_id) 판정 | 헤더 OCR + SHP 한글명/fuzzy 회수 + PDF 후보 매칭 |
-| **2a. 미식별 보강** | 실패 스캔 수동 지정 | SHP 드롭다운 UI — CSV 편집 불필요 |
+| **2a. 수동 정합** | 식별 실패·오식별·헤더 절단 스캔을 사람이 복구 | 이름 지정 + 스캔 지도영역 4꼭지점 클릭. PDF 모드(크롭→bbox 자동, 정합은 Stage 3) / GCP 모드(지도 4점까지 → 직접 지오레퍼런싱, Stage 3 생략) |
 | **2b. 지도영역 추출** | 스캔 프레임 안쪽 잘라냄 | HSV 적응 게이트 (시트별 흰 톤 v_p95 기준) + zone 별 라인 검출 + 사이즈 sanity (참조 PDF 불필요) |
 | **3. 매칭+워핑** | 스캔 ↔ 분할 PDF → 픽셀 정합 | SIFT + MAGSAC 단일 H + admin 폴리곤 inlier 필터. 출력 = sheet PDF 1:1 frame |
 | **4. 병합** | 시트별 크롭 → 모자이크 | sheet world bbox 기반 + 테두리 여유 옵션 |
@@ -47,11 +47,19 @@ QGIS 툴바에 아이콘 3개 + 전용 편집 툴바:
 
 Stage 2 실행 → FAIL이면 _unmatched/에 격리
   ↓
-[2a. 미식별 보강] 탭 → 파일 선택 → 썸네일 확인
-  → admin_code 드롭다운(SHP 전국 3561개 검색) + sheet_id 드롭다운
-  → [저장] → identified/{시도}/{시군구}/{admin}_{sheet}.jpg 로 복사
-  ↓
-Stage 3 재실행 → identified/ 폴더 스캔 → 자동 포함
+[2a. 수동 정합] 탭 → 파일 선택 → 오른쪽 스캔에서 지도영역 4꼭지점
+   (좌상→우상→우하→좌하) 클릭 → admin_code/sheet_id 지정 → [저장]
+  ├ PDF 모드(분할 PDF 있음): 정류 크롭 → 3_map_extracted/, world bbox 는
+  │   PDF 메타로 자동, 정합은 Stage 3 SIFT 가 수행. → Stage 3 → 4 재실행.
+  │   identified/ 의 동일 시트 원본은 _recovered/ 로 격리(2b 재실행 보호).
+  └ GCP 모드(PDF 없음): 지도 캔버스에서 월드 4점까지 클릭 → 직접
+      지오레퍼런싱 → 4_warped/. Stage 3 생략, Stage 4 부터 재실행.
+
+헤더 절단 스캔은 헤더 OCR(식별)·zone 추출(2b)이 깨지지만 PDF·SIFT 는
+멀쩡하므로, 사람은 이름 + 지도영역만 주면 된다.
+
+OCR 오식별로 같은 이름이 중복(_2 등) 저장된 경우:
+[중복 수집] → 그룹 전원을 _unmatched/ 로 끌어내 각각 재확인.
 ```
 
 Stage 1 실패 admin은:
@@ -227,9 +235,10 @@ python -m gis_scan_tools.tools.stage5_validate \
 ├── 2_scan_id/
 │   ├── _identification.csv        # 식별 결과 (감사 로그)
 │   ├── sheet_bboxes.json          # admin별 시트별 world bbox
-│   ├── identified/                # 표준명 스캔 (Stage 3 입력)
+│   ├── identified/                # 표준명 스캔 (2b 입력)
 │   │   └── {시도}/{시군구}/{admin}_{sheet}.jpg
-│   ├── _unmatched/                # 실패 스캔 (2a 탭으로 보강)
+│   ├── _unmatched/                # 실패 스캔 (2a 탭으로 복구)
+│   ├── _recovered/                # 2a 처리 끝난 원본 격리 (2b 재처리 방지)
 │   ├── sheets_geo/                # 분할 PDF + JGW (Stage 3 매칭용)
 │   └── _sheet_cache/
 ├── 2b_map_only/                   # 헤더/프레임 제거 스캔 (HSV 게이트)
@@ -251,7 +260,7 @@ python -m gis_scan_tools.tools.stage5_validate \
 
 - **Stage 1 cost > 2px / PDF 메타 실패**: 텍스트 임베드 없는 PDF(이미지만)인지 확인. `--no-pdf-meta`로 SIFT 폴백 강제 가능
 - **Stage 1 다도해 admin(추자면 등) 실패**: PDF 메타 경로가 자동 대응. 여전히 실패 시 [외부 JGW 가져오기] 수동 해결
-- **Stage 2 OCR 실패**: `--shp` 필수. 그래도 실패한 파일은 `_unmatched/`에 격리 → [2a. 미식별 보강] 탭으로 해결
+- **Stage 2 OCR 실패 / 오식별 / 헤더 절단**: 실패 파일은 `_unmatched/`에 격리 → [2a. 수동 정합] 탭에서 이름 지정 + 지도영역 4꼭지점 클릭으로 복구. 같은 이름 중복(_2)은 [중복 수집]으로 재확인
 - **Stage 2 sheet bbox 부정확**: PDF 텍스트 라벨 없으면 SIFT 폴백. 모서리 ±15m 허용
 - **S7 추출 실패 (frame 미검출)**: row/col 모두 임계 미달인 거의 빈 시트. 헤더 신호조차 약하면 ValueError 로 표시 — 스캔 재촬영 권장
 - **S7 silent fail 차단**: 추출 영역이 image × 0.30 미만이면 ValueError. 이전 height=2 같은 무결과 OK 보고 차단됨
@@ -302,7 +311,7 @@ gis_scan_tools/
 - SHP 기반 Stage 2 OCR 회수 (자릿수 fuzzy + 한글명 lookup)
 - PDF 라벨 기반 sheet bbox (SIFT 우회, ±15m)
 - CSV → 폴더 기반 파이프라인 전환
-- 미식별 보강 UI (드롭다운)
+- 수동 정합 UI (이름 지정 + 지도영역 4꼭지점 클릭, PDF/GCP 모드)
 - DB 작업 플러그인 (PG 연결 + 엑셀 탑재 + 행정리 편집)
 - QGIS 3.40 편집 툴바 (Toggle/Save/Split/Simplify)
 - S7 적응 HSV 게이트 (시트별 V 톤 차이 흡수) + zone 별 라인 검출 + 사이즈 sanity → silent fail 차단
