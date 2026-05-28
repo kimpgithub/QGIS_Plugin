@@ -205,6 +205,30 @@ def _axis_aligned_fallback(scan_img, sheet_img, sheet_jgw, out_dir, base,
                          method='AXIS_ALIGNED_FALLBACK', t_total=t_total)
 
 
+def _warp_quad_sane(H_full, sw, sh, out_w, out_h,
+                    min_area_ratio=0.25, max_area_ratio=4.0):
+    """H_full 로 스캔 4코너를 sheet 픽셀로 보낸 quad 가 정상인지 검사.
+
+    다도해/빈 바다처럼 특징이 희박한 시트에서 MAGSAC 이 특이(degenerate) H 를
+    뱉으면 warp 결과가 나비넥타이로 붕괴한다(inlier 수는 게이트를 통과해도).
+    유한값 + 볼록(자기교차 없음) + 면적이 출력 프레임의 일정 비율 범위인지로
+    이를 걸러 axis-aligned 폴백으로 보낸다.
+    """
+    corners = np.float32([[[0, 0], [sw, 0], [sw, sh], [0, sh]]])
+    pts = cv2.perspectiveTransform(corners, H_full)[0]
+    if not np.all(np.isfinite(pts)):
+        return False
+    edges = np.roll(pts, -1, axis=0) - pts          # e_i = p_{i+1} - p_i
+    nxt = np.roll(edges, -1, axis=0)                # e_{i+1}
+    cross = edges[:, 0] * nxt[:, 1] - edges[:, 1] * nxt[:, 0]
+    if not (np.all(cross > 0) or np.all(cross < 0)):  # 볼록 아니면 자기교차
+        return False
+    x, y = pts[:, 0], pts[:, 1]
+    area = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    frame = float(out_w * out_h)
+    return min_area_ratio * frame <= area <= max_area_ratio * frame
+
+
 def _passthrough(scan_img, scan_jpg, out_dir, base, result, t_total):
     """PDF-less passthrough — 스캔 원본 그대로 복사. JGW 없음.
 
@@ -377,6 +401,16 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     S = np.diag([scan_scale, scan_scale, 1.0])
     H_full = np.linalg.inv(S) @ H @ S   # scan(full) → sheet PDF px
     out_h, out_w = sheet_img.shape[:2]
+
+    # H 정상성 가드 — degenerate H(다도해/빈 바다) 는 붕괴 warp 을 낸다.
+    # inlier 게이트를 통과했더라도 quad 가 비정상이면 axis-aligned 폴백.
+    if not _warp_quad_sane(H_full, sw, sh, out_w, out_h):
+        return _axis_aligned_fallback(
+            scan_img, sheet_img, sheet_jgw, out_dir, base,
+            save_intermediates, result, t_total,
+            fallback_reason=f'degenerate H (inliers={n_inl}, '
+                            f'{100*inlier_pct:.1f}%)')
+
     target_ps = abs(sheet_jgw.pixel_size_x)
     result['output_size'] = [out_w, out_h]
     out_minx = sheet_jgw.top_left_x
