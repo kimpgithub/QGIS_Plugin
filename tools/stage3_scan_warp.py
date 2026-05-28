@@ -399,17 +399,34 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     # degenerate → bbox=0x0 발생. sheet PDF 본문 사이즈/JGW 를 그대로 사용하면
     # H 외삽 의존성 제거, Stage 4 mosaic 도 PDF 좌표계 기준이라 자연 호환.
     S = np.diag([scan_scale, scan_scale, 1.0])
-    H_full = np.linalg.inv(S) @ H @ S   # scan(full) → sheet PDF px
+    inv_S = np.linalg.inv(S)
     out_h, out_w = sheet_img.shape[:2]
 
-    # H 정상성 가드 — degenerate H(다도해/빈 바다) 는 붕괴 warp 을 낸다.
-    # inlier 게이트를 통과했더라도 quad 가 비정상이면 axis-aligned 폴백.
-    if not _warp_quad_sane(H_full, sw, sh, out_w, out_h):
-        return _axis_aligned_fallback(
-            scan_img, sheet_img, sheet_jgw, out_dir, base,
-            save_intermediates, result, t_total,
-            fallback_reason=f'degenerate H (inliers={n_inl}, '
-                            f'{100*inlier_pct:.1f}%)')
+    # 변환 모델 단계 선택:
+    #  1) 사영 H 가 정상(볼록·면적 정상)이면 그대로 — 종이 휨까지 보정.
+    #  2) degenerate(다도해/빈 바다: inlier 적고 몰림 → 나비넥타이 붕괴)면
+    #     같은 inlier 로 4-DOF 유사변환(회전+축척+이동)을 풀어 참 축척 복원.
+    #     유사변환은 평행사변형이라 붕괴가 구조적으로 불가 → 안정.
+    #  3) 그조차 실패하면 axis-aligned 폴백.
+    H_full = inv_S @ H @ S              # scan(full) → sheet PDF px
+    if _warp_quad_sane(H_full, sw, sh, out_w, out_h):
+        transform, method = H_full, 'SIFT_MAGSAC_H'
+    else:
+        M, _ = cv2.estimateAffinePartial2D(
+            src[inl], dst[inl], method=cv2.RANSAC, ransacReprojThreshold=3.0)
+        sim_full = (inv_S @ np.vstack([M, [0, 0, 1]]) @ S
+                    if M is not None else None)
+        # 유사변환은 볼록 보장 → 면적비 게이트는 풀고 유한·양면적만 확인
+        if sim_full is not None and _warp_quad_sane(
+                sim_full, sw, sh, out_w, out_h,
+                min_area_ratio=1e-4, max_area_ratio=1e4):
+            transform, method = sim_full, 'SIFT_SIMILARITY'
+            print(f'  degenerate H → 유사변환 폴백 (inliers={n_inl})')
+        else:
+            return _axis_aligned_fallback(
+                scan_img, sheet_img, sheet_jgw, out_dir, base,
+                save_intermediates, result, t_total,
+                fallback_reason=f'degenerate H, 유사변환 실패 (inliers={n_inl})')
 
     target_ps = abs(sheet_jgw.pixel_size_x)
     result['output_size'] = [out_w, out_h]
@@ -420,21 +437,18 @@ def match_and_warp(scan_jpg, admin_code, sheet_id, out_dir, sheet_cache,
     result['world_bbox'] = [float(out_minx), float(out_miny),
                              float(out_maxx), float(out_maxy)]
 
-    # 8) 단일 H 워핑 — 분할시트 한 장 안에선 종이 휨이 거의 선형 → 단일
-    # 호모그래피가 TPS 보다 정확. TPS smoothing=0+400 GCP 는 GCP 사이에서
-    # 진동(Runge) 으로 mean abs-diff 23→30 회귀 발생. 단일 H 로 회복.
+    # 분할시트 한 장 안에선 종이 휨이 거의 선형 → 단일 변환이 TPS 보다 정확.
     t = time.time()
     warped = cv2.warpPerspective(
-        scan_img, H_full, (out_w, out_h),
+        scan_img, transform, (out_w, out_h),
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
-    print(f'  단일 H 워핑: {time.time()-t:.1f}s')
+    print(f'  {method} 워핑: {time.time()-t:.1f}s')
 
-    # 10) 저장
     result['target_ps'] = target_ps
     return _save_warped(warped, sheet_jgw, out_dir, base,
                          save_intermediates, result,
-                         method='SIFT_MAGSAC_H', t_total=t_total)
+                         method=method, t_total=t_total)
 
 
 # ============================================================
