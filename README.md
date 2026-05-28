@@ -27,7 +27,7 @@ QGIS 툴바에 아이콘 3개 + 전용 편집 툴바:
 |---|---|---|
 | **1. PDF 좌표생성** | 메인 PDF에 JGW 부여 | PDF 메타(축척+분할도 라벨) + SHP admin bbox — 즉시, ≤4m. SIFT/Powell 폴백 |
 | **2. 스캔 식별** | 스캔의 (admin_code, sheet_id) 판정 | 헤더 OCR + SHP 한글명/fuzzy 회수 + PDF 후보 매칭 |
-| **2a. 수동 정합** | 식별 실패·오식별·헤더 절단 스캔을 사람이 복구 | 이름 지정 + 스캔 지도영역 4꼭지점 클릭. PDF 모드(크롭→bbox 자동, 정합은 Stage 3) / GCP 모드(지도 4점까지 → 직접 지오레퍼런싱, Stage 3 생략) |
+| **2a. 수동 정합** | 식별 실패·오식별·헤더 절단 스캔을 사람이 복구 | 스캔 지도영역 4꼭지점(좌상→우상→우하→좌하) 클릭 + 이름 지정 → 정류 크롭. world bbox 는 PDF 메타 자동, 정합은 Stage 3 SIFT |
 | **2b. 지도영역 추출** | 스캔 프레임 안쪽 잘라냄 | HSV 적응 게이트 (시트별 흰 톤 v_p95 기준) + zone 별 라인 검출 + 사이즈 sanity (참조 PDF 불필요) |
 | **3. 매칭+워핑** | 스캔 ↔ 분할 PDF → 픽셀 정합 | SIFT + MAGSAC 단일 H + admin 폴리곤 inlier 필터. 출력 = sheet PDF 1:1 frame |
 | **4. 병합** | 시트별 크롭 → 모자이크 | sheet world bbox 기반 + 테두리 여유 옵션 |
@@ -49,14 +49,13 @@ Stage 2 실행 → FAIL이면 _unmatched/에 격리
   ↓
 [2a. 수동 정합] 탭 → 파일 선택 → 오른쪽 스캔에서 지도영역 4꼭지점
    (좌상→우상→우하→좌하) 클릭 → admin_code/sheet_id 지정 → [저장]
-  ├ PDF 모드(분할 PDF 있음): 정류 크롭 → 3_map_extracted/, world bbox 는
-  │   PDF 메타로 자동, 정합은 Stage 3 SIFT 가 수행. → Stage 3 → 4 재실행.
-  │   identified/ 의 동일 시트 원본은 _recovered/ 로 격리(2b 재실행 보호).
-  └ GCP 모드(PDF 없음): 지도 캔버스에서 월드 4점까지 클릭 → 직접
-      지오레퍼런싱 → 4_warped/. Stage 3 생략, Stage 4 부터 재실행.
+  → 정류 크롭을 3_map_extracted/ 에 저장, world bbox 는 PDF 메타로 자동,
+    정합은 Stage 3 SIFT. → Stage 3 → 4 재실행.
+    identified/ 의 동일 시트 원본은 _recovered/ 로 격리(2b 재실행 보호).
 
 헤더 절단 스캔은 헤더 OCR(식별)·zone 추출(2b)이 깨지지만 PDF·SIFT 는
-멀쩡하므로, 사람은 이름 + 지도영역만 주면 된다.
+멀쩡하므로, 사람은 이름 + 지도영역만 주면 된다. (분할 PDF 가 없는 시트는
+자동 bbox 계산이 불가하므로 저장이 거부된다.)
 
 OCR 오식별로 같은 이름이 중복(_2 등) 저장된 경우:
 [중복 수집] → 그룹 전원을 _unmatched/ 로 끌어내 각각 재확인.
@@ -311,7 +310,7 @@ gis_scan_tools/
 - SHP 기반 Stage 2 OCR 회수 (자릿수 fuzzy + 한글명 lookup)
 - PDF 라벨 기반 sheet bbox (SIFT 우회, ±15m)
 - CSV → 폴더 기반 파이프라인 전환
-- 수동 정합 UI (이름 지정 + 지도영역 4꼭지점 클릭, PDF/GCP 모드)
+- 수동 정합 UI (스캔 지도영역 4꼭지점 클릭 + 이름 지정 → 정류 크롭, bbox 는 PDF 메타 자동)
 - DB 작업 플러그인 (PG 연결 + 엑셀 탑재 + 행정리 편집)
 - QGIS 3.40 편집 툴바 (Toggle/Save/Split/Simplify)
 - S7 적응 HSV 게이트 (시트별 V 톤 차이 흡수) + zone 별 라인 검출 + 사이즈 sanity → silent fail 차단

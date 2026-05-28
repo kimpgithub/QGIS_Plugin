@@ -609,25 +609,18 @@ class ScanCornerView(QGraphicsView):
 class RecoveryTab(QWidget):
     """수동 정합 — 헤더 절단·OCR 실패·오식별 스캔을 사람이 직접 복구.
 
-    절차: 파일 선택 → (admin_code, sheet_id) 지정 → 스캔 위 지도영역 4꼭지점
-    클릭 → [저장]. admin 에 분할 PDF 가 있으면 'PDF 모드'(크롭만, world bbox 는
-    PDF 메타로 자동, 정합은 Stage 3 SIFT), 없으면 'GCP 모드'(지도 위 4점까지
-    찍어 직접 지오레퍼런싱, Stage 3 생략).
+    절차(단일): 파일 선택 → 스캔 위 지도영역 4꼭지점(좌상→우상→우하→좌하)
+    클릭 → (admin_code, sheet_id) 지정 → [저장]. 정류 크롭을 3_map_extracted/
+    에 저장하고 world bbox 는 PDF 메타로 자동 계산(정합은 Stage 3 SIFT).
+    분할 PDF 가 없는 시트는 자동 bbox 계산이 불가하므로 저장이 거부된다.
     """
-    CORNER_KO = ['좌상(TL)', '우상(TR)', '우하(BR)', '좌하(BL)']
 
-    def __init__(self, common, iface=None):
+    def __init__(self, common):
         super().__init__()
         self.common = common
-        self.iface = iface
         self._shp_cache = None    # (items, name_map)
         self._pdf_cache = None    # {admin_code: [sheet_id]}
         self._sheet_cache_obj = None  # 재사용 SheetCache (PDF 재인덱싱 회피)
-        # GCP 모드 상태
-        self._map_tool = None
-        self._prev_tool = None
-        self._rubber = None
-        self._world_pts = None    # [(x,y), ...] EPSG:5179, 4점
         self._build_ui()
 
     # ------------------------------------------------------------ UI
@@ -690,16 +683,6 @@ class RecoveryTab(QWidget):
         self.sheet_cb.setEditable(True)
         form.addRow('시트번호:', self.sheet_cb)
         right.addLayout(form)
-
-        self.mode_label = QLabel('모드: —')
-        self.mode_label.setWordWrap(True)
-        right.addWidget(self.mode_label)
-
-        # GCP 모드 전용 (PDF 없는 admin) — 지도에서 월드 4점 찍기
-        self.btn_map_pick = QPushButton('지도에서 월드 4점 찍기 (PDF 없을 때만)')
-        self.btn_map_pick.clicked.connect(self._start_map_pick)
-        self.btn_map_pick.setEnabled(False)
-        right.addWidget(self.btn_map_pick)
 
         btn_row = QHBoxLayout()
         self.btn_save = QPushButton('저장')
@@ -870,7 +853,6 @@ class RecoveryTab(QWidget):
         if not item:
             return
         path = item.data(Qt.UserRole)
-        self._world_pts = None
         try:
             self.scan_view.load(path)
         except Exception as e:
@@ -894,25 +876,12 @@ class RecoveryTab(QWidget):
         cur = self.sheet_cb.currentText()
         self.sheet_cb.clear()
         sheets = self._load_pdf_sheets().get(code, []) if code else []
-        has_pdf = bool(sheets)
         if sheets:
             self.sheet_cb.addItems(sheets)
         else:
             self.sheet_cb.lineEdit().setPlaceholderText('예: 4-1 (직접 입력)')
         if cur:
             self.sheet_cb.setEditText(cur)
-        # 모드 표시 + GCP 버튼 토글
-        self.btn_map_pick.setEnabled(not has_pdf and self.iface is not None)
-        if has_pdf:
-            self.mode_label.setText(
-                '모드: <b>PDF</b> — 크롭만, world bbox 는 PDF 메타로 자동. '
-                '정합은 Stage 3 SIFT 가 수행.')
-        elif self.iface is None:
-            self.mode_label.setText('모드: GCP 필요하나 iface 없음 — PDF 폴더 확인')
-        else:
-            self.mode_label.setText(
-                '모드: <b>GCP</b> (PDF 없음) — 스캔 4점 + 지도 4점으로 직접 '
-                '지오레퍼런싱. Stage 3 생략, Stage 4 부터 잇습니다.')
 
     def _on_pts_changed(self, n):
         self.pts_label.setText(f'스캔 점: {n}/4')
@@ -922,49 +891,6 @@ class RecoveryTab(QWidget):
         if row >= 0:
             self.file_list.setCurrentRow(
                 min(row + 1, self.file_list.count() - 1))
-
-    # ------------------------------------------------------------ 지도 4점 (GCP)
-    def _start_map_pick(self):
-        if self.iface is None:
-            return
-        from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
-        from qgis.core import QgsWkbTypes
-        canvas = self.iface.mapCanvas()
-        self._world_pts = None
-        self._world_canvas_pts = []
-        if self._rubber is None:
-            self._rubber = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
-            self._rubber.setColor(QColor('#ff3030'))
-            self._rubber.setIconSize(11)
-        self._rubber.reset(QgsWkbTypes.PointGeometry)
-        self._prev_tool = canvas.mapTool()
-        self._map_tool = QgsMapToolEmitPoint(canvas)
-        self._map_tool.canvasClicked.connect(self._on_map_click)
-        canvas.setMapTool(self._map_tool)
-        self.status_label.setText(
-            '지도에서 ' + ' → '.join(self.CORNER_KO) + ' 순으로 4점 클릭')
-
-    def _on_map_click(self, point, _button):
-        self._rubber.addPoint(point)
-        self._world_canvas_pts.append(point)
-        n = len(self._world_canvas_pts)
-        if n < 4:
-            self.status_label.setText(
-                f'지도 점 {n}/4 — 다음: {self.CORNER_KO[n]}')
-            return
-        canvas = self.iface.mapCanvas()
-        canvas.unsetMapTool(self._map_tool)
-        if self._prev_tool is not None:
-            canvas.setMapTool(self._prev_tool)
-        # 캔버스 CRS → EPSG:5179
-        from qgis.core import (QgsProject, QgsCoordinateReferenceSystem,
-                               QgsCoordinateTransform)
-        src = QgsProject.instance().crs()
-        dst = QgsCoordinateReferenceSystem('EPSG:5179')
-        xform = QgsCoordinateTransform(src, dst, QgsProject.instance())
-        w = [xform.transform(c) for c in self._world_canvas_pts]
-        self._world_pts = [(p.x(), p.y()) for p in w]
-        self.status_label.setText('지도 4점 완료 — [저장] 가능')
 
     # ------------------------------------------------------------ 저장
     def _on_save(self):
@@ -988,13 +914,14 @@ class RecoveryTab(QWidget):
         if not proj:
             self.status_label.setText('프로젝트 폴더를 지정하세요 (공통설정)')
             return
+        if sid not in self._load_pdf_sheets().get(code, []):
+            self.status_label.setText(
+                f'{code} {sid}: 분할 PDF 가 없어 자동 좌표(bbox) 계산이 '
+                '불가합니다. PDF 폴더(공통설정)와 시트번호를 확인하세요.')
+            return
         src = item.data(Qt.UserRole)
-        has_pdf = sid in self._load_pdf_sheets().get(code, [])
         try:
-            if has_pdf:
-                self._save_pdf_mode(src, code, sid, quad, proj)
-            else:
-                self._save_gcp_mode(src, code, sid, quad, proj)
+            self._save_pdf_mode(src, code, sid, quad, proj)
         except Exception as e:
             self.status_label.setText(f'저장 실패: {e}')
             return
@@ -1033,7 +960,7 @@ class RecoveryTab(QWidget):
         # 2b(extract_map) 재실행이 이 수동 크롭을 덮어쓰지 못하게,
         # identified/ 의 동일 시트 원본을 _recovered/ 로 격리.
         moved = self._quarantine_identified(proj, code, sid)
-        msg = (f'[PDF 모드] 크롭 저장 {w}×{h}px → {out}\n'
+        msg = (f'크롭 저장 {w}×{h}px → {out}\n'
                '→ Stage 3(매칭) → Stage 4(병합) 재실행하세요.')
         if moved:
             msg += f'\nidentified/ 원본 {moved}건을 _recovered/ 로 격리 (2b 보호).'
@@ -1070,19 +997,6 @@ class RecoveryTab(QWidget):
             _sh.move(os.path.join(base, f), dst)
             moved += 1
         return moved
-
-    def _save_gcp_mode(self, src, code, sid, quad, proj):
-        if not self._world_pts or len(self._world_pts) != 4:
-            raise ValueError('PDF 없는 admin — 지도에서 월드 4점을 먼저 찍으세요')
-        from .tools.manual_georef import georef_from_gcps
-        out = os.path.join(proj, SUB_WARPED, code[:2], code[:5],
-                           f'{code}_{sid}', f'{code}_{sid}.jpg')
-        bbox = georef_from_gcps(src, quad, self._world_pts, out)
-        self._write_bbox_entry(proj, code, sid, bbox)
-        self._world_pts = None
-        self.status_label.setText(
-            f'[GCP 모드] 지오레퍼런싱 저장 → {out}\n'
-            '→ Stage 4(병합) 재실행하세요 (Stage 3 불필요).')
 
     def _update_sheet_geo(self, code, sid):
         """PDF 메타로 sheets_geo/{code}_{sid} + sheet_bboxes.json 갱신.
@@ -1121,22 +1035,6 @@ class RecoveryTab(QWidget):
                 bbox_cache_path=(bbox_json if os.path.exists(bbox_json)
                                  else None))
         return self._sheet_cache_obj
-
-    def _write_bbox_entry(self, proj, code, sid, bbox):
-        """GCP 모드 — sheet_bboxes.json 에 단일 항목 병합."""
-        import json as _json
-        path = os.path.join(proj, SUB_SCAN_ID, 'sheet_bboxes.json')
-        data = {}
-        if os.path.exists(path):
-            try:
-                with open(path) as f:
-                    data = _json.load(f)
-            except Exception:
-                data = {}
-        data.setdefault(code, {})[sid] = list(bbox)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            _json.dump(data, f, indent=2)
 
 # ============================================================
 # 지도영역 추출 (화면정의서 S7) — Stage 2와 Stage 3 사이의 독립 탭
@@ -1414,7 +1312,7 @@ class GISScanToolsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(Stage1Tab(self.common), '1. PDF 좌표생성')
         self.tabs.addTab(Stage2Tab(self.common), '2. 스캔 식별')
-        self.tabs.addTab(RecoveryTab(self.common, self.iface), '2a. 수동 정합')
+        self.tabs.addTab(RecoveryTab(self.common), '2a. 수동 정합')
         self.tabs.addTab(ExtractMapTab(self.common), '2b. 지도영역 추출')
         self.tabs.addTab(Stage3Tab(self.common), '3. 매칭+워핑')
         self.tabs.addTab(Stage4Tab(self.common), '4. 사분면 병합')
