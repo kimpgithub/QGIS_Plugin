@@ -1,5 +1,89 @@
 # Changelog
 
+## 2026-05-29 — 웹 삭제/삭제표기 마감: Ctrl+드래그 다중삭제 + ✕ 캔버스 렌더러
+
+동료 제안(다중선택·X 렌더러)을 검토 후, 현재 동작 버전을 베이스로 좋은
+아이디어만 이식(A안). 시그니처/undo·cancel·API삭제는 그대로 보존.
+
+- **라인삭제 다중선택** — `MapView` eraseMode 에 `ol/interaction/DragBox`
+  (`platformModifierKeyOnly`) 추가. **Ctrl(⌘)+드래그** 박스 안 마크업 id 목록을
+  `onPickMarkupMany` 로 전달(맨 드래그는 지도 이동이라 modifier 요구).
+  `InspectPage` 가 "N건 삭제하시겠습니까?" 확인 → `Promise.allSettled` 일괄
+  `deleteMarkup`, 성공/실패(409·403) 건수 요약.
+- **삭제표기 표시 업그레이드** — `delete_mark` 완성 스타일을 `Text.repeat('✕')`
+  에서 **캔버스 `renderer`** 로 교체. 빨간 선 + 26px 등간격 ✕(흰 헤일로→빨강
+  2패스로 선·지도 어디서나 가독). 픽셀 간격/크기 정밀 제어.
+- 단일 삭제(클릭+확인+노란 하이라이트), 삭제표기 스냅 드로잉, 그리기 중
+  undo/cancel 은 변경 없이 유지. 동료 버전의 2중 등록/로컬-only 삭제 버그는
+  미채택.
+
+## 2026-05-29 — 웹 `삭제표기`: 빨간 점 → 경계선 스냅 구간 + ✕ 반복 표시
+
+`삭제표기(delete_mark)` 가 빈 자리에 빨간 점 하나 찍는 방식이라 "어느 경계가
+잘못됐다"를 작업자에게 전달하기 어려웠음. 행정리경계 위를 따라 구간을 그어
+✕ 로 표시하는 방식으로 전환(작업자 전달용 주석).
+
+- **그리기 = 경계 스냅 라인** — `tools.ts` 의 `delete_mark` 를 Point→LineString.
+  `attachTool(..., snapSource)` 신규 — `ol/interaction/Snap` 을 boundary 소스에
+  걸어 경계 꼭짓점/선분에 자동 스냅. 시작점~끝점 클릭으로 구간 지정, 더블클릭 완료.
+- **표시 = 빨간 선 + ✕ 반복** — `MapView.styleMarkup(delete_mark)` 가 빨간 선 위에
+  `Text{ text:'✕', repeat:26, placement:'line' }` 로 ✕ 를 일정 간격 반복.
+  그리는 중에는 빨간 점선(`KIND_STYLE`).
+- **`MapView`** — `MapHandle.getBoundarySource()` 추가(스냅 대상 전달).
+  하이라이트 헤일로: delete_mark 를 점→선 처리로 정정.
+- **`InspectPage`** — `delete_mark` 면 boundary 소스를 스냅으로 넘김. DrawHint
+  `isLine` 에 delete_mark 포함, 안내 문구 분기(경계 스냅 안내).
+- **서버** — `_KIND_GEOM["delete_mark"]` 를 `("LineString","Point")` 로 확장
+  (신규 구간 + 구버전 점 호환). 스키마 변경 없음.
+
+## 2026-05-29 — 웹 `라인삭제`: 새 선 그리기 → 기존 마크업 선택·삭제(요청 회수)
+
+`라인삭제(delete)` 가 `라인등록` 과 똑같이 새 빨간 선을 그리는 방식이라
+직관과 어긋났음("기존에 그린 선을 지우는" 동작 기대). 그리기 대신
+지도에서 마크업을 클릭해 회수하는 모드로 전환.
+
+- **서버** — `DELETE /api/markup/{id}` 신규. 작성자가 잘못 올린 요청을 행 삭제.
+  처리 전(`pending`)만 허용, `applied`/`rejected` 는 이력 보존으로 `409`.
+  권한은 본인 adm_cd 만(마스터/플러그인 전체). 스키마 변경 없음.
+- **`api/markup.ts`** — `deleteMarkup(id)` 추가.
+- **`MapView.tsx`** — `eraseMode`/`onPickMarkup` prop. 삭제모드 시 마크업 레이어
+  hit-test(`forEachFeatureAtPixel`, hitTolerance 6) + 커서 pointer. 피처의
+  `id`(properties) 로 대상 식별.
+- **`InspectPage.tsx`** — `tool==='delete'` 면 Draw 미부착, `eraseMode` 활성.
+  클릭 → "수정요청 삭제하시겠습니까?" 확인 모달 → `deleteMarkup` → 재로딩.
+- **`DrawHint.tsx`** — 삭제모드 안내 분기("지울 수정요청을 클릭하세요" + 툴 종료).
+- 참고: 기존 `delete` 마크업(플러그인 dissolve용)은 표시·처리 그대로. 웹에서
+  *새* delete 마크업을 만드는 경로만 사라짐 — 경계선 삭제요청은 `삭제표기` 사용.
+
+  보정(같은 날):
+  - 삭제 허용 범위를 `pending` 단독 → **`pending`+`rejected`** 로 완화. 반려된
+    기존 라인이 `409` 로 안 지워지던 문제 해결(실측: DB 마크업이 전부 rejected
+    였음). `applied` 만 이력 보존으로 `409`.
+  - 삭제 실패 alert 를 상태코드별 메시지로 구체화(409/403/404).
+  - **선택 라인 강조** — `MapView` 에 `highlightId` prop. 클릭한 마크업을 노란
+    헤일로(선=굵은 반투명 노란선, 점=노란 링)로 표시. 삭제 확인 모달이 떠 있는
+    동안 어떤 피처가 대상인지 시각 확인 가능.
+
+## 2026-05-29 — 웹 그리기: 지우기/취소 단계 추가 (잘못 그린 선 되돌리기)
+
+라인등록 등 그리기 툴에 *그리는 도중* 잘못 찍은 점을 지우거나 도형 전체를
+취소하는 수단이 없어, 더블클릭으로 종료한 뒤 저장 모달에서 취소하는 것이
+유일한 방법이었음. 그리기 중 되돌리기 흐름을 신설.
+
+- **`tools.ts`** — `attachTool` 에 `onDrawingChange(drawing)` 콜백 추가
+  (drawstart/drawend/drawabort 구독). `ActiveTool` 에 `removeLastPoint()`
+  (마지막 꼭짓점 되돌림, OL `removeLastPoint`), `abort()`(`abortDrawing`),
+  `isLine`(add/delete 만 다점) 노출. 점이 1개뿐인 라인은 removeLastPoint 대신
+  전체 취소로 폴백.
+- **`DrawHint.tsx`** 신규 — 툴 활성 시 지도 상단에 뜨는 안내·조작 바.
+  그리는 중: `[↶ 마지막 점 취소]`(라인 한정) `[✕ 그리기 취소]`,
+  대기 중: `[✕ 툴 종료]` + 단계 안내 문구.
+- **`InspectPage.tsx`** — `drawing` 상태 추적, 단축키 추가
+  (Backspace=마지막 점 취소, Esc=그리던 도형 취소→없으면 툴 종료).
+  입력란 포커스/저장 모달 표시 중에는 단축키 비활성.
+- "실제로 등록하시겠습니까?" 확인은 기존 [[SaveMarkupModal]]("등록한 내용을
+  저장하시겠습니까?" + 수정사유)가 이미 담당 — 그 *앞 단계*의 지우기/취소를 보강.
+
 ## 2026-05-20 — 서버 `PUT /api/boundary` ri_cd 충돌 거부 (안전망)
 
 클라이언트 보정([[ensure_unique_ri_cd]])과 별개로, 직접 API 호출 등 어떤

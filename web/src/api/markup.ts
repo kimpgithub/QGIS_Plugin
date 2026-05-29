@@ -37,3 +37,8 @@ export function rejectMarkup(id: number, reason: string): Promise<void> {
     body: { reason },
   });
 }
+
+// DELETE /api/markup/{id} — 처리 전(pending) 수정요청 회수(삭제)
+export function deleteMarkup(id: number): Promise<void> {
+  return api(`/api/markup/${id}`, { method: 'DELETE' });
+}

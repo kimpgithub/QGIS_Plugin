@@ -8,6 +8,11 @@ import VectorSource from 'ol/source/Vector';
 import GeoJSON from 'ol/format/GeoJSON';
 import { Style, Stroke, Circle as CircleStyle, Fill } from 'ol/style';
 import { transformExtent } from 'ol/proj';
+import DragBox from 'ol/interaction/DragBox';
+import { platformModifierKeyOnly } from 'ol/events/condition';
+import type { MapBrowserEvent } from 'ol';
+import type { FeatureLike } from 'ol/Feature';
+import type BaseLayer from 'ol/layer/Base';
 import 'ol/ol.css';
 import type { GjFeatureCollection, MarkupCollection } from '../../types';
 import type { AdminOutlineCollection } from '../../api/admin_outline';
@@ -23,6 +28,8 @@ export type LayerVisibility = Record<LayerKey, boolean>;
 export type MapHandle = {
   fitToBoundary: () => void;
   getMap: () => Map | null;
+  // 삭제표기 스냅 대상 — 행정리경계 소스. 그리기 툴이 경계선에 스냅하도록 전달.
+  getBoundarySource: () => VectorSource | null;
 };
 
 type Props = {
@@ -33,6 +40,10 @@ type Props = {
   markup?: MarkupCollection | null;              // 수정요청 레이어
   visible: LayerVisibility;
   onMapReady?: (handle: MapHandle) => void;
+  eraseMode?: boolean;                           // 라인삭제 = 마크업 선택·삭제 모드
+  onPickMarkup?: (id: number) => void;           // 삭제모드에서 마크업 클릭 시 id 전달
+  onPickMarkupMany?: (ids: number[]) => void;    // Ctrl+드래그 박스 안 마크업 id 목록
+  highlightId?: number | null;                   // 강조 표시할 마크업 id (삭제 대상)
 };
 
 const KOREA_EXTENT = transformExtent(
@@ -49,6 +60,10 @@ export default function MapView({
   markup,
   visible,
   onMapReady,
+  eraseMode,
+  onPickMarkup,
+  onPickMarkupMany,
+  highlightId,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
@@ -61,6 +76,7 @@ export default function MapView({
   const adminLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
   const adminSrcRef = useRef<VectorSource | null>(null);
   const cogBboxRef = useRef<[number, number, number, number] | null>(null);
+  const highlightIdRef = useRef<number | null>(null);
 
   // map init (once)
   useEffect(() => {
@@ -117,7 +133,8 @@ export default function MapView({
     markupSrcRef.current = markupSrc;
     const markupLayer = new VectorLayer({
       source: markupSrc,
-      style: styleMarkup,
+      // highlightIdRef 를 클로저로 읽어, 선택된 마크업을 강조 스타일로 렌더.
+      style: (feat) => styleMarkup(feat, highlightIdRef.current),
     });
     markupLayerRef.current = markupLayer;
 
@@ -136,6 +153,7 @@ export default function MapView({
 
     const handle: MapHandle = {
       getMap: () => mapRef.current,
+      getBoundarySource: () => boundarySrcRef.current,
       fitToBoundary: () => {
         const m = mapRef.current;
         if (!m) return;
@@ -244,18 +262,99 @@ export default function MapView({
     cogRef.current?.setVisible(visible.cog && !!cogTileUrl);
   }, [visible, cogTileUrl]);
 
+  // 콜백을 ref 로 보관 — eraseMode 효과가 콜백 변경마다 재바인딩되지 않게.
+  const onPickRef = useRef(onPickMarkup);
+  useEffect(() => {
+    onPickRef.current = onPickMarkup;
+  }, [onPickMarkup]);
+  const onPickManyRef = useRef(onPickMarkupMany);
+  useEffect(() => {
+    onPickManyRef.current = onPickMarkupMany;
+  }, [onPickMarkupMany]);
+
+  // 강조 대상 변경 → ref 갱신 후 마크업 레이어 리렌더(changed).
+  useEffect(() => {
+    highlightIdRef.current = highlightId ?? null;
+    markupLayerRef.current?.changed();
+  }, [highlightId]);
+
+  // 라인삭제(삭제모드):
+  //  - 단일: 마크업 레이어 위 피처를 클릭하면 id 를 호출부에 전달(확인 모달).
+  //  - 다중: Ctrl(⌘)+드래그 박스 안의 마크업 id 목록을 전달(일괄 삭제 확인).
+  //    (맨 드래그는 지도 이동과 겹치므로 modifier 를 요구)
+  // 그리기(Draw) 대신 hit-test/extent 로 동작. 커서는 pointer 로.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !eraseMode) return;
+    const el = map.getTargetElement() as HTMLElement | null;
+    if (el) el.style.cursor = 'pointer';
+
+    const onClick = (evt: MapBrowserEvent) => {
+      let pickedId: number | null = null;
+      map.forEachFeatureAtPixel(
+        evt.pixel,
+        (feat: FeatureLike) => {
+          const id = feat.get('id');
+          if (id != null) {
+            pickedId = Number(id);
+            return true;
+          }
+          return false;
+        },
+        {
+          layerFilter: (l: BaseLayer) => l === markupLayerRef.current,
+          hitTolerance: 6,
+        }
+      );
+      if (pickedId != null) onPickRef.current?.(pickedId);
+    };
+    map.on('singleclick', onClick);
+
+    // Ctrl+드래그 박스 다중 선택.
+    const dragBox = new DragBox({ condition: platformModifierKeyOnly });
+    map.addInteraction(dragBox);
+    dragBox.on('boxend', () => {
+      const src = markupSrcRef.current;
+      if (!src) return;
+      const ext = dragBox.getGeometry().getExtent();
+      const ids: number[] = [];
+      src.forEachFeatureIntersectingExtent(ext, (f) => {
+        const id = f.get('id');
+        if (id != null) ids.push(Number(id));
+      });
+      if (ids.length) onPickManyRef.current?.(ids);
+    });
+
+    return () => {
+      map.un('singleclick', onClick);
+      map.removeInteraction(dragBox);
+      if (el) el.style.cursor = '';
+    };
+  }, [eraseMode]);
+
   return <div ref={ref} style={{ width: '100%', height: '100%' }} />;
 }
 
-// kind 별 스타일 (라인등록=파랑, 라인삭제=빨강, 속성등록=파란점, 삭제표기=빨간X)
-function styleMarkup(feature: { getProperties: () => Record<string, unknown> }) {
+// kind 별 스타일 (라인등록=파랑, 라인삭제=빨강, 속성등록=파란점, 삭제표기=빨간X).
+// highlightId 와 feature 의 id 가 일치하면 노란 강조 헤일로를 밑에 깔아 선택 표시.
+function styleMarkup(
+  feature: { getProperties: () => Record<string, unknown>; get: (k: string) => unknown },
+  highlightId?: number | null
+): Style | Style[] {
   const props = feature.getProperties();
   const kind = String(props.kind ?? 'add');
+  const base = baseMarkupStyle(kind);
+  const id = feature.get('id');
+  if (highlightId != null && id != null && Number(id) === highlightId) {
+    return [highlightHalo(kind), base];
+  }
+  return base;
+}
+
+function baseMarkupStyle(kind: string): Style {
   switch (kind) {
     case 'delete':
-      return new Style({
-        stroke: new Stroke({ color: '#dc2626', width: 4 }),
-      });
+      return new Style({ stroke: new Stroke({ color: '#dc2626', width: 4 }) });
     case 'attr':
       return new Style({
         image: new CircleStyle({
@@ -265,17 +364,86 @@ function styleMarkup(feature: { getProperties: () => Record<string, unknown> }) 
         }),
       });
     case 'delete_mark':
-      return new Style({
-        image: new CircleStyle({
-          radius: 8,
-          fill: new Fill({ color: 'rgba(220,38,38,0.85)' }),
-          stroke: new Stroke({ color: '#fff', width: 2 }),
-        }),
-      });
+      // 경계선 삭제표기 — 빨간 선 + 선 위에 ✕ 를 일정 간격으로(작업자에게 "여기 삭제" 전달).
+      // 캔버스 renderer 로 직접 그려 픽셀 간격/크기를 정밀 제어(✕ 는 흰 헤일로로 항상 가독).
+      return DELETE_MARK_STYLE;
     case 'add':
     default:
-      return new Style({
-        stroke: new Stroke({ color: '#1d4ed8', width: 3 }),
-      });
+      return new Style({ stroke: new Stroke({ color: '#1d4ed8', width: 3 }) });
   }
 }
+
+// 선택 강조 헤일로 — 점 마크업(attr)은 큰 노란 링, 선 마크업은 굵은 반투명 노란 선.
+function highlightHalo(kind: string): Style {
+  if (kind === 'attr') {
+    return new Style({
+      image: new CircleStyle({
+        radius: 13,
+        fill: new Fill({ color: 'rgba(250,204,21,0.35)' }),
+        stroke: new Stroke({ color: '#facc15', width: 3 }),
+      }),
+    });
+  }
+  return new Style({
+    stroke: new Stroke({ color: 'rgba(250,204,21,0.9)', width: 10 }),
+  });
+}
+
+// 삭제표기 완성 스타일 — 빨간 선 위에 ✕ 를 26px 간격으로. 캔버스 renderer 로 직접 그림.
+// ✕ 는 흰 헤일로(굵게) → 빨간(가늘게) 2패스로 그려 선·지도 어디서나 가독.
+const DELETE_MARK_STYLE = new Style({
+  renderer: (coords, state) => {
+    const ctx = state.context;
+    const pr = state.pixelRatio;
+    const flat = coords as number[][];
+    if (!Array.isArray(flat) || flat.length < 2) return;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // 1) 기본 빨간 선
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 3 * pr;
+    ctx.beginPath();
+    flat.forEach((c, i) => (i === 0 ? ctx.moveTo(c[0], c[1]) : ctx.lineTo(c[0], c[1])));
+    ctx.stroke();
+
+    // 2) 선을 따라 ✕ 중심점 수집(픽셀 등간격)
+    const spacing = 26 * pr;
+    const size = 6 * pr;
+    const centers: Array<[number, number]> = [];
+    for (let i = 0; i < flat.length - 1; i++) {
+      const [x1, y1] = flat[i];
+      const [x2, y2] = flat[i + 1];
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      if (len === 0) continue;
+      const ux = dx / len;
+      const uy = dy / len;
+      for (let d = spacing; d < len; d += spacing) {
+        centers.push([x1 + ux * d, y1 + uy * d]);
+      }
+    }
+    const strokeXs = () => {
+      ctx.beginPath();
+      for (const [mx, my] of centers) {
+        ctx.moveTo(mx - size, my - size);
+        ctx.lineTo(mx + size, my + size);
+        ctx.moveTo(mx + size, my - size);
+        ctx.lineTo(mx - size, my + size);
+      }
+      ctx.stroke();
+    };
+    // 흰 헤일로 → 빨간 ✕
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 5 * pr;
+    strokeXs();
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 2.5 * pr;
+    strokeXs();
+
+    ctx.restore();
+  },
+});
