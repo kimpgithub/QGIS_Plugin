@@ -452,7 +452,8 @@ _KIND_GEOM = {
     "add":         ("LineString",),
     "delete":      ("LineString",),
     "attr":        ("Point",),
-    "delete_mark": ("Point",),
+    # 삭제표기: 경계선에 스냅한 구간(LineString) 으로 전환. Point 는 구버전 호환.
+    "delete_mark": ("LineString", "Point"),
 }
 
 
@@ -564,4 +565,26 @@ def reject_markup(markup_id: int, body: RejectBody, user: dict = Depends(get_use
         """,
         (user["admin_cd"], body.reason.strip(), markup_id),
     )
+    return Response(status_code=204)
+
+
+@app.delete("/api/markup/{markup_id}")
+def delete_markup(markup_id: int, user: dict = Depends(get_user)):
+    """수정요청 회수 — 작성자가 잘못 올린 요청을 지움.
+
+    대기(pending)·반려(rejected) 요청은 삭제 가능(실제 경계를 바꾼 적 없음).
+    이미 반영(applied)된 요청만 이력 보존을 위해 거부(409).
+    권한은 본인 adm_cd 만(마스터/플러그인은 전체).
+    """
+    cur = fetchone(
+        "SELECT adm_cd, status FROM review_markup WHERE id = %s", (markup_id,)
+    )
+    if not cur:
+        raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
+    check_admin_access(user, cur["adm_cd"].strip())
+    if cur["status"] == "applied":
+        raise HTTPException(
+            status_code=409, detail="이미 반영된 요청은 삭제할 수 없습니다"
+        )
+    execute("DELETE FROM review_markup WHERE id = %s", (markup_id,))
     return Response(status_code=204)

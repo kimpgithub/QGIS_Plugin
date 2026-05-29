@@ -56,7 +56,7 @@ backend 에 CORS 미들웨어 적용 — **로컬 개발 PC 에서 공개 API �
 | `GET /api/health`, `POST /api/login` | 불필요 |
 | `GET /api/admins`, `GET /api/admin_outline` | Bearer (검수자/플러그인 누구나) |
 | `GET /api/boundary`, `GET /api/cog/{adm_cd}`, `GET /api/markup` | Bearer + adm_cd 권한 체크 |
-| `POST /api/markup`, `PATCH /api/markup/{id}/apply`, `PATCH /api/markup/{id}/reject` | Bearer + adm_cd 권한 체크 |
+| `POST /api/markup`, `PATCH /api/markup/{id}/apply`, `PATCH /api/markup/{id}/reject`, `DELETE /api/markup/{id}` | Bearer + adm_cd 권한 체크 |
 | `PUT /api/boundary`, `POST /api/cog` | **PLUGIN_TOKEN 전용** |
 
 - 토큰 없음/스킴 불일치/만료/무효 → `401 {"detail":"..."}`
@@ -265,7 +265,9 @@ body (`MarkupCreate`):
   "geometry":{"type":"Point","coordinates":[129.2,35.2]},
   "attrs":{"ri_nm":"샘플리","ri_cd":"9999999999"} }
 ```
-- `kind`/`geometry.type` 짝 불일치 → `400`. adm_cd 8자 아님 → `400`. 본인 외 adm_cd → `403`.
+- `kind`/`geometry.type` 짝: `add`·`delete`=`LineString`, `attr`=`Point`,
+  `delete_mark`=`LineString`(경계 스냅 구간) 또는 `Point`(구버전). 불일치 → `400`.
+  adm_cd 8자 아님 → `400`. 본인 외 adm_cd → `403`.
 - `created_by` = 토큰 admin_cd(plugin 이면 `"plugin"`), `status` 기본 `pending`.
 - 응답 `201 {"id": <int>}`.
 
@@ -278,6 +280,13 @@ body (`MarkupCreate`):
 
 body: `{"reason":"겹침"}` (필수, 빈 값 `400`). `rejected` 로(`rejected_at=now()`, `rejected_by`, `applied_by=NULL`).
 없는 id → `404`, 권한 없음 → `403`. 응답 본문 없음(`204`).
+
+### 3.11 `DELETE /api/markup/{id}`  → `204`
+
+수정요청 회수 — 작성자가 잘못 올린 요청을 완전히 삭제(행 제거). 웹 `라인삭제` 툴이
+지도에서 마크업을 클릭해 호출. **대기(`pending`)·반려(`rejected`)** 는 삭제 가능
+(실제 경계를 바꾼 적 없음). 이미 **반영(`applied`)** 된 요청만 이력 보존으로 `409`.
+없는 id → `404`, 본인 adm_cd 외 → `403`(마스터/플러그인은 전체). 응답 본문 없음(`204`).
 
 ---
 
