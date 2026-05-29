@@ -11,6 +11,7 @@
   - [2] 행정리 작업 (작업 폴더 자동인식 → 13레이어 구성 → 편집 → 제출/마크업)
 """
 import os
+import queue
 
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -28,35 +29,72 @@ PLUGIN_DIR = os.path.dirname(__file__)
 
 
 # ============================================================
-# 엑셀 Y/N 저장 워커 — UI 멈춤 방지
+# 엑셀 WORK_YN 저장 — 워크북 1회 로딩 + 디바운스 일괄 저장
 # ============================================================
 
-class WorkYnSaveWorker(QThread):
-    """update_work_yn 한 건을 백그라운드에서 실행.
+class RosterSaver(QThread):
+    """명부 WORK_YN 저장 전담 스레드 — 워크북 1회 로딩 + 디바운스 일괄 저장.
 
-    UI 콤보 변경은 즉시 반영하고 엑셀 저장은 비동기. 실패 시 호출부가
-    UI 를 revert 한다. 매번 새 인스턴스 — 직렬 저장.
+    UI 스레드는 enqueue() 로 변경만 던지고 즉시 반환한다. 이 스레드가
+    인메모리 셀을 갱신하고, 유휴(debounce) 또는 flush 요청 시 1회만 디스크에
+    저장한다. openpyxl 객체는 전적으로 이 스레드만 만지므로 경합/UI 멈춤 없음.
+
+    기존엔 변경 1건마다 38K행 워크북을 load+save(≈8s) → N건이면 N×8s.
+    이제 load 1회 + 변경 즉시 반영 + save 가끔(≈5s, 백그라운드).
     """
-    done = pyqtSignal(int, str, str, int)  # row_idx, adm_cd, ri_cd, n
-    failed = pyqtSignal(int, str, str, str, str)  # row_idx, adm_cd, ri_cd, old, err
+    saved = pyqtSignal(int)    # 이번 flush 로 반영된 누적 변경 건수
+    failed = pyqtSignal(str)
 
-    def __init__(self, row_idx, path, adm_cd, ri_cd, new_val, old_val):
+    _STOP = ('__stop__',)
+    _FLUSH = ('__flush__',)
+
+    def __init__(self, path, debounce_s=2.0):
         super().__init__()
-        self.row_idx = row_idx
-        self.path = path
-        self.adm_cd = adm_cd
-        self.ri_cd = ri_cd
-        self.new_val = new_val
-        self.old_val = old_val
+        self._editor = excel_loader.WorkbookEditor(path)
+        self._q = queue.Queue()
+        self._debounce = debounce_s
+        self._pending = 0   # 마지막 flush 이후 누적 변경 수
+
+    def enqueue(self, adm_cd, ri_cd, value):
+        self._q.put((str(adm_cd), str(ri_cd), str(value)))
+
+    def request_flush(self):
+        self._q.put(self._FLUSH)
+
+    def stop(self):
+        self._q.put(self._STOP)
 
     def run(self):
+        while True:
+            try:
+                item = self._q.get(timeout=self._debounce)
+            except queue.Empty:
+                self._flush()          # 유휴 → 디바운스 저장
+                continue
+            if item is self._STOP:
+                self._flush()
+                break
+            if item is self._FLUSH:
+                self._flush()
+                continue
+            adm, ri, val = item
+            try:
+                self._editor.set_work_yn(adm, ri, val)
+                self._pending += 1
+            except Exception as e:
+                self.failed.emit(str(e))
+        self._editor.close()
+
+    def _flush(self):
+        if self._pending == 0:
+            return
         try:
-            n = excel_loader.update_work_yn(
-                self.path, self.adm_cd, self.ri_cd, self.new_val)
-            self.done.emit(self.row_idx, self.adm_cd, self.ri_cd, n)
+            if self._editor.flush():
+                self.saved.emit(self._pending)
+            self._pending = 0
         except Exception as e:
-            self.failed.emit(self.row_idx, self.adm_cd, self.ri_cd,
-                             self.old_val, str(e))
+            # _pending 유지 — 다음 유휴/flush 때 재시도
+            self.failed.emit(str(e))
 
 
 # ============================================================
@@ -436,6 +474,8 @@ class WorkListTab(QWidget):
         self._current_admin_nm = ''
         self._feature_added_slot = None  # split 후 팝업용 콜백 참조
         self._markup_dialog = None       # 마크업 검토 다이얼로그 ref
+        self._roster_saver = None        # WORK_YN 디바운스 저장 스레드
+        self._roster_saver_path = None
         self._build()
 
     def _build(self):
@@ -681,8 +721,44 @@ class WorkListTab(QWidget):
         tag = f' (병합이미지 {len(self._merged_codes)}개 읍면동)'
         self.status.setText(
             f'명부 로드: {len(rows)}개 행정리 (작업완료 {done}){tag}')
+        self._ensure_roster_saver(path)
         self._refresh_area_column()
         self._hook_work_layer_changes()
+
+    # --- WORK_YN 저장 스레드 ---
+
+    def _ensure_roster_saver(self, path):
+        """명부 경로별 저장 스레드 1개 유지. 경로 바뀌면 정지+flush 후 교체."""
+        if (self._roster_saver is not None
+                and self._roster_saver_path == path):
+            return
+        self.shutdown_saver()
+        self._roster_saver = RosterSaver(path)
+        self._roster_saver_path = path
+        self._roster_saver.failed.connect(self._on_roster_save_failed)
+        self._roster_saver.start()
+
+    def _on_roster_save_failed(self, err):
+        if 'Permission' in err:
+            QMessageBox.critical(
+                self, '작업여부 저장 실패',
+                '명부 엑셀이 다른 프로그램(엑셀 등)에 열려 있습니다.\n'
+                '닫으면 잠시 후 자동으로 다시 저장됩니다.')
+        else:
+            self.status.setText(f'작업여부 저장 실패: {err}')
+
+    def shutdown_saver(self):
+        """저장 스레드 정지 — 종료 전 미저장분 flush 후 대기."""
+        s = self._roster_saver
+        if s is None:
+            return
+        self._roster_saver = None
+        self._roster_saver_path = None
+        try:
+            s.stop()
+            s.wait(20000)
+        except Exception:
+            pass
 
     # --- 현재면적 컬럼 갱신 ---
 
@@ -786,51 +862,11 @@ class WorkListTab(QWidget):
         if not path:
             self.status.setText('명부 경로 없음 — 저장 실패')
             return
+        self._ensure_roster_saver(path)
+        self._roster_saver.enqueue(
+            rec.get('adm_cd', ''), rec.get('ri_cd', ''), new)
         self.status.setText(
-            f"저장 중 — {rec.get('ri_cd','')} 작업여부={new} (백그라운드)")
-        w = WorkYnSaveWorker(
-            row_idx, path, rec.get('adm_cd', ''), rec.get('ri_cd', ''),
-            new, old)
-        w.done.connect(self._on_work_yn_saved)
-        w.failed.connect(self._on_work_yn_save_failed)
-        # 인스턴스 보존 — GC 로 워커 즉시 사라지면 시그널이 끊김
-        if not hasattr(self, '_work_yn_workers'):
-            self._work_yn_workers = []
-        self._work_yn_workers.append(w)
-        w.finished.connect(lambda w=w: self._work_yn_workers.remove(w))
-        w.start()
-
-    def _on_work_yn_saved(self, row_idx, adm_cd, ri_cd, n):
-        if n == 0:
-            self.status.setText(
-                f"저장 경고 — ri_cd={ri_cd} 매칭 행 없음")
-        else:
-            # 현재 rec 값을 status 에 그대로 반영
-            rec = self._find_rec(adm_cd, ri_cd) or {}
-            self.status.setText(
-                f"저장 완료 — {ri_cd} 작업여부={rec.get('work_yn','')}")
-
-    def _on_work_yn_save_failed(self, row_idx, adm_cd, ri_cd, old, err):
-        if 'Permission' in err or 'PermissionError' in err:
-            QMessageBox.critical(
-                self, '저장 실패',
-                '엑셀 파일이 다른 프로그램(엑셀 등)에 열려 있습니다.\n'
-                '닫고 다시 시도하세요.')
-        else:
-            QMessageBox.critical(self, '저장 실패', err)
-        rec = self._find_rec(adm_cd, ri_cd)
-        if rec is not None:
-            rec['work_yn'] = old
-        # 정렬되어 row_idx 가 이동했을 수 있으니 (adm_cd, ri_cd) 로 찾음
-        target = self._find_row(adm_cd, ri_cd)
-        if target >= 0:
-            self._revert_work_yn(target, old)
-
-    def _find_rec(self, adm_cd, ri_cd):
-        for r in self._roster:
-            if r.get('adm_cd', '') == adm_cd and r.get('ri_cd', '') == ri_cd:
-                return r
-        return None
+            f"작업여부={new} — {rec.get('ri_cd','')} (자동 저장 예약)")
 
     def _find_row(self, adm_cd, ri_cd):
         """현재 정렬된 화면 row index 를 (adm_cd, ri_cd) 로 검색."""
@@ -842,16 +878,6 @@ class WorkListTab(QWidget):
                     and it_ri.text() == ri_cd):
                 return r
         return -1
-
-    def _revert_work_yn(self, row_idx, value):
-        w = self.table.cellWidget(row_idx, 4)
-        if isinstance(w, QComboBox):
-            w.blockSignals(True)
-            w.setCurrentText(value)
-            w.blockSignals(False)
-        it = self.table.item(row_idx, 4)
-        if it is not None:
-            it.setText(value)
 
     def _make_area_item(self, area_m2):
         """현재면적 셀 — 정렬용 정수값 보유."""
@@ -956,6 +982,8 @@ class WorkListTab(QWidget):
 
     def _on_end(self):
         try:
+            if self._roster_saver is not None:
+                self._roster_saver.request_flush()   # 미저장 WORK_YN 즉시 저장
             self._disconnect_feature_added()
             saved, errors = layer_control.end_work_mode(
                 self.iface, self._work_snapshot)
@@ -1046,11 +1074,9 @@ class WorkListTab(QWidget):
         rec['work_yn'] = 'Y'
         path = self._slots.get('roster')
         if path:
-            try:
-                excel_loader.update_work_yn(
-                    path, rec.get('adm_cd', ''), rec.get('ri_cd', ''), 'Y')
-            except Exception as e:
-                self.status.setText(f'엑셀 저장 실패: {e}')
+            self._ensure_roster_saver(path)
+            self._roster_saver.enqueue(
+                rec.get('adm_cd', ''), rec.get('ri_cd', ''), 'Y')
         # 테이블 콤보 갱신 — roster 내 같은 (adm_cd, ri_cd) 찾기
         for i, r in enumerate(self._roster):
             if (r.get('adm_cd', '') == rec.get('adm_cd', '')
@@ -1534,6 +1560,16 @@ class DBEditorDock(QDockWidget):
         layout.addWidget(self.tabs)
         self.setWidget(container)
         self.setMinimumWidth(540)
+
+    def closeEvent(self, event):
+        # 닫기 전 WORK_YN 미저장분 flush + 저장 스레드 정지
+        try:
+            tab = self.tabs.widget(1)
+            if hasattr(tab, 'shutdown_saver'):
+                tab.shutdown_saver()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 # 하위 호환 alias — 외부에서 import 중인 코드용

@@ -144,6 +144,97 @@ def update_work_yn(path, adm_cd, ri_cd, value, sheet=None):
         wb.close()
 
 
+class WorkbookEditor:
+    """명부 워크북을 1회만 로딩해 메모리에 유지하며 WORK_YN 셀을 수정/일괄 저장.
+
+    38K행 명부는 load≈3s·save≈5s 라 변경마다 load+save 하던 update_work_yn 은
+    건당 ~8s 가 걸린다. 이 클래스는 load 1회 + (adm_cd, ri_cd)→행번호 색인 1회로
+    셀 수정을 즉시(수 ms) 처리하고, 저장은 flush() 호출 시 1회만 한다.
+
+    openpyxl 은 스레드세이프하지 않다 — 반드시 단일 스레드(저장 워커)에서만 쓸 것.
+    """
+
+    def __init__(self, path, sheet=None):
+        self.path = path
+        self.sheet = sheet
+        self._wb = None
+        self._ws = None
+        self._idx_yn = None      # WORK_YN 0-base 열 인덱스
+        self._row_of = {}        # (adm_cd, ri_cd) → [엑셀 행번호…]
+        self._dirty = False
+
+    def _ensure_loaded(self):
+        if self._wb is not None:
+            return
+        import openpyxl
+        import shutil
+        bak = self.path + '.bak'
+        if not os.path.exists(bak):
+            try:
+                shutil.copy2(self.path, bak)
+            except Exception:
+                pass
+        self._wb = openpyxl.load_workbook(self.path)
+        self._ws = (self._wb[self.sheet] if self.sheet
+                    else _pick_sheet(self._wb)) or self._wb.active
+        rows_iter = self._ws.iter_rows()
+        header_row = next(rows_iter, None)
+        if header_row is None:
+            return
+        headers = [str(c.value) if c.value is not None else ''
+                   for c in header_row]
+        mapping, _missing = detect_columns(headers)
+        canon_to_idx = {}
+        for i, h in enumerate(headers):
+            canon = mapping.get(h)
+            if canon:
+                canon_to_idx[canon] = i
+        idx_adm = canon_to_idx.get('adm_cd')
+        idx_ri = canon_to_idx.get('ri_cd')
+        self._idx_yn = canon_to_idx.get('work_yn')
+        if idx_adm is None or idx_ri is None or self._idx_yn is None:
+            return
+        for cells in rows_iter:
+            cv_adm = cells[idx_adm].value
+            cv_ri = cells[idx_ri].value
+            if cv_adm is None or cv_ri is None:
+                continue
+            key = (str(cv_adm).strip(), str(cv_ri).strip())
+            self._row_of.setdefault(key, []).append(cells[0].row)
+
+    def set_work_yn(self, adm_cd, ri_cd, value):
+        """메모리 셀만 즉시 갱신. 매칭 행 수 반환. 디스크 저장은 flush()."""
+        self._ensure_loaded()
+        if self._idx_yn is None:
+            return 0
+        key = (str(adm_cd).strip(), str(ri_cd).strip())
+        rows = self._row_of.get(key, [])
+        new_val = str(value or '').strip()
+        for rownum in rows:
+            self._ws.cell(row=rownum, column=self._idx_yn + 1).value = new_val
+        if rows:
+            self._dirty = True
+        return len(rows)
+
+    def flush(self):
+        """변경분이 있으면 디스크에 1회 저장. 저장했으면 True.
+
+        파일이 다른 프로세스에 열려 있으면 PermissionError 가 전파된다.
+        """
+        if self._wb is None or not self._dirty:
+            return False
+        self._wb.save(self.path)
+        self._dirty = False
+        return True
+
+    def close(self):
+        if self._wb is not None:
+            try:
+                self._wb.close()
+            finally:
+                self._wb = None
+
+
 def read_excel(path, sheet=None, limit=None, adm_codes=None):
     """엑셀 파일 → (headers, rows, mapping, missing).
 
