@@ -163,6 +163,14 @@ class WorkbookEditor:
         self._row_of = {}        # (adm_cd, ri_cd) → [엑셀 행번호…]
         self._dirty = False
 
+    @property
+    def loaded(self):
+        return self._wb is not None
+
+    @property
+    def dirty(self):
+        return self._dirty
+
     def _ensure_loaded(self):
         if self._wb is not None:
             return
