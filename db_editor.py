@@ -916,7 +916,7 @@ class WorkListTab(QWidget):
             f"split/추가 시 자동 부여")
 
     def _on_double_click(self, index):
-        """더블클릭 — 비고열은 인라인 편집, 그 외는 해당 읍면동으로 맵 줌."""
+        """더블클릭 — 비고열은 인라인 편집, 그 외는 해당 행정리(없으면 읍면동)로 맵 줌."""
         if index.column() == 6:          # 비고 → 인라인 편집 시작
             it = self.table.item(index.row(), 6)
             if it is not None:
@@ -926,7 +926,53 @@ class WorkListTab(QWidget):
         if row < 0 or row >= len(self._roster):
             return
         self._on_row_selected(row)
-        self._zoom_to_admin(self._current_admin)
+        # 정렬돼도 안전하게 셀에서 코드 읽기
+        it_adm = self.table.item(row, 0)
+        it_ri = self.table.item(row, 2)
+        adm = it_adm.text() if it_adm else self._current_admin
+        ri = it_ri.text() if it_ri else ''
+        # 부여된 행정리 폴리곤이 있으면 그 영역으로, 없으면 읍면동으로
+        if not self._zoom_to_ri(adm, ri):
+            self._zoom_to_admin(adm)
+
+    def _zoom_to_ri(self, adm_cd, ri_cd):
+        """작업데이터에서 (adm_cd, ri_cd) 폴리곤들의 합 bbox 로 줌. 있으면 True."""
+        if not (adm_cd and ri_cd):
+            return False
+        lyr = self._find_work_layer()
+        if lyr is None or not lyr.isValid():
+            return False
+        fields = lyr.fields()
+        idx_adm = next((i for i in range(fields.count())
+                        if fields.at(i).name().lower() == 'adm_cd'), -1)
+        idx_ri = next((i for i in range(fields.count())
+                       if fields.at(i).name().lower() == 'ri_cd'), -1)
+        if idx_adm < 0 or idx_ri < 0:
+            return False
+        from qgis.core import QgsRectangle
+        bbox = None
+        for f in lyr.getFeatures():
+            if not f.hasGeometry():
+                continue
+            if (str(f.attribute(idx_adm) or '').strip() == adm_cd
+                    and str(f.attribute(idx_ri) or '').strip() == ri_cd):
+                gb = f.geometry().boundingBox()
+                bbox = QgsRectangle(gb) if bbox is None \
+                    else (bbox.combineExtentWith(gb) or bbox)
+        if bbox is None or bbox.isEmpty():
+            return False
+        canvas = self.iface.mapCanvas()
+        dst = canvas.mapSettings().destinationCrs()
+        src = lyr.crs()
+        if src.isValid() and dst.isValid() and src != dst:
+            from qgis.core import QgsCoordinateTransform, QgsProject
+            tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
+            bbox = tr.transformBoundingBox(bbox)
+        bbox.scale(1.3)
+        canvas.setExtent(bbox)
+        canvas.refresh()
+        self.status.setText(f'맵 이동: {ri_cd}')
+        return True
 
     def _on_item_changed(self, item):
         """비고(6열) 인라인 편집 종료 → 명부 메모리 + 엑셀 REMARK 자동 저장."""
@@ -1098,6 +1144,9 @@ class WorkListTab(QWidget):
         for fid in fids:
             self._assign_attrs_to_feature(work, fid, rec)
         self._mark_row_done(rec)
+        # 부여 즉시 면적 반영 — 편집 중 getFeatures 가 미커밋 변경도 보므로
+        # editingStopped 를 기다리지 않고 바로 (adm_cd, ri_cd) 면적 합 갱신
+        self._refresh_area_column()
         self.status.setText(
             f"부여 완료 — {rec.get('ri_cd','')} {rec.get('ri_nm','')} "
             f"→ 폴리곤 {len(fids)}개")
