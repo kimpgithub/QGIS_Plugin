@@ -55,8 +55,8 @@ class RosterSaver(QThread):
         self._debounce = debounce_s
         self._pending = 0   # 마지막 flush 이후 누적 변경 수
 
-    def enqueue(self, adm_cd, ri_cd, value):
-        self._q.put((str(adm_cd), str(ri_cd), str(value)))
+    def enqueue(self, adm_cd, ri_cd, value, field='work_yn'):
+        self._q.put((str(adm_cd), str(ri_cd), str(value), field))
 
     def request_flush(self):
         self._q.put(self._FLUSH)
@@ -77,9 +77,9 @@ class RosterSaver(QThread):
             if item is self._FLUSH:
                 self._flush()
                 continue
-            adm, ri, val = item
+            adm, ri, val, field = item
             try:
-                self._editor.set_work_yn(adm, ri, val)
+                self._editor.set_cell(adm, ri, field, val)
                 self._pending += 1
             except Exception as e:
                 self.failed.emit(str(e))
@@ -474,8 +474,9 @@ class WorkListTab(QWidget):
         self._current_admin_nm = ''
         self._feature_added_slot = None  # split 후 팝업용 콜백 참조
         self._markup_dialog = None       # 마크업 검토 다이얼로그 ref
-        self._roster_saver = None        # WORK_YN 디바운스 저장 스레드
+        self._roster_saver = None        # 명부 디바운스 저장 스레드
         self._roster_saver_path = None
+        self._suppress_item_changed = False  # 프로그램적 셀 갱신 중 itemChanged 무시
         self._build()
 
     def _build(self):
@@ -567,8 +568,16 @@ class WorkListTab(QWidget):
         self.table.currentCellChanged.connect(
             lambda r, *_: self._on_row_selected(r))
         self.table.doubleClicked.connect(self._on_double_click)
+        # 비고(6열) 인라인 편집 — 편집 종료 시 엑셀 REMARK 자동 저장
+        self.table.itemChanged.connect(self._on_item_changed)
         self.table.setMinimumHeight(220)
         layout.addWidget(self.table, 1)
+
+        edit_hint = QLabel(
+            '<i>비고 칸을 더블클릭하면 바로 입력할 수 있습니다 — 입력 후 '
+            'Enter/다른 칸 클릭 시 명부에 자동 저장됩니다.</i>')
+        edit_hint.setStyleSheet('QLabel { color: #777; }')
+        layout.addWidget(edit_hint)
 
         # 선택 폴리곤 ← 명부 행 RI 부여
         assign_row = QHBoxLayout()
@@ -699,6 +708,7 @@ class WorkListTab(QWidget):
         self._roster = rows
         # 채우는 동안 정렬 꺼두기 — row 순서 바뀌면 cellWidget 매핑 깨짐
         self.table.setSortingEnabled(False)
+        self._suppress_item_changed = True   # 프로그램적 setItem → 저장 트리거 방지
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             self.table.setItem(i, 0, QTableWidgetItem(r.get('adm_cd', '')))
@@ -715,6 +725,7 @@ class WorkListTab(QWidget):
             self.table.setItem(i, 5, self._make_area_item(0))
             self.table.setItem(i, 6, QTableWidgetItem(r.get('remark', '')))
         self.table.resizeColumnsToContents()
+        self._suppress_item_changed = False
         self.table.setSortingEnabled(True)
         done = sum(1 for r in rows
                    if (r.get('work_yn', '') or '').upper() == 'Y')
@@ -789,6 +800,7 @@ class WorkListTab(QWidget):
         sums = self._compute_area_sums()
         was_sorting = self.table.isSortingEnabled()
         self.table.setSortingEnabled(False)
+        self._suppress_item_changed = True
         for r in range(self.table.rowCount()):
             it_adm = self.table.item(r, 0)
             it_ri = self.table.item(r, 2)
@@ -800,6 +812,7 @@ class WorkListTab(QWidget):
                 self.table.setItem(r, 5, self._make_area_item(int(round(a))))
             else:
                 cell.setData(Qt.DisplayRole, int(round(a)))
+        self._suppress_item_changed = False
         self.table.setSortingEnabled(was_sorting)
 
     def _hook_work_layer_changes(self):
@@ -903,12 +916,45 @@ class WorkListTab(QWidget):
             f"split/추가 시 자동 부여")
 
     def _on_double_click(self, index):
-        """더블클릭 — 선택 + 해당 읍면동으로 맵 줌 (행정경계 레이어 기준)."""
+        """더블클릭 — 비고열은 인라인 편집, 그 외는 해당 읍면동으로 맵 줌."""
+        if index.column() == 6:          # 비고 → 인라인 편집 시작
+            it = self.table.item(index.row(), 6)
+            if it is not None:
+                self.table.editItem(it)
+            return
         row = index.row()
         if row < 0 or row >= len(self._roster):
             return
         self._on_row_selected(row)
         self._zoom_to_admin(self._current_admin)
+
+    def _on_item_changed(self, item):
+        """비고(6열) 인라인 편집 종료 → 명부 메모리 + 엑셀 REMARK 자동 저장."""
+        if self._suppress_item_changed or item.column() != 6:
+            return
+        row = item.row()
+        it_adm = self.table.item(row, 0)
+        it_ri = self.table.item(row, 2)
+        if not (it_adm and it_ri):
+            return
+        adm, ri = it_adm.text(), it_ri.text()
+        new_remark = item.text()
+        rec = next((r for r in self._roster
+                    if r.get('adm_cd', '') == adm
+                    and r.get('ri_cd', '') == ri), None)
+        if rec is None:
+            return
+        if (rec.get('remark', '') or '') == new_remark:
+            return
+        rec['remark'] = new_remark
+        path = self._slots.get('roster')
+        if not path:
+            self.status.setText('명부 경로 없음 — 비고 저장 실패')
+            return
+        self._ensure_roster_saver(path)
+        self._roster_saver.enqueue(adm, ri, new_remark, field='remark')
+        self.status.setText(
+            f"비고 저장 예약 — {ri} {rec.get('ri_nm','')}")
 
     def _zoom_to_admin(self, adm_cd):
         from qgis.core import QgsProject, QgsVectorLayer

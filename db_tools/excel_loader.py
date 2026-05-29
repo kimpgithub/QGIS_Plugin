@@ -159,7 +159,7 @@ class WorkbookEditor:
         self.sheet = sheet
         self._wb = None
         self._ws = None
-        self._idx_yn = None      # WORK_YN 0-base 열 인덱스
+        self._col_idx = {}       # canonical 컬럼명 → 0-base 열 인덱스
         self._row_of = {}        # (adm_cd, ri_cd) → [엑셀 행번호…]
         self._dirty = False
 
@@ -184,15 +184,13 @@ class WorkbookEditor:
         headers = [str(c.value) if c.value is not None else ''
                    for c in header_row]
         mapping, _missing = detect_columns(headers)
-        canon_to_idx = {}
         for i, h in enumerate(headers):
             canon = mapping.get(h)
             if canon:
-                canon_to_idx[canon] = i
-        idx_adm = canon_to_idx.get('adm_cd')
-        idx_ri = canon_to_idx.get('ri_cd')
-        self._idx_yn = canon_to_idx.get('work_yn')
-        if idx_adm is None or idx_ri is None or self._idx_yn is None:
+                self._col_idx[canon] = i
+        idx_adm = self._col_idx.get('adm_cd')
+        idx_ri = self._col_idx.get('ri_cd')
+        if idx_adm is None or idx_ri is None:
             return
         for cells in rows_iter:
             cv_adm = cells[idx_adm].value
@@ -202,19 +200,27 @@ class WorkbookEditor:
             key = (str(cv_adm).strip(), str(cv_ri).strip())
             self._row_of.setdefault(key, []).append(cells[0].row)
 
-    def set_work_yn(self, adm_cd, ri_cd, value):
-        """메모리 셀만 즉시 갱신. 매칭 행 수 반환. 디스크 저장은 flush()."""
+    def set_cell(self, adm_cd, ri_cd, field, value):
+        """(adm_cd, ri_cd) 매칭 행의 canonical 컬럼 1개를 메모리에서 즉시 갱신.
+
+        field: 'work_yn' | 'remark' 등 COLUMN_ALIASES canonical 키.
+        매칭 행 수 반환. 디스크 저장은 flush(). 해당 컬럼이 없으면 0.
+        """
         self._ensure_loaded()
-        if self._idx_yn is None:
+        col = self._col_idx.get(field)
+        if col is None:
             return 0
-        key = (str(adm_cd).strip(), str(ri_cd).strip())
-        rows = self._row_of.get(key, [])
-        new_val = str(value or '').strip()
+        rows = self._row_of.get((str(adm_cd).strip(), str(ri_cd).strip()), [])
+        new_val = str(value if value is not None else '').strip()
         for rownum in rows:
-            self._ws.cell(row=rownum, column=self._idx_yn + 1).value = new_val
+            self._ws.cell(row=rownum, column=col + 1).value = new_val
         if rows:
             self._dirty = True
         return len(rows)
+
+    def set_work_yn(self, adm_cd, ri_cd, value):
+        """하위호환 — set_cell(..., 'work_yn', ...)."""
+        return self.set_cell(adm_cd, ri_cd, 'work_yn', value)
 
     def flush(self):
         """변경분이 있으면 디스크에 1회 저장. 저장했으면 True.
