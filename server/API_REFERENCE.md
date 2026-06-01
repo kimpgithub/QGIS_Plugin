@@ -56,7 +56,9 @@ backend 에 CORS 미들웨어 적용 — **로컬 개발 PC 에서 공개 API �
 | `GET /api/health`, `POST /api/login` | 불필요 |
 | `GET /api/admins`, `GET /api/admin_outline` | Bearer (검수자/플러그인 누구나) |
 | `GET /api/boundary`, `GET /api/cog/{adm_cd}`, `GET /api/markup` | Bearer + adm_cd 권한 체크 |
-| `POST /api/markup`, `PATCH /api/markup/{id}/apply`, `PATCH /api/markup/{id}/reject`, `DELETE /api/markup/{id}` | Bearer + adm_cd 권한 체크 |
+| `POST /api/markup`, `PATCH /api/markup/{id}/reopen`, `DELETE /api/markup/{id}` | Bearer + adm_cd 권한 체크 |
+| `PATCH /api/markup/{id}/reject`, `PATCH /api/markup/{id}/close` | Bearer + **master/plugin** |
+| `PATCH /api/markup/{id}/apply` | **PLUGIN_TOKEN 전용**(반영=QGIS만) |
 | `PUT /api/boundary`, `POST /api/cog` | **PLUGIN_TOKEN 전용** |
 
 - 토큰 없음/스킴 불일치/만료/무효 → `401 {"detail":"..."}`
@@ -175,12 +177,14 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/api/boundary?adm_cd=21510110"
     "properties": {
       "gid": 1, "adm_cd": "21510110", "adm_nm": "기장읍",
       "ri_cd": "9999999901", "ri_nm": "샘플리", "status": "draft",
+      "remark": "경계 동측 하천 따라 조정함",
       "updated_at": "2026-05-14T09:04:38.582203+00:00", "updated_by": "daejeon"
     }
   }]
 }
 ```
 - geometry 는 `MultiPolygon`, 좌표 `EPSG:4326`.
+- `remark` = QGIS 작업자 비고(없으면 null). 웹 경계 클릭 정보 카드에 표시.
 - `adm_cd` 필수(없으면 `422`). normal 이 본인 외 adm_cd → `403`.
 
 ### 3.5b `PUT /api/boundary?srid=4326`  (PLUGIN_TOKEN 전용)
@@ -189,8 +193,13 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/api/boundary?adm_cd=21510110"
 
 - `srid` 쿼리: `4326`(기본) 또는 `5179`. 그 외 `400`.
 - body: GeoJSON FeatureCollection. 각 feature `properties.adm_cd` 필수.
-- 인식 properties: `adm_cd, ri_cd, adm_nm, ri_nm, status`(미지정 시 신규는 `draft`), `updated_by`(미지정 시 `daejeon`).
-- 응답: `{"affected":N,"inserted":I,"updated":U,"features":F}`.
+- 인식 properties: `adm_cd, ri_cd, adm_nm, ri_nm, status`(미지정 시 신규는 `draft`), `remark`(비고, 미지정 시 기존 유지), `updated_by`(미지정 시 `daejeon`).
+- **`resolved_markup_ids`**(선택, body 최상위 `[int]`): 이번 편집으로 처리한 마크업.
+  경계 upsert 와 **같은 트랜잭션**에서 `pending→applied` 로 전이 → "경계는 고쳤는데
+  요청은 대기" 표류 차단. 전이 불가(stale)한 id 는 건너뛰고 `resolve_failed` 로 보고.
+- 응답: `{"affected":N,"inserted":I,"updated":U,"features":F,"resolved":[ids],"resolve_failed":[{id,detail}]}`.
+- 구현: 피처 N건을 단일 배치 쿼리(UPDATE 매칭분 + INSERT 신규분)로 upsert.
+  키 무결성은 `boundary_adm_ri_uniq` 유니크 인덱스(DB)와 payload 내 중복 사전검사(400)가 이중 보장.
 
 ---
 
@@ -236,7 +245,7 @@ body: `{adm_cd, s3_key, bounds, width?, height?, srid?}`.
 ```bash
 curl -H "Authorization: Bearer $TOKEN" "$BASE/api/markup?adm_cd=21510110&status=pending"
 ```
-- `adm_cd`(선택, 지정 시 권한 체크), `status`(선택: `pending`|`applied`|`rejected`, 그 외 `400`).
+- `adm_cd`(선택, 지정 시 권한 체크), `status`(선택: `pending`|`applied`|`rejected`|`closed`, 그 외 `400`).
 - 응답: GeoJSON `FeatureCollection`(EPSG:4326). 빈 상태 `features:[]`.
 
 ```json
@@ -247,15 +256,18 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/api/markup?adm_cd=21510110&status=
     "geometry": { "type": "Point", "coordinates": [129.2, 35.2] },
     "properties": {
       "id": 7, "kind": "attr", "attrs": { "ri_nm": "샘플리", "ri_cd": "9999999999" },
-      "adm_cd": "21510110", "status": "pending", "reject_reason": null,
+      "adm_cd": "21510110", "status": "pending", "version": 1, "reject_reason": null,
       "created_by": "21510110", "created_at": "2026-05-18T08:20:08.157+00:00",
-      "applied_by": null, "applied_at": null, "rejected_by": null, "rejected_at": null
+      "applied_by": null, "applied_at": null, "rejected_by": null, "rejected_at": null,
+      "closed_by": null, "closed_at": null, "reopened_at": null
     }
   }]
 }
 ```
-- `kind`: `add`/`delete` → `LineString`, `attr`/`delete_mark` → `Point`.
-- `status`: `pending`|`applied`|`rejected`. `created_by`=요청자(admin_cd), `applied_by`/`rejected_by`=처리한 관리자(admin_cd).
+- `kind`: `add`/`delete` → `LineString`, `attr` → `Point`, `delete_mark` → `LineString`(구버전 `Point`).
+- `status`: `pending`|`applied`|`rejected`|`closed`. `version`=낙관적 잠금 카운터 —
+  reject/close/reopen 요청 body 에 되돌려 보내면 불일치 시 `409`(동시 수정 감지).
+  `created_by`=요청자, `applied_by`/`rejected_by`/`closed_by`=처리자 admin_cd(plugin 은 NULL).
 
 ### 3.8 `POST /api/markup`  → `201`
 
@@ -271,22 +283,59 @@ body (`MarkupCreate`):
 - `created_by` = 토큰 admin_cd(plugin 이면 `"plugin"`), `status` 기본 `pending`.
 - 응답 `201 {"id": <int>}`.
 
-### 3.9 `PATCH /api/markup/{id}/apply`  → `204`
+#### 상태머신 (전이 규칙)
 
-해당 markup 을 `applied` 로(`applied_at=now()`, `applied_by`=토큰 admin_cd, `reject_reason`/`rejected_by` 초기화).
-없는 id → `404`, 권한 없음 → `403`. 응답 본문 없음(`204`).
+전이는 전부 아래 엔드포인트 경유 — 직접 status 쓰기 없음. 서버가 `from-status`
+가드를 강제하고(어긋나면 `409`), 매 전이마다 `version`+1 및 `markup_event`(append-only
+이력) 1행을 남긴다. 목표 상태와 현재 상태가 같으면 멱등(`204`, 변화 없음).
 
-### 3.10 `PATCH /api/markup/{id}/reject`  → `204`
+```
+pending ──apply(plugin)──> applied ──close(master)──> closed
+   │                          │
+   └──reject(master/plugin)   └──reopen──┐
+   │        │                            │
+rejected ───┴────reopen──────────────> pending
+```
 
-body: `{"reason":"겹침"}` (필수, 빈 값 `400`). `rejected` 로(`rejected_at=now()`, `rejected_by`, `applied_by=NULL`).
-없는 id → `404`, 권한 없음 → `403`. 응답 본문 없음(`204`).
+| 전이 | 엔드포인트 | 허용 from | 행위자 |
+|---|---|---|---|
+| 반영 | `PATCH .../apply` (또는 `PUT /boundary` 의 `resolved_markup_ids`) | pending | plugin |
+| 반려 | `PATCH .../reject` | pending | master/plugin |
+| 확인종료 | `PATCH .../close` | applied | master/plugin |
+| 되돌리기 | `PATCH .../reopen` | applied·rejected | 작성자(본인)/master/plugin |
 
-### 3.11 `DELETE /api/markup/{id}`  → `204`
+### 3.9 `PATCH /api/markup/{id}/apply`  → `204`  (PLUGIN_TOKEN 전용)
+
+`pending → applied`. **QGIS(plugin)만** — 경계를 실제로 고친 주체가 반영 선언.
+일괄 경로는 `PUT /api/boundary` 의 `resolved_markup_ids`(경계 저장과 한 트랜잭션).
+`applied_at=now()`, `applied_by`=토큰 admin_cd(plugin=NULL), `reject_*` 초기화.
+없는 id → `404`, from≠pending → `409`, 비-plugin → `403`.
+
+### 3.10 `PATCH /api/markup/{id}/reject`  → `204`  (master/plugin)
+
+`pending → rejected`. body `{"reason":"겹침", "version":1}`(reason 필수·빈 값 `400`,
+version 선택·불일치 `409`). `rejected_at=now()`, `rejected_by`, `reject_reason`, `applied_*=NULL`.
+없는 id → `404`, from≠pending → `409`, 권한 없음 → `403`.
+
+### 3.11 `PATCH /api/markup/{id}/close`  → `204`  (master/plugin)
+
+`applied → closed`. 웹 발주자가 반영 결과를 확인·수락 → 왕복 종료.
+body `{"version":2}`(선택, 불일치 `409`). `closed_at=now()`, `closed_by`.
+없는 id → `404`, from≠applied → `409`, 권한 없음 → `403`.
+
+### 3.12 `PATCH /api/markup/{id}/reopen`  → `204`
+
+`applied|rejected → pending`. applied 거부(발주자) 또는 rejected 보완(작성자).
+body `{"reason":"...", "version":2}`(둘 다 선택, version 불일치 `409`).
+처리 흔적(applied/rejected/closed) 초기화.
+없는 id → `404`, from∉{applied,rejected} → `409`, 본인 adm_cd 외 → `403`.
+
+### 3.13 `DELETE /api/markup/{id}`  → `204`
 
 수정요청 회수 — 작성자가 잘못 올린 요청을 완전히 삭제(행 제거). 웹 `라인삭제` 툴이
 지도에서 마크업을 클릭해 호출. **대기(`pending`)·반려(`rejected`)** 는 삭제 가능
-(실제 경계를 바꾼 적 없음). 이미 **반영(`applied`)** 된 요청만 이력 보존으로 `409`.
-없는 id → `404`, 본인 adm_cd 외 → `403`(마스터/플러그인은 전체). 응답 본문 없음(`204`).
+(실제 경계를 바꾼 적 없음). 이미 **반영(`applied`)·확인종료(`closed`)** 는 이력 보존으로
+`409`(reopen 후 회수). 없는 id → `404`, 본인 adm_cd 외 → `403`(마스터/플러그인은 전체).
 
 ---
 
@@ -354,13 +403,15 @@ curl -s -H "Authorization: Bearer $TOK" "$BASE/api/boundary?adm_cd=21510110" | j
 curl -s -H "Authorization: Bearer $TOK" $BASE/api/cog/21510110 | jq '.tile_url'
 curl -s -H "Authorization: Bearer $TOK" "$BASE/api/markup?adm_cd=21510110&status=pending" | jq '.features|length'
 
-# 마크업 등록 → 반영/반려
+# 마크업 등록 (검수자) → 확인종료/되돌리기 (master)
 curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
   -d '{"adm_cd":"21510110","kind":"attr","geometry":{"type":"Point","coordinates":[129.2,35.2]},"attrs":{"ri_nm":"샘플리"}}' \
   $BASE/api/markup
-curl -s -X PATCH -H "Authorization: Bearer $TOK" $BASE/api/markup/7/apply -o /dev/null -w '%{http_code}\n'
+# 반영(apply)은 PLUGIN_TOKEN 으로만 — 보통 PUT /boundary 의 resolved_markup_ids 로 일괄
+curl -s -X PATCH -H "Authorization: Bearer $PLUGIN_TOK" $BASE/api/markup/7/apply -o /dev/null -w '%{http_code}\n'
+curl -s -X PATCH -H "Authorization: Bearer $TOK" $BASE/api/markup/7/close  -o /dev/null -w '%{http_code}\n'
 curl -s -X PATCH -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-  -d '{"reason":"겹침"}' $BASE/api/markup/7/reject -o /dev/null -w '%{http_code}\n'
+  -d '{"reason":"재작업"}' $BASE/api/markup/7/reopen -o /dev/null -w '%{http_code}\n'
 ```
 
 ---
@@ -375,7 +426,7 @@ curl -s -X PATCH -H "Authorization: Bearer $TOK" -H 'Content-Type: application/j
 | nginx 설정 | `server/web/conf/default.conf` |
 | 프론트 정적 루트(배포) | `web/dist` → nginx `:ro` 마운트 |
 | DB 초기 스키마 | `server/compose/init.sql` (boundary / cog_catalog / review_markup, EPSG:5179) |
-| 마이그레이션 | `server/migrations/*.sql` (auth, login_log, admin_node, admin_outline, review_markup, kind=delete_mark, markup processed_by 등) |
+| 마이그레이션 | `server/migrations/*.sql` (auth, login_log, admin_node, admin_outline, review_markup, kind=delete_mark, markup processed_by, **markup_lifecycle**(version/closed/reopen + boundary.remark + markup_event) 등) |
 | 계정 시드 | `server/scripts/seed_web_accounts.py`, `seed_all_users.py` / SHP 적재 `load_admin_shp.sh` |
 | 계정 자격증명 | `server/compose/.web-credentials.txt` (chmod 600) |
 

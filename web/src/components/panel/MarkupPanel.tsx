@@ -8,8 +8,10 @@ type Props = {
   onFilterChange: (f: Record<MarkupStatus, boolean>) => void;
   selectedId: number | null;
   onSelect: (id: number) => void;
-  onApply: (id: number) => void;
   onReject: (id: number) => void;
+  onClose: (id: number) => void;
+  onReopen: (id: number) => void;
+  canProcess?: boolean;
   loading?: boolean;
 };
 
@@ -17,6 +19,7 @@ const FILTER_ROWS: { key: MarkupStatus; label: string }[] = [
   { key: 'pending', label: '미처리' },
   { key: 'applied', label: '반영' },
   { key: 'rejected', label: '반려' },
+  { key: 'closed', label: '종료' },
 ];
 
 export default function MarkupPanel({
@@ -25,8 +28,10 @@ export default function MarkupPanel({
   onFilterChange,
   selectedId,
   onSelect,
-  onApply,
   onReject,
+  onClose,
+  onReopen,
+  canProcess,
   loading,
 }: Props) {
   const filtered = useMemo(
@@ -63,9 +68,11 @@ export default function MarkupPanel({
             key={m.id}
             item={m}
             selected={m.id === selectedId}
+            canProcess={canProcess}
             onClick={() => onSelect(m.id)}
-            onApply={() => onApply(m.id)}
             onReject={() => onReject(m.id)}
+            onClose={() => onClose(m.id)}
+            onReopen={() => onReopen(m.id)}
           />
         ))}
       </div>

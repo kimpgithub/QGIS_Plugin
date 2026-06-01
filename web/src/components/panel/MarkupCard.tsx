@@ -14,32 +14,39 @@ const KIND_COLOR: Record<MarkupKind, string> = {
   delete_mark: '#b45309',
 };
 
-// 처리대기 0 / 승인 1 / 반려 2 — 요구사항 표기
+// 대기 → (QGIS)반영 → (확인)종료 / 반려
 const STATUS_LABEL: Record<MarkupStatus, string> = {
-  pending: '처리대기(0)',
-  applied: '승인(1)',
-  rejected: '반려(2)',
+  pending: '처리대기',
+  applied: '반영됨',
+  rejected: '반려',
+  closed: '확인종료',
 };
 const STATUS_COLOR: Record<MarkupStatus, string> = {
   pending: '#6b7280',
   applied: '#15803d',
   rejected: '#b91c1c',
+  closed: '#1d4ed8',
 };
 
 type Props = {
   item: Markup;
   selected?: boolean;
+  // 처리 권한(master) 여부 — false 면 처리 버튼 숨김(일반 사용자는 의견 등록·열람만)
+  canProcess?: boolean;
   onClick?: () => void;
-  onApply?: () => void;
   onReject?: () => void;
+  onClose?: () => void;
+  onReopen?: () => void;
 };
 
 export default function MarkupCard({
   item,
   selected,
+  canProcess,
   onClick,
-  onApply,
   onReject,
+  onClose,
+  onReopen,
 }: Props) {
   const note =
     (item.attrs?.note as string | undefined) ?? defaultNote(item.kind);
@@ -61,33 +68,67 @@ export default function MarkupCard({
       <div style={styles.meta}>
         작업자 {item.created_by || '-'} · {fmt(item.created_at)}
       </div>
-      <div style={styles.actions}>
-        <button
-          type="button"
-          style={item.status === 'applied' ? styles.btnDone : styles.btn}
-          disabled={item.status !== 'pending'}
-          onClick={(e) => {
-            e.stopPropagation();
-            onApply?.();
-          }}
-        >
-          반영
-        </button>
-        <button
-          type="button"
-          style={item.status === 'rejected' ? styles.btnDone : styles.btn}
-          disabled={item.status !== 'pending'}
-          onClick={(e) => {
-            e.stopPropagation();
-            onReject?.();
-          }}
-        >
-          반려
-        </button>
-      </div>
-      {item.status === 'applied' && (
+      {canProcess && (
+        <div style={styles.actions}>
+          {/* 대기: 반려만 (반영=QGIS 전용) */}
+          {item.status === 'pending' && (
+            <button
+              type="button"
+              style={styles.btn}
+              onClick={(e) => {
+                e.stopPropagation();
+                onReject?.();
+              }}
+            >
+              반려
+            </button>
+          )}
+          {/* 반영됨: 결과 확인(종료) / 되돌리기(재요청) */}
+          {item.status === 'applied' && (
+            <>
+              <button
+                type="button"
+                style={styles.btn}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClose?.();
+                }}
+              >
+                확인
+              </button>
+              <button
+                type="button"
+                style={styles.btn}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onReopen?.();
+                }}
+              >
+                되돌리기
+              </button>
+            </>
+          )}
+          {/* 반려됨: 다시 대기로 (보완 재요청) */}
+          {item.status === 'rejected' && (
+            <button
+              type="button"
+              style={styles.btn}
+              onClick={(e) => {
+                e.stopPropagation();
+                onReopen?.();
+              }}
+            >
+              재요청
+            </button>
+          )}
+        </div>
+      )}
+      {(item.status === 'applied' || item.status === 'closed') && (
         <div style={styles.footnote}>
-          승인 {item.applied_by || '-'} · {fmt(item.applied_at)}
+          반영 {item.applied_by || '-'} · {fmt(item.applied_at)}
+          {item.status === 'closed' && (
+            <div>확인 {item.closed_by || '-'} · {fmt(item.closed_at)}</div>
+          )}
         </div>
       )}
       {item.status === 'rejected' && (

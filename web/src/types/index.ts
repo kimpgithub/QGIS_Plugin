@@ -41,15 +41,19 @@ export type AuthUser = {
 // 수정요청 종류 — 라인등록/라인삭제/속성등록/삭제표기
 export type MarkupKind = 'add' | 'delete' | 'attr' | 'delete_mark';
 
-export type MarkupStatus = 'pending' | 'applied' | 'rejected';
+// lifecycle: pending(요청) → applied(QGIS 반영) → closed(웹 확인 종료)
+//            pending → rejected(반려) ;  applied/rejected → pending(reopen)
+export type MarkupStatus = 'pending' | 'applied' | 'rejected' | 'closed';
 
 // 서버 → 클라이언트 (api_client.py 신규 스키마 기준).
-// created_by = 작업자(행정구역코드 8자), applied_by/rejected_by = 처리 관리자(마스터 admin_cd).
+// created_by = 작업자(행정구역코드 8자), applied_by/rejected_by/closed_by = 처리자 admin_cd.
+// version = 낙관적 잠금 — 상태 변경 요청에 함께 보내 동시 수정 충돌(409)을 감지.
 export type Markup = {
   id: number;
   adm_cd: string;
   kind: MarkupKind;
   status: MarkupStatus;
+  version: number;
   geometry: GjGeometry;
   attrs: Record<string, unknown> & {
     ri_nm?: string;
@@ -63,7 +67,24 @@ export type Markup = {
   rejected_by?: string | null;
   rejected_at?: string | null;
   reject_reason?: string | null;
+  closed_by?: string | null;
+  closed_at?: string | null;
+  reopened_at?: string | null;
 };
+
+// GET /api/boundary feature.properties — QGIS 가 제출한 행정리 경계 + 비고(remark)
+export type BoundaryProps = {
+  gid: number;
+  adm_cd: string;
+  adm_nm?: string | null;
+  ri_cd?: string | null;
+  ri_nm?: string | null;
+  status?: string | null;
+  remark?: string | null;     // QGIS 작업자 비고
+  updated_at?: string | null;
+  updated_by?: string | null;
+};
+export type BoundaryCollection = GjFeatureCollection<BoundaryProps>;
 
 // 서버 응답: GeoJSON FeatureCollection.
 // properties 에 geometry 가 같이 들어있으면 ol/format/GeoJSON 가

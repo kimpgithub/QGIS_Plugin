@@ -1,5 +1,58 @@
 # Changelog
 
+## 2026-06-01 — 왕복 워크플로우 마감: 비고 가시화 + 죽은 코드 정리 + 배치 upsert
+
+lifecycle 구조 검토에서 나온 결함/비효율 정리. "QGIS 비고 → 웹에서 확인" 경로가
+끊겨 있던 것(저장만 되고 반환 안 됨)을 복구하고, 선언만 돼 있던 낙관적 잠금을
+실사용으로 연결.
+
+- **비고(remark) 왕복 완성** — `GET /api/boundary` properties 에 `remark` 포함.
+  웹은 툴 비활성 상태에서 경계 클릭 → 정보 카드(행정리명/코드 + **작업자 비고** +
+  수정자/일시) 표시. `MapView` 에 `infoMode`/`onPickBoundary` 추가.
+- **version(낙관적 잠금) 실사용** — reject/close/reopen 요청 body 에 `version` 수용
+  (`expected_version` 가드는 있었으나 호출자가 없었음). 웹/QGIS 모두 회수 시점
+  version 을 되돌려 보내고, 409 시 "다른 곳에서 먼저 처리됨" 안내 + 자동 새로고침.
+- **죽은 컬럼 제거** — `resolved_boundary_gid`(추가만 되고 채우는 코드 없음) 를
+  마이그레이션/응답/타입에서 제거.
+- **PUT /api/boundary 배치화** — 피처당 UPDATE→INSERT 2쿼리 루프를 단일 CTE 쿼리
+  (UPDATE 매칭분 + INSERT 신규분)로 교체. `boundary_adm_ri_uniq` 유니크 인덱스로
+  (adm_cd, ri_cd) 키를 DB 가 직접 보장.
+- **init.sql 동기화** — review_markup 이 구 스키마(pin/arrow/area, open/resolved)로
+  남아 있어 신규 DB 구축 시 API 와 즉시 불일치하던 문제 해소. 마이그레이션 누적
+  결과와 동일한 최신 스키마로 전면 재작성(auth/login_log/admin_node/admin_outline/
+  markup_event 포함).
+- **웹 자동 동기화** — 30초 주기로 markup/boundary 재조회(그리기·모달 중엔 일시정지)
+  → QGIS 반영 결과가 수동 새로고침 없이 화면에 나타남.
+- **부분 실패 가시화** — QGIS 제출 시 `resolve_failed` 를 id+사유로 메시지에 명시,
+  제출 후 다이얼로그를 서버 재회수로 갱신(로컬 추정 패치 제거). 웹 다중삭제도
+  실패 id 명시.
+- 검증: 서버 `py_compile` OK, 웹 `tsc -b` OK.
+
+## 2026-05-29 — 마크업 lifecycle 정식화 (왕복 상태머신 + 원자적 경계 결합)
+
+웹↔QGIS 수정요청이 "단방향 + 수동 봉합"이라 상태가 표류하던 구조를 명시적
+상태머신으로 교체. **경계를 고친 트랜잭션 = 요청을 처리한 트랜잭션** 으로 묶어
+두 시스템 상태가 갈라질 수 없게 함.
+
+- **상태머신** — `pending →(QGIS 반영) applied →(웹 확인) closed`, `pending →(반려)
+  rejected`, `applied|rejected →(reopen) pending`. 전이는 전부 서버 전이 API 경유,
+  `from-status` 가드 위반 시 `409`. `version`(낙관적 잠금) + `markup_event`
+  (append-only 이력) 추가. 같은 상태로의 재호출은 멱등.
+- **권한 분리** — `apply`(반영)는 **plugin 전용**(경계를 실제 고친 QGIS만 선언).
+  `close`/`reject`는 master, `reopen`은 작성자/master. 웹의 "반영 도장" 제거.
+- **원자적 결합** — `PUT /api/boundary` 에 `resolved_markup_ids` 추가 → 경계 upsert
+  와 같은 트랜잭션에서 `pending→applied`. stale id 는 `resolve_failed` 로 보고.
+  `feature.properties.remark` 로 **비고 서버화**(boundary.remark, 엑셀 로컬 탈피).
+- **신규 엔드포인트** — `PATCH /api/markup/{id}/close`·`/reopen`. `GET /api/markup`
+  status 에 `closed` 추가, 응답에 `version/closed_*/reopened_at/resolved_boundary_gid`.
+- **QGIS** — 검토 다이얼로그에 `[처리함]` 체크 + `[반려]`. 제출 시 체크한 마크업
+  id 를 경계와 함께 전송(원자적 반영). `api_client.submit_boundary(resolved_markup_ids=)`,
+  `reject_markup()` 추가.
+- **웹** — `MarkupCard` 가 상태별 버튼 분기(대기=반려 / 반영됨=확인·되돌리기 /
+  반려=재요청), `closed` 필터·라벨. 처리 버튼은 master(`canProcess`)만 노출.
+- **마이그레이션** — `202605_markup_lifecycle.sql`(가산적·멱등). init.sql 동기.
+- 검증: 서버 `py_compile` OK, 웹 `tsc -b` OK.
+
 ## 2026-05-29 — 웹 삭제/삭제표기 마감: Ctrl+드래그 다중삭제 + ✕ 캔버스 렌더러
 
 동료 제안(다중선택·X 렌더러)을 검토 후, 현재 동작 버전을 베이스로 좋은

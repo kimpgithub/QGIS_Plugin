@@ -12,8 +12,9 @@ import DrawHint from '../components/map/DrawHint';
 import {
   listMarkup,
   createMarkup,
-  applyMarkup,
   rejectMarkup,
+  closeMarkup,
+  reopenMarkup,
   deleteMarkup,
 } from '../api/markup';
 import Modal from '../components/common/Modal';
@@ -28,8 +29,9 @@ import {
 import { attachTool, type ActiveTool } from '../components/map/tools';
 import type {
   AdminUnit,
+  BoundaryCollection,
+  BoundaryProps,
   CogInfo,
-  GjFeatureCollection,
   GjGeometry,
   Markup,
   MarkupCollection,
@@ -80,17 +82,20 @@ export default function InspectPage() {
   });
 
   // 데이터
-  const [boundary, setBoundary] = useState<GjFeatureCollection | null>(null);
+  const [boundary, setBoundary] = useState<BoundaryCollection | null>(null);
   const [items, setItems] = useState<Markup[]>([]);
   const [cog, setCog] = useState<CogInfo | null>(null);
   const [adminOutline, setAdminOutline] = useState<AdminOutlineCollection | null>(null);
   const [loading, setLoading] = useState(false);
+  // 클릭한 행정리경계 정보(QGIS 비고 포함) — 툴 비활성 상태에서 경계 클릭 시 표시
+  const [boundaryInfo, setBoundaryInfo] = useState<BoundaryProps | null>(null);
 
   // 필터 + 선택
   const [filter, setFilter] = useState<Record<MarkupStatus, boolean>>({
     pending: true,
     applied: true,
     rejected: true,
+    closed: true,
   });
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
@@ -216,14 +221,17 @@ export default function InspectPage() {
       setDeleteManyIds(null);
       return;
     }
-    // 일부는 applied(409)/권한(403) 으로 실패할 수 있음 — 개별 처리 후 요약.
+    // 일부는 applied(409)/권한(403) 으로 실패할 수 있음 — 개별 처리 후 실패 id 명시.
     const results = await Promise.allSettled(ids.map((id) => deleteMarkup(id)));
     const ok = results.filter((r) => r.status === 'fulfilled').length;
-    const fail = results.length - ok;
+    const failedIds = ids.filter((_, i) => results[i].status === 'rejected');
     await reloadMarkup();
     setDeleteManyIds(null);
-    if (fail > 0) {
-      alert(`${ok}건 삭제, ${fail}건 실패(이미 반영됐거나 권한 없음)`);
+    if (failedIds.length > 0) {
+      alert(
+        `${ok}건 삭제, ${failedIds.length}건 실패 — #${failedIds.join(', #')}\n` +
+          '(이미 반영됐거나 권한이 없는 요청)'
+      );
     }
   }
 
@@ -324,27 +332,68 @@ export default function InspectPage() {
     );
   }
 
-  async function onApply(id: number) {
+  async function reloadBoundary() {
+    if (!admin) return;
+    const b = await getBoundary(admin.adm_cd).catch(() => null);
+    if (b) setBoundary(b);
+  }
+
+  // QGIS 작업 결과 자동 동기화 — 30초 주기로 markup/boundary 재조회.
+  // 그리기·모달 진행 중에는 건너뛰어 작업 흐름을 방해하지 않는다.
+  const idle =
+    tool == null &&
+    pendingGeom == null &&
+    !attrOpen &&
+    rejectId == null &&
+    deleteTargetId == null &&
+    deleteManyIds == null;
+  useEffect(() => {
+    if (!admin || !idle) return;
+    const t = window.setInterval(() => {
+      reloadMarkup();
+      reloadBoundary();
+    }, 30_000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [admin, idle]);
+
+  // 상태 변경 공통 — 409(상태/version 충돌)면 목록을 새로고침해 화면을 서버와 맞춘다.
+  async function transition(action: () => Promise<void>, label: string) {
     try {
-      await applyMarkup(id);
-      await reloadMarkup();
+      await action();
     } catch (e) {
       console.error(e);
-      alert('반영 실패');
+      const conflict = e instanceof ApiError && e.status === 409;
+      alert(
+        conflict
+          ? `${label} 실패 — 다른 곳에서 먼저 처리됐습니다. 목록을 새로고침합니다.`
+          : `${label} 실패`
+      );
+    } finally {
+      await reloadMarkup();
     }
+  }
+
+  const versionOf = (id: number) => items.find((x) => x.id === id)?.version;
+
+  // applied 결과 확인·수락 → 종료(closed)
+  const onClose = (id: number) =>
+    transition(() => closeMarkup(id, versionOf(id)), '확인 처리');
+
+  // 다시 대기로 — applied 거부(발주자) 또는 rejected 보완(재요청)
+  function onReopen(id: number) {
+    const reason = window.prompt('되돌리는 사유(선택):') ?? undefined;
+    return transition(
+      () => reopenMarkup(id, reason || undefined, versionOf(id)),
+      '되돌리기'
+    );
   }
 
   async function onConfirmReject(reason: string) {
     if (rejectId == null) return;
-    try {
-      await rejectMarkup(rejectId, reason);
-      await reloadMarkup();
-    } catch (e) {
-      console.error(e);
-      alert('반려 실패');
-    } finally {
-      setRejectId(null);
-    }
+    const id = rejectId;
+    setRejectId(null);
+    await transition(() => rejectMarkup(id, reason, versionOf(id)), '반려');
   }
 
   function onSelectCard(id: number) {
@@ -396,8 +445,10 @@ export default function InspectPage() {
             markup={markupFC}
             onMapReady={(h) => (mapHandleRef.current = h)}
             eraseMode={tool === 'delete'}
+            infoMode={tool == null}
             onPickMarkup={(id) => setDeleteTargetId(id)}
             onPickMarkupMany={(ids) => setDeleteManyIds(ids)}
+            onPickBoundary={(p) => setBoundaryInfo(p as BoundaryProps | null)}
             highlightId={deleteTargetId}
           />
           {tool && pendingGeom == null && !attrOpen && (
@@ -411,6 +462,37 @@ export default function InspectPage() {
               onExit={() => setTool(null)}
             />
           )}
+          {/* 경계 클릭 정보 카드 — 행정리 속성 + QGIS 작업자 비고(remark) */}
+          {tool == null && boundaryInfo && (
+            <div style={styles.infoCard}>
+              <div style={styles.infoHead}>
+                <b>
+                  {boundaryInfo.ri_nm || '(행정리명 없음)'}
+                  {boundaryInfo.ri_cd ? ` · ${boundaryInfo.ri_cd}` : ''}
+                </b>
+                <button
+                  type="button"
+                  style={styles.infoClose}
+                  onClick={() => setBoundaryInfo(null)}
+                >
+                  ✕
+                </button>
+              </div>
+              <div style={styles.infoRow}>
+                {boundaryInfo.adm_nm || ''} ({boundaryInfo.adm_cd})
+              </div>
+              {boundaryInfo.remark && (
+                <div style={styles.infoRemark}>
+                  <span style={styles.infoRemarkLabel}>작업자 비고</span>
+                  {boundaryInfo.remark}
+                </div>
+              )}
+              <div style={styles.infoMeta}>
+                수정 {boundaryInfo.updated_by || '-'} ·{' '}
+                {(boundaryInfo.updated_at || '').replace('T', ' ').slice(0, 16)}
+              </div>
+            </div>
+          )}
         </div>
         <MarkupPanel
           items={items}
@@ -418,8 +500,10 @@ export default function InspectPage() {
           onFilterChange={setFilter}
           selectedId={selectedId}
           onSelect={onSelectCard}
-          onApply={onApply}
           onReject={(id) => setRejectId(id)}
+          onClose={onClose}
+          onReopen={onReopen}
+          canProcess={isMaster}
           loading={loading}
         />
       </div>
@@ -560,6 +644,54 @@ const styles: Record<string, React.CSSProperties> = {
   },
   body: { flex: 1, display: 'flex', minHeight: 0 },
   mapWrap: { flex: 1, position: 'relative', minWidth: 0 },
+  infoCard: {
+    position: 'absolute',
+    left: 12,
+    bottom: 12,
+    width: 280,
+    background: '#fff',
+    border: '1px solid #d0d3da',
+    borderRadius: 6,
+    boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
+    padding: 12,
+    fontSize: 12,
+    color: '#1f2937',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    zIndex: 10,
+  },
+  infoHead: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    fontSize: 13,
+  },
+  infoClose: {
+    border: 'none',
+    background: 'none',
+    cursor: 'pointer',
+    color: '#9ca3af',
+    fontSize: 13,
+    padding: 0,
+  },
+  infoRow: { color: '#6b7280' },
+  infoRemark: {
+    background: '#fef9c3',
+    border: '1px solid #fde047',
+    borderRadius: 4,
+    padding: '6px 8px',
+    lineHeight: 1.5,
+    whiteSpace: 'pre-wrap',
+  },
+  infoRemarkLabel: {
+    display: 'block',
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#a16207',
+    marginBottom: 2,
+  },
+  infoMeta: { fontSize: 11, color: '#9ca3af' },
   delQ: { fontSize: 13, color: '#1f2937', marginBottom: 8, lineHeight: 1.5 },
   delNote: { fontSize: 12, color: '#9ca3af', marginBottom: 12 },
   delActions: { display: 'flex', gap: 8, justifyContent: 'flex-end' },

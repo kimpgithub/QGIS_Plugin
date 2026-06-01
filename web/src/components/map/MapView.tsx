@@ -41,8 +41,11 @@ type Props = {
   visible: LayerVisibility;
   onMapReady?: (handle: MapHandle) => void;
   eraseMode?: boolean;                           // 라인삭제 = 마크업 선택·삭제 모드
+  infoMode?: boolean;                            // 툴 비활성 상태 = 경계 클릭으로 정보(비고) 확인
   onPickMarkup?: (id: number) => void;           // 삭제모드에서 마크업 클릭 시 id 전달
   onPickMarkupMany?: (ids: number[]) => void;    // Ctrl+드래그 박스 안 마크업 id 목록
+  // 정보모드에서 행정리경계 클릭 시 properties 전달 (빈 곳 클릭 = null → 카드 닫기)
+  onPickBoundary?: (props: Record<string, unknown> | null) => void;
   highlightId?: number | null;                   // 강조 표시할 마크업 id (삭제 대상)
 };
 
@@ -61,8 +64,10 @@ export default function MapView({
   visible,
   onMapReady,
   eraseMode,
+  infoMode,
   onPickMarkup,
   onPickMarkupMany,
+  onPickBoundary,
   highlightId,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -271,6 +276,37 @@ export default function MapView({
   useEffect(() => {
     onPickManyRef.current = onPickMarkupMany;
   }, [onPickMarkupMany]);
+  const onPickBoundaryRef = useRef(onPickBoundary);
+  useEffect(() => {
+    onPickBoundaryRef.current = onPickBoundary;
+  }, [onPickBoundary]);
+
+  // 정보모드(툴 비활성): 행정리경계 클릭 → properties(비고 포함)를 호출부에 전달.
+  // 빈 곳 클릭은 null 전달(정보 카드 닫기).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !infoMode) return;
+    const onClick = (evt: MapBrowserEvent) => {
+      let picked: Record<string, unknown> | null = null;
+      map.forEachFeatureAtPixel(
+        evt.pixel,
+        (feat: FeatureLike) => {
+          const { geometry: _g, ...props } = feat.getProperties();
+          picked = props;
+          return true;
+        },
+        {
+          layerFilter: (l: BaseLayer) => l === boundaryLayerRef.current,
+          hitTolerance: 4,
+        }
+      );
+      onPickBoundaryRef.current?.(picked);
+    };
+    map.on('singleclick', onClick);
+    return () => {
+      map.un('singleclick', onClick);
+    };
+  }, [infoMode]);
 
   // 강조 대상 변경 → ref 갱신 후 마크업 레이어 리렌더(changed).
   useEffect(() => {

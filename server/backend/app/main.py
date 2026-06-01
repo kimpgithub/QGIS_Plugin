@@ -135,6 +135,16 @@ class MarkupCreate(BaseModel):
 
 class RejectBody(BaseModel):
     reason: str
+    version: int | None = None        # 낙관적 잠금 — 불일치 시 409
+
+
+class ReopenBody(BaseModel):
+    reason: str | None = None
+    version: int | None = None
+
+
+class CloseBody(BaseModel):
+    version: int | None = None
 
 
 class CogRegister(BaseModel):
@@ -291,6 +301,7 @@ def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
             'properties', json_build_object(
               'gid', gid, 'adm_cd', adm_cd, 'adm_nm', adm_nm,
               'ri_cd', ri_cd, 'ri_nm', ri_nm, 'status', status,
+              'remark', remark,
               'updated_at', updated_at, 'updated_by', updated_by)
           )) FILTER (WHERE gid IS NOT NULL), '[]'::json)
         ) AS fc
@@ -302,12 +313,20 @@ def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
 
 
 @app.put("/api/boundary")
-def upsert_boundary(body: dict, srid: int = 4326, _: dict = Depends(require_plugin)):
-    """플러그인 전용 — GeoJSON FC 를 boundary 테이블에 upsert (adm_cd+ri_cd 키)."""
+def upsert_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_plugin)):
+    """플러그인 전용 — GeoJSON FC 를 boundary 테이블에 upsert (adm_cd+ri_cd 키).
+
+    body.resolved_markup_ids: [int] 지정 시, 경계 upsert 와 **같은 트랜잭션**에서
+    해당 마크업을 pending→applied 로 전이한다 → "경계는 고쳤는데 요청은 대기"
+    표류 차단. 전이 불가(stale)한 id 는 건너뛰고 resolve_failed 로 보고.
+    feature.properties.remark 는 boundary.remark(비고)로 함께 저장."""
     if srid not in (4326, 5179):
         raise HTTPException(status_code=400, detail="srid는 4326 또는 5179만 허용")
     if body.get("type") != "FeatureCollection" or not isinstance(body.get("features"), list):
         raise HTTPException(status_code=400, detail="GeoJSON FeatureCollection이 필요합니다")
+    resolved_ids = body.get("resolved_markup_ids") or []
+    if not isinstance(resolved_ids, list):
+        raise HTTPException(status_code=400, detail="resolved_markup_ids는 배열")
 
     def _norm_ri(props: dict):
         """빈 문자열/공백 ri_cd 를 None 으로 정규화 ('' 와 NULL 동일 취급)."""
@@ -339,50 +358,81 @@ def upsert_boundary(body: dict, srid: int = 4326, _: dict = Depends(require_plug
                     f"부여하세요. 해당 adm_cd({len(dups)}개): {sample}"),
         )
 
+    # 배치 upsert — 피처 N건을 단일 쿼리로 (UPDATE 매칭분 + INSERT 신규분).
+    # 키 (adm_cd, ri_cd) 의 DB 무결성은 boundary_adm_ri_uniq 유니크 인덱스가 보장.
+    rows = []
+    for feat in body["features"]:
+        geom = feat.get("geometry")
+        props = feat.get("properties") or {}
+        if not geom:
+            continue
+        rows.append({
+            "geometry": geom,
+            "adm_cd": props.get("adm_cd"),
+            "adm_nm": props.get("adm_nm"),
+            "ri_cd": _norm_ri(props),
+            "ri_nm": props.get("ri_nm"),
+            "status": props.get("status"),
+            "remark": props.get("remark"),
+            "updated_by": props.get("updated_by") or "daejeon",
+        })
+
     inserted = updated = 0
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            for feat in body["features"]:
-                geom = feat.get("geometry")
-                props = feat.get("properties") or {}
-                if not geom:
-                    continue
-                adm_cd = props.get("adm_cd")
-                if not adm_cd:
-                    raise HTTPException(status_code=400, detail="각 feature는 properties.adm_cd 필요")
-                ri_cd = _norm_ri(props)
-                params_geom = (json.dumps(geom), srid)
-                geom_sql = "ST_Multi(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(%s), %s), 5179))"
+            if rows:
                 cur.execute(
-                    f"""
-                    UPDATE boundary
-                       SET geom = {geom_sql}, adm_nm = %s, ri_nm = %s,
-                           status = COALESCE(%s, status),
-                           updated_at = now(), updated_by = %s
-                     WHERE adm_cd = %s AND ri_cd IS NOT DISTINCT FROM %s
-                    """,
-                    (*params_geom, props.get("adm_nm"), props.get("ri_nm"),
-                     props.get("status"), props.get("updated_by") or "daejeon",
-                     adm_cd, ri_cd),
-                )
-                if cur.rowcount > 0:
-                    updated += cur.rowcount
-                else:
-                    cur.execute(
-                        f"""
-                        INSERT INTO boundary
-                          (geom, adm_cd, adm_nm, ri_cd, ri_nm, status, updated_by)
-                        VALUES ({geom_sql}, %s, %s, %s, %s,
-                                COALESCE(%s, 'draft'), %s)
-                        """,
-                        (*params_geom, adm_cd, props.get("adm_nm"), ri_cd,
-                         props.get("ri_nm"), props.get("status"),
-                         props.get("updated_by") or "daejeon"),
+                    """
+                    WITH src AS (
+                      SELECT ST_Multi(ST_Transform(ST_SetSRID(
+                               ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179)) AS geom,
+                             f->>'adm_cd' AS adm_cd, f->>'adm_nm' AS adm_nm,
+                             f->>'ri_cd'  AS ri_cd,  f->>'ri_nm'  AS ri_nm,
+                             f->>'status' AS status, f->>'remark' AS remark,
+                             f->>'updated_by' AS updated_by
+                      FROM jsonb_array_elements(%s::jsonb) AS f
+                    ), upd AS (
+                      UPDATE boundary b
+                         SET geom = s.geom, adm_nm = s.adm_nm, ri_nm = s.ri_nm,
+                             status = COALESCE(s.status, b.status),
+                             remark = COALESCE(s.remark, b.remark),
+                             updated_at = now(), updated_by = s.updated_by
+                        FROM src s
+                       WHERE b.adm_cd = s.adm_cd AND b.ri_cd IS NOT DISTINCT FROM s.ri_cd
+                      RETURNING 1
+                    ), ins AS (
+                      INSERT INTO boundary
+                        (geom, adm_cd, adm_nm, ri_cd, ri_nm, status, remark, updated_by)
+                      SELECT s.geom, s.adm_cd, s.adm_nm, s.ri_cd, s.ri_nm,
+                             COALESCE(s.status, 'draft'), s.remark, s.updated_by
+                        FROM src s
+                       WHERE NOT EXISTS (
+                               SELECT 1 FROM boundary b
+                                WHERE b.adm_cd = s.adm_cd
+                                  AND b.ri_cd IS NOT DISTINCT FROM s.ri_cd)
+                      RETURNING 1
                     )
-                    inserted += 1
+                    SELECT (SELECT count(*) FROM upd) AS updated,
+                           (SELECT count(*) FROM ins) AS inserted
+                    """,
+                    (srid, json.dumps(rows)),
+                )
+                counts = cur.fetchone()
+                inserted, updated = counts["inserted"], counts["updated"]
+        # 경계 저장과 같은 트랜잭션에서 처리 마크업을 applied 로 — 둘 다 커밋되거나 둘 다 롤백.
+        resolved: list = []
+        resolve_failed: list = []
+        for mid in resolved_ids:
+            try:
+                with conn.cursor() as mcur:
+                    _transition(mcur, int(mid), "applied", user)
+                resolved.append(int(mid))
+            except HTTPException as e:
+                resolve_failed.append({"id": mid, "detail": e.detail})
         conn.commit()
     return {"affected": inserted + updated, "inserted": inserted, "updated": updated,
-            "features": len(body["features"])}
+            "features": len(body["features"]),
+            "resolved": resolved, "resolve_failed": resolve_failed}
 
 
 # ---------------------------------------------------------------- cog
@@ -472,8 +522,8 @@ def list_markup(
         conds.append("adm_cd = %s")
         params.append(adm_cd)
     if status:
-        if status not in ("pending", "applied", "rejected"):
-            raise HTTPException(status_code=400, detail="status는 pending/applied/rejected 중 하나")
+        if status not in ("pending", "applied", "rejected", "closed"):
+            raise HTTPException(status_code=400, detail="status는 pending/applied/rejected/closed 중 하나")
         conds.append("status = %s")
         params.append(status)
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
@@ -486,11 +536,13 @@ def list_markup(
             'geometry', ST_AsGeoJSON(ST_Transform(geom, 4326))::json,
             'properties', json_build_object(
               'id', id, 'kind', kind, 'attrs', attrs,
-              'adm_cd', adm_cd, 'status', status,
+              'adm_cd', adm_cd, 'status', status, 'version', version,
               'reject_reason', reject_reason,
               'created_by', created_by, 'created_at', created_at,
               'applied_by', applied_by, 'applied_at', applied_at,
-              'rejected_by', rejected_by, 'rejected_at', rejected_at)
+              'rejected_by', rejected_by, 'rejected_at', rejected_at,
+              'closed_by', closed_by, 'closed_at', closed_at,
+              'reopened_at', reopened_at)
           )) FILTER (WHERE id IS NOT NULL), '[]'::json)
         ) AS fc
         FROM review_markup {where}
@@ -529,42 +581,128 @@ def create_markup(body: MarkupCreate, user: dict = Depends(get_user)):
     return {"id": row["id"]}
 
 
-@app.patch("/api/markup/{markup_id}/apply")
-def apply_markup(markup_id: int, user: dict = Depends(get_user)):
-    cur = fetchone("SELECT adm_cd FROM review_markup WHERE id = %s", (markup_id,))
-    if not cur:
-        raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
-    check_admin_access(user, cur["adm_cd"].strip())
-    execute(
-        """
-        UPDATE review_markup
-           SET status = 'applied', applied_at = now(),
-               applied_by = %s, reject_reason = NULL, rejected_by = NULL
-         WHERE id = %s
-        """,
-        (user["admin_cd"], markup_id),
+# 상태머신 — 전이는 전부 _transition 경유(직접 status UPDATE 금지).
+#   pending → applied(QGIS 반영) → closed(웹 확인)
+#   pending → rejected(반려) ;  applied/rejected → pending(reopen)
+_ALLOWED_FROM = {
+    "applied":  {"pending"},
+    "rejected": {"pending"},
+    "closed":   {"applied"},
+    "pending":  {"applied", "rejected"},   # reopen
+}
+
+
+def _transition(cur, markup_id: int, to_status: str, user: dict, *,
+                reason: str | None = None,
+                expected_version: int | None = None) -> str:
+    """review_markup 상태 전이 — from-status 가드 + 낙관적 잠금 + 이력 기록.
+
+    주어진 커서(cur) 안에서만 동작하고 커밋은 호출자 책임 → 경계 제출과 한
+    트랜잭션에 묶을 수 있다. 반환 'changed' | 'noop'(이미 목표 상태, 멱등).
+    위반 시 HTTPException(404/403/409).
+    """
+    cur.execute(
+        "SELECT adm_cd, status, version FROM review_markup WHERE id = %s FOR UPDATE",
+        (markup_id,),
     )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"마크업 {markup_id} 없음")
+    check_admin_access(user, row["adm_cd"].strip())
+    cur_status = row["status"]
+    if cur_status == to_status:
+        return "noop"                                      # 재호출 안전(멱등)
+    allowed = _ALLOWED_FROM.get(to_status, set())
+    if cur_status not in allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{cur_status}→{to_status} 전이 불가 (허용 from={sorted(allowed)})",
+        )
+    if expected_version is not None and row["version"] != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"version 충돌 — 서버 {row['version']} ≠ 요청 {expected_version}. "
+                    f"새로고침 후 재시도"),
+        )
+    actor_cd = user["admin_cd"]                            # CHAR(8) 컬럼용(plugin=NULL)
+    actor_label = actor_cd or "plugin"                     # 이벤트 로그용
+    sets = ["status = %s", "version = version + 1"]
+    params: list = [to_status]
+    if to_status == "applied":
+        sets += ["applied_at = now()", "applied_by = %s",
+                 "reject_reason = NULL", "rejected_by = NULL", "rejected_at = NULL"]
+        params.append(actor_cd)
+    elif to_status == "rejected":
+        sets += ["rejected_at = now()", "rejected_by = %s", "reject_reason = %s",
+                 "applied_by = NULL", "applied_at = NULL"]
+        params += [actor_cd, reason]
+    elif to_status == "closed":
+        sets += ["closed_at = now()", "closed_by = %s"]
+        params.append(actor_cd)
+    elif to_status == "pending":                           # reopen — 처리 흔적 초기화
+        sets += ["reopened_at = now()", "applied_by = NULL", "applied_at = NULL",
+                 "rejected_by = NULL", "rejected_at = NULL", "reject_reason = NULL",
+                 "closed_by = NULL", "closed_at = NULL"]
+    params.append(markup_id)
+    cur.execute(f"UPDATE review_markup SET {', '.join(sets)} WHERE id = %s", params)
+    cur.execute(
+        """INSERT INTO markup_event (markup_id, from_status, to_status, actor, reason)
+           VALUES (%s, %s, %s, %s, %s)""",
+        (markup_id, cur_status, to_status, actor_label, reason),
+    )
+    return "changed"
+
+
+@app.patch("/api/markup/{markup_id}/apply", status_code=204)
+def apply_markup(markup_id: int, user: dict = Depends(require_plugin)):
+    """pending → applied. QGIS(plugin) 전용 — 경계를 실제로 고친 주체만 '반영' 선언.
+    일괄 경로는 PUT /api/boundary 의 resolved_markup_ids(같은 트랜잭션)."""
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            _transition(cur, markup_id, "applied", user)
+        conn.commit()
     return Response(status_code=204)
 
 
-@app.patch("/api/markup/{markup_id}/reject")
+@app.patch("/api/markup/{markup_id}/reject", status_code=204)
 def reject_markup(markup_id: int, body: RejectBody, user: dict = Depends(get_user)):
+    """pending → rejected. 수행 불가/오요청을 사유와 함께 반려(plugin/master)."""
+    if user["role"] not in ("plugin", "master"):
+        raise HTTPException(status_code=403, detail="반려는 plugin/master 만 가능")
     if not body.reason or not body.reason.strip():
         raise HTTPException(status_code=400, detail="reason 필수")
-    cur = fetchone("SELECT adm_cd FROM review_markup WHERE id = %s", (markup_id,))
-    if not cur:
-        raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
-    check_admin_access(user, cur["adm_cd"].strip())
-    execute(
-        """
-        UPDATE review_markup
-           SET status = 'rejected', rejected_at = now(),
-               rejected_by = %s, applied_by = NULL,
-               reject_reason = %s
-         WHERE id = %s
-        """,
-        (user["admin_cd"], body.reason.strip(), markup_id),
-    )
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            _transition(cur, markup_id, "rejected", user, reason=body.reason.strip(),
+                        expected_version=body.version)
+        conn.commit()
+    return Response(status_code=204)
+
+
+@app.patch("/api/markup/{markup_id}/close", status_code=204)
+def close_markup(markup_id: int, body: CloseBody | None = None,
+                 user: dict = Depends(get_user)):
+    """applied → closed. 발주자(master)가 반영 결과를 확인·수락 → 왕복 종료.
+    plugin 도 허용(검수 대행 시나리오)."""
+    if user["role"] not in ("master", "plugin"):
+        raise HTTPException(status_code=403, detail="확인(close)은 master/plugin 만 가능")
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            _transition(cur, markup_id, "closed", user,
+                        expected_version=body.version if body else None)
+        conn.commit()
+    return Response(status_code=204)
+
+
+@app.patch("/api/markup/{markup_id}/reopen", status_code=204)
+def reopen_markup(markup_id: int, body: ReopenBody, user: dict = Depends(get_user)):
+    """다시 pending 으로 — applied 거부(발주자, 사유 권장) 또는 rejected 보완(작성자)."""
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            _transition(cur, markup_id, "pending", user,
+                        reason=(body.reason.strip() if body.reason else None),
+                        expected_version=body.version)
+        conn.commit()
     return Response(status_code=204)
 
 
@@ -573,7 +711,7 @@ def delete_markup(markup_id: int, user: dict = Depends(get_user)):
     """수정요청 회수 — 작성자가 잘못 올린 요청을 지움.
 
     대기(pending)·반려(rejected) 요청은 삭제 가능(실제 경계를 바꾼 적 없음).
-    이미 반영(applied)된 요청만 이력 보존을 위해 거부(409).
+    이미 반영(applied)·확인종료(closed)된 요청만 이력 보존을 위해 거부(409).
     권한은 본인 adm_cd 만(마스터/플러그인은 전체).
     """
     cur = fetchone(
@@ -582,9 +720,9 @@ def delete_markup(markup_id: int, user: dict = Depends(get_user)):
     if not cur:
         raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
     check_admin_access(user, cur["adm_cd"].strip())
-    if cur["status"] == "applied":
+    if cur["status"] in ("applied", "closed"):
         raise HTTPException(
-            status_code=409, detail="이미 반영된 요청은 삭제할 수 없습니다"
+            status_code=409, detail="반영/확인된 요청은 삭제할 수 없습니다(reopen 후 회수)"
         )
     execute("DELETE FROM review_markup WHERE id = %s", (markup_id,))
     return Response(status_code=204)
