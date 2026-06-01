@@ -3,18 +3,21 @@
 툴바 두 번째 아이콘에서 열리는 다이얼로그.
 
 데이터 흐름: 대전은 로컬에서 경계를 디지타이징하고, 결과만 HTTPS로 서버에
-제출한다. 발주자 마크업은 HTTPS로 회수한다. PostGIS/MinIO 직접 접속 없음.
+제출한다. PostGIS/MinIO 직접 접속 없음.
+
+수정요청(마크업)은 플러그인이 다루지 않는다 — 작업자가 검수 웹 화면에서 요청을
+보고 QGIS 로 경계를 수정·제출하면, 요청의 반영/반려 처리는 웹에서 한다.
 
 구조:
 - DBEditorDialog: 탭 컨테이너
   - [1] 서버 연결 (URL/토큰/S3 키)
-  - [2] 행정리 작업 (작업 폴더 자동인식 → 13레이어 구성 → 편집 → 제출/마크업)
+  - [2] 행정리 작업 (작업 폴더 자동인식 → 13레이어 구성 → 편집 → 제출)
 """
 import os
 
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
+    QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QFormLayout,
     QTextEdit, QMessageBox, QGroupBox, QApplication, QFileDialog,
     QTableWidget, QTableWidgetItem, QDockWidget, QComboBox, QCheckBox,
@@ -25,306 +28,6 @@ from .db_tools.api_client import ServerConfig, save_config, load_config
 
 
 PLUGIN_DIR = os.path.dirname(__file__)
-
-
-# ============================================================
-# 마크업 검토 다이얼로그 (Phase C) — 줌/속성적용/split가이드/dissolve가이드
-# ============================================================
-
-def _feature_geometry(feat):
-    """GeoJSON feature → QgsGeometry. shapely 미설치 시 Point/LineString 만 지원."""
-    from qgis.core import QgsGeometry
-    g = (feat or {}).get('geometry') or {}
-    t = g.get('type')
-    c = g.get('coordinates') or []
-    try:
-        from shapely.geometry import shape
-        return QgsGeometry.fromWkt(shape(g).wkt)
-    except Exception:
-        pass
-    if t == 'Point' and len(c) >= 2:
-        return QgsGeometry.fromWkt(f'POINT ({c[0]} {c[1]})')
-    if t == 'LineString':
-        pts = ', '.join(f'{x} {y}' for x, y in c)
-        return QgsGeometry.fromWkt(f'LINESTRING ({pts})')
-    if t == 'MultiLineString':
-        parts = ['(' + ', '.join(f'{x} {y}' for x, y in line) + ')'
-                 for line in c]
-        return QgsGeometry.fromWkt(f'MULTILINESTRING ({", ".join(parts)})')
-    return None
-
-
-class MarkupReviewDialog(QDialog):
-    """발주자 마크업 목록 + kind 별 액션 (modeless)."""
-
-    def __init__(self, iface, work_layer, features, parent=None, tab=None):
-        super().__init__(parent)
-        self.setWindowTitle('발주자 마크업 검토')
-        self.resize(760, 480)
-        self.setModal(False)
-        self.iface = iface
-        self.work_layer = work_layer
-        self.tab = tab                       # WorkListTab — cfg 접근/제출 연동
-        self.features = list(features or [])
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            f'마크업 <b>{len(self.features)}</b>건. 행 더블클릭 = 줌, kind 액션 버튼으로 '
-            '경계 수정. 처리한 행은 <b>[처리함]</b> 체크 후 [제출] — 그때 서버에서 '
-            'applied 로 전이됩니다(미체크 건은 그대로 대기).'))
-
-        # 처리함(체크) / id / kind / status / attrs / adm_cd
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(
-            ['처리함', 'id', 'kind', 'status', 'attrs', 'adm_cd'])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.doubleClicked.connect(self._on_double)
-        layout.addWidget(self.table, 1)
-
-        btn = QHBoxLayout()
-        self.btn_zoom = QPushButton('줌 이동')
-        self.btn_zoom.clicked.connect(self._zoom_selected)
-        self.btn_apply_attr = QPushButton('폴리곤 적용 (attr)')
-        self.btn_apply_attr.clicked.connect(self._apply_attr)
-        self.btn_split_guide = QPushButton('split 가이드 (add)')
-        self.btn_split_guide.clicked.connect(self._split_guide)
-        self.btn_dissolve_guide = QPushButton('병합 가이드 (delete)')
-        self.btn_dissolve_guide.clicked.connect(self._dissolve_guide)
-        self.btn_reject = QPushButton('반려 (사유)')
-        self.btn_reject.clicked.connect(self._reject)
-        btn.addWidget(self.btn_zoom)
-        btn.addWidget(self.btn_apply_attr)
-        btn.addWidget(self.btn_split_guide)
-        btn.addWidget(self.btn_dissolve_guide)
-        btn.addWidget(self.btn_reject)
-        btn.addStretch()
-        layout.addLayout(btn)
-        self._fill_table()
-
-    def _fill_table(self):
-        from qgis.PyQt.QtCore import Qt as _Qt
-        self.table.setRowCount(len(self.features))
-        for i, f in enumerate(self.features):
-            p = f.get('properties') or {}
-            attrs = p.get('attrs') or {}
-            if isinstance(attrs, dict):
-                attrs_str = ' '.join(f'{k}={v}' for k, v in attrs.items())
-            else:
-                attrs_str = str(attrs or '')
-            chk = QTableWidgetItem()
-            chk.setFlags(_Qt.ItemIsUserCheckable | _Qt.ItemIsEnabled
-                         | _Qt.ItemIsSelectable)
-            # 이미 처리된 건은 체크 비활성 표시(applied/closed)
-            done = p.get('status') in ('applied', 'closed')
-            chk.setCheckState(_Qt.Checked if done else _Qt.Unchecked)
-            if done:
-                chk.setFlags(_Qt.ItemIsEnabled | _Qt.ItemIsSelectable)
-            self.table.setItem(i, 0, chk)
-            for c, v in enumerate([p.get('id', ''), p.get('kind', ''),
-                                   p.get('status', ''), attrs_str,
-                                   p.get('adm_cd', '')], start=1):
-                self.table.setItem(i, c, QTableWidgetItem(str(v)))
-        self.table.resizeColumnsToContents()
-
-    def checked_resolved_ids(self):
-        """[처리함] 체크된, 아직 미반영(pending) 마크업 id 목록."""
-        from qgis.PyQt.QtCore import Qt as _Qt
-        ids = []
-        for i, f in enumerate(self.features):
-            item = self.table.item(i, 0)
-            p = f.get('properties') or {}
-            if (item is not None and item.checkState() == _Qt.Checked
-                    and p.get('status') == 'pending' and p.get('id') is not None):
-                ids.append(int(p['id']))
-        return ids
-
-    def _reject(self):
-        f = self._selected_feature()
-        if not f:
-            return
-        p = f.get('properties') or {}
-        if p.get('status') != 'pending':
-            QMessageBox.warning(self, '경고', '대기(pending) 요청만 반려할 수 있습니다.')
-            return
-        from qgis.PyQt.QtWidgets import QInputDialog
-        reason, ok = QInputDialog.getText(self, '반려 사유', '반려 사유를 입력하세요:')
-        if not ok or not reason.strip():
-            return
-        if self.tab is None:
-            QMessageBox.warning(self, '경고', '서버 설정 접근 불가')
-            return
-        try:
-            # version(낙관적 잠금) — 회수 후 웹에서 먼저 처리됐으면 409
-            api_client.reject_markup(self.tab._get_config(), int(p['id']),
-                                     reason.strip(), version=p.get('version'))
-        except Exception as e:
-            QMessageBox.critical(
-                self, '오류',
-                f'반려 실패: {e}\n('
-                '웹에서 먼저 처리됐을 수 있습니다 — [마크업 받기]로 새로고침)')
-            return
-        p['status'] = 'rejected'
-        self._fill_table()
-        QMessageBox.information(self, '완료', f'마크업 {p.get("id")} 반려 처리됨.')
-
-    def _selected_feature(self):
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            return None
-        return self.features[rows[0].row()]
-
-    def _on_double(self, idx):
-        self.table.selectRow(idx.row())
-        self._zoom_selected()
-
-    def _zoom_selected(self):
-        f = self._selected_feature()
-        if not f:
-            return
-        self._zoom_to_feature(f)
-
-    def _zoom_to_feature(self, feat):
-        from qgis.core import (QgsCoordinateReferenceSystem,
-                               QgsCoordinateTransform, QgsProject)
-        geom = _feature_geometry(feat)
-        if geom is None or geom.isEmpty():
-            QMessageBox.warning(self, '경고', '마크업 geometry 를 읽을 수 없습니다.')
-            return
-        bbox = geom.boundingBox()
-        canvas = self.iface.mapCanvas()
-        dst = canvas.mapSettings().destinationCrs()
-        src = QgsCoordinateReferenceSystem('EPSG:4326')
-        if not dst.isValid():
-            dst = src                      # 빈 프로젝트 — 4326 그대로 사용
-        if src != dst:
-            tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
-            try:
-                bbox = tr.transformBoundingBox(bbox)
-            except Exception:
-                QMessageBox.warning(self, '경고', '좌표 변환 실패 — 프로젝트 CRS 확인')
-                return
-        # Point(속성등록)·수평/수직 라인은 bbox 폭 또는 높이가 0 → 그대로 setExtent
-        # 하면 줌이 무시된다. 캔버스 단위 기준 최소 크기로 확장 후 줌.
-        min_span = 0.002 if dst.isGeographic() else 200.0   # 도(deg) / 미터(m)
-        if bbox.width() < min_span or bbox.height() < min_span:
-            bbox.grow(min_span / 2.0)
-        bbox.scale(1.5)
-        canvas.setExtent(bbox)
-        canvas.refresh()
-
-    def _apply_attr(self):
-        f = self._selected_feature()
-        if not f:
-            return
-        p = f.get('properties') or {}
-        if p.get('kind') != 'attr':
-            QMessageBox.warning(self, '경고',
-                                'attr kind 마크업에서만 사용')
-            return
-        attrs = p.get('attrs') or {}
-        if not (attrs.get('ri_cd') or attrs.get('ri_nm')):
-            QMessageBox.warning(self, '경고',
-                                'attrs.ri_cd / ri_nm 비어 있음')
-            return
-        if self.work_layer is None or not self.work_layer.isValid():
-            QMessageBox.warning(self, '경고', '작업데이터 레이어 없음')
-            return
-        g = f.get('geometry') or {}
-        if g.get('type') != 'Point':
-            QMessageBox.warning(self, '경고', 'attr geometry 가 Point 아님')
-            return
-        from qgis.core import (QgsPointXY, QgsGeometry, QgsFeatureRequest,
-                               QgsCoordinateReferenceSystem,
-                               QgsCoordinateTransform, QgsProject)
-        lon, lat = g['coordinates'][:2]
-        pt = QgsPointXY(lon, lat)
-        src = QgsCoordinateReferenceSystem('EPSG:4326')
-        dst = self.work_layer.crs()
-        if src.isValid() and dst.isValid() and src != dst:
-            tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
-            pt = tr.transform(pt)
-        pt_geom = QgsGeometry.fromPointXY(pt)
-        bbox = pt_geom.boundingBox()
-        bbox.grow(1.0)
-        match = None
-        for ft in self.work_layer.getFeatures(
-                QgsFeatureRequest().setFilterRect(bbox)):
-            geom = ft.geometry()
-            if geom and not geom.isEmpty() and geom.contains(pt_geom):
-                match = ft
-                break
-        if match is None:
-            QMessageBox.warning(
-                self, '경고',
-                '포인트와 intersect 되는 작업데이터 폴리곤 없음.\n'
-                '캔버스 줌으로 위치 확인 후 작업데이터에 누락 폴리곤이 '
-                '있는지 점검하세요.')
-            return
-        ri_cd = str(attrs.get('ri_cd', '')).strip()
-        ri_nm = str(attrs.get('ri_nm', '')).strip()
-        if QMessageBox.question(
-                self, '속성 부여 확인',
-                f'폴리곤 id={match.id()} 에 RI_CD="{ri_cd}" '
-                f'RI_NM="{ri_nm}" 부여하시겠습니까?',
-                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
-            return
-        if not self.work_layer.isEditable():
-            self.work_layer.startEditing()
-        fields = self.work_layer.fields()
-        idx_of = {fields.at(i).name().lower(): i
-                  for i in range(fields.count())}
-        if ri_cd and 'ri_cd' in idx_of:
-            self.work_layer.changeAttributeValue(
-                match.id(), idx_of['ri_cd'], ri_cd)
-        if ri_nm and 'ri_nm' in idx_of:
-            self.work_layer.changeAttributeValue(
-                match.id(), idx_of['ri_nm'], ri_nm)
-        self.work_layer.triggerRepaint()
-        QMessageBox.information(
-            self, '완료',
-            '속성 부여 완료. [작업 종료] 시 저장되며, 추후 Phase D 도착 시 '
-            '서버 markup 상태가 자동으로 applied 마킹됩니다.')
-
-    def _split_guide(self):
-        f = self._selected_feature()
-        if not f:
-            return
-        p = f.get('properties') or {}
-        if p.get('kind') != 'add':
-            QMessageBox.warning(self, '경고',
-                                'add kind 마크업에서만 사용')
-            return
-        self._zoom_to_feature(f)
-        if self.work_layer is not None:
-            try:
-                self.iface.setActiveLayer(self.work_layer)
-                if not self.work_layer.isEditable():
-                    self.work_layer.startEditing()
-                self.iface.actionSplitFeatures().trigger()
-            except Exception:
-                pass
-        QMessageBox.information(
-            self, 'split 가이드',
-            '캔버스에 발주자 등록 라인(초록)이 표시됩니다. 그 라인을 따라 '
-            '작업데이터 폴리곤을 분할하세요. 분할 후 행정리 부여 다이얼로그가 '
-            '자동으로 뜹니다.')
-
-    def _dissolve_guide(self):
-        f = self._selected_feature()
-        if not f:
-            return
-        p = f.get('properties') or {}
-        if p.get('kind') != 'delete':
-            QMessageBox.warning(self, '경고',
-                                'delete kind 마크업에서만 사용')
-            return
-        self._zoom_to_feature(f)
-        QMessageBox.information(
-            self, '병합 가이드',
-            '캔버스에 발주자 삭제 라인(빨강 점선)이 표시됩니다. 그 라인을 '
-            '가로지르는 두 작업데이터 폴리곤을 선택 후 QGIS '
-            '[Merge Selected Features] 도구로 병합하세요.')
 
 
 # ============================================================
@@ -470,7 +173,6 @@ class WorkListTab(QWidget):
         self._current_admin = ''
         self._current_admin_nm = ''
         self._feature_added_slot = None  # split 후 팝업용 콜백 참조
-        self._markup_dialog = None       # 마크업 검토 다이얼로그 ref
         self._editor = None              # 명부 WorkbookEditor (메인스레드 전용)
         self._editor_path = None
         self._suppress_item_changed = False  # 프로그램적 셀 갱신 중 itemChanged 무시
@@ -528,19 +230,11 @@ class WorkListTab(QWidget):
         self.btn_end = QPushButton('작업 종료 (저장 + 잠금 해제)')
         self.btn_end.clicked.connect(self._on_end)
         self.btn_end.setEnabled(False)
-        self.markup_status_cb = QComboBox()
-        self.markup_status_cb.addItems(['pending', 'applied', 'rejected', 'all'])
-        self.markup_status_cb.setToolTip('회수 대상 마크업 상태')
-        self.btn_markup = QPushButton('마크업 받기')
-        self.btn_markup.clicked.connect(self._on_get_markup)
         self.btn_submit = QPushButton('제출')
         self.btn_submit.clicked.connect(self._on_submit)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_end)
         btn_row.addStretch()
-        btn_row.addWidget(QLabel('마크업:'))
-        btn_row.addWidget(self.markup_status_cb)
-        btn_row.addWidget(self.btn_markup)
         btn_row.addWidget(self.btn_submit)
         layout.addLayout(btn_row)
 
@@ -1202,44 +896,6 @@ class WorkListTab(QWidget):
         self.status.setText(
             f"부여 완료 — {rec.get('ri_cd','')} {rec.get('ri_nm','')} → Y")
 
-    # --- 마크업 회수 ---
-
-    def _on_get_markup(self):
-        cfg = self._get_config()
-        adm = self._current_admin or None
-        status = self.markup_status_cb.currentText()
-        self.status.setText(
-            f'마크업 회수 중... ({adm or "전체"}, status={status})')
-        QApplication.processEvents()
-        try:
-            geojson = api_client.get_markup(cfg, adm, status=status)
-        except Exception as e:
-            QMessageBox.critical(self, '오류', f'마크업 회수 실패: {e}')
-            self.status.setText(f'마크업 회수 실패: {e}')
-            return
-        last_layer, counts = layer_control.load_markup_layer(geojson)
-        total = counts.get('total', 0)
-        if total == 0:
-            self.status.setText(
-                f'마크업 0건 ({adm or "전체"}, status={status})')
-        else:
-            self.status.setText(
-                f'마크업 {total}건 회수 — 등록 {counts.get("add",0)} / '
-                f'삭제 {counts.get("delete",0)} / '
-                f'속성 {counts.get("attr",0)} (status={status})')
-            # 검토 다이얼로그 (modeless) — 이전 인스턴스 닫고 새로 띄움
-            if self._markup_dialog is not None:
-                try:
-                    self._markup_dialog.close()
-                except Exception:
-                    pass
-            self._markup_dialog = MarkupReviewDialog(
-                self.iface, self._find_work_layer(),
-                (geojson or {}).get('features') or [],
-                parent=self, tab=self)
-            self._markup_dialog.show()
-            self._markup_dialog.raise_()
-
     # --- 제출 ---
 
     def _find_work_layer(self):
@@ -1286,18 +942,10 @@ class WorkListTab(QWidget):
         if n_seq:
             self.status.setText(
                 f'ri_cd 빈/중복 {n_seq}건 일련번호 자동부여 후 제출')
-        # 검토 다이얼로그에서 [처리함] 체크한 마크업 → 경계 저장과 같은 트랜잭션에서 applied
-        resolved_ids = []
-        if self._markup_dialog is not None:
-            try:
-                resolved_ids = self._markup_dialog.checked_resolved_ids()
-            except RuntimeError:
-                self._markup_dialog = None
-        extra = (f'\n처리함 체크 마크업 {len(resolved_ids)}건도 함께 반영됩니다.'
-                 if resolved_ids else '')
+        # 수정요청(마크업) 처리는 웹에서 — 여기서는 경계 데이터만 제출한다.
         if QMessageBox.question(
                 self, '제출 확인',
-                f'경계 {n}건을 서버에 제출합니다.{extra}\n계속할까요?',
+                f'경계 {n}건을 서버에 제출합니다.\n계속할까요?',
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         cfg = self._get_config()
@@ -1307,24 +955,12 @@ class WorkListTab(QWidget):
         QApplication.processEvents()
         try:
             affected, msg = api_client.submit_boundary(
-                cfg, geojson, updated_by=updated_by,
-                resolved_markup_ids=resolved_ids)
+                cfg, geojson, updated_by=updated_by)
         except Exception as e:
             QMessageBox.critical(self, '오류', f'제출 실패: {e}')
             self.status.setText(f'제출 실패: {e}')
             return
         self.status.setText(f'✅ 제출 완료 — {msg}')
-        # 반영 시도한 마크업은 서버에서 최신 상태를 재회수해 다이얼로그 갱신.
-        # (로컬 추정 패치는 부분 실패 시 서버와 어긋남 — 서버가 진실)
-        if resolved_ids and self._markup_dialog is not None:
-            try:
-                fresh = api_client.get_markup(
-                    cfg, self._current_admin or None, status='all')
-                self._markup_dialog.features = (
-                    (fresh or {}).get('features') or [])
-                self._markup_dialog._fill_table()
-            except Exception:
-                pass  # 재회수 실패해도 제출 자체는 완료 — 메시지로 안내됨
         QMessageBox.information(self, '제출 완료', msg)
 
 

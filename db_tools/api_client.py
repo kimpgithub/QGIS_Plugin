@@ -1,8 +1,11 @@
 """서버 API 클라이언트 — 대전 플러그인 ↔ 서울 서버 (HTTPS 배치 동기화).
 
 대전은 PostGIS/MinIO에 직접 접속하지 않는다. 모든 통신은 Funnel HTTPS 한 줄기:
-- 경계 벡터 제출 / 마크업 회수 / COG 등록  → REST API (`/api`, Bearer 토큰)
-- COG·원본 이미지 업로드                  → S3 (MinIO, `/s3` endpoint, 액세스키)
+- 경계 벡터 제출 / COG 등록  → REST API (`/api`, Bearer 토큰)
+- COG·원본 이미지 업로드     → S3 (MinIO, `/s3` endpoint, 액세스키)
+
+수정요청(마크업)은 플러그인이 다루지 않는다 — 작업자가 웹 화면에서 요청을 보고
+QGIS 로 경계만 수정·제출하면, 반영/반려 처리는 웹에서 한다.
 
 requests/boto3 는 지연 import — 미설치 환경에서도 플러그인 자체는 로드되게.
 """
@@ -129,22 +132,15 @@ def test_connection(cfg, timeout_s=10):
 
 # ----- 경계 제출 -----
 
-def submit_boundary(cfg, geojson, updated_by='', resolved_markup_ids=None):
+def submit_boundary(cfg, geojson, updated_by=''):
     """경계 GeoJSON(FeatureCollection)을 서버에 upsert.
 
     PUT /api/boundary — adm_cd+ri_cd 기준 업서트. (affected_count, 메시지) 반환.
-
-    resolved_markup_ids: 이번 편집으로 처리한 마크업 id 목록. 지정 시 서버가
-    경계 저장과 **같은 트랜잭션**에서 pending→applied 로 전이(원자적). 응답의
-    resolved/resolve_failed 를 메시지에 요약.
+    경계 데이터만 다룬다 — 수정요청(마크업) 처리는 웹에서.
     """
     sess = _session(cfg)
     params = {'updated_by': updated_by} if updated_by else None
-    payload = geojson
-    if resolved_markup_ids:
-        payload = dict(geojson)
-        payload['resolved_markup_ids'] = [int(x) for x in resolved_markup_ids]
-    r = sess.put(f'{cfg.api_base}/boundary', json=payload, params=params,
+    r = sess.put(f'{cfg.api_base}/boundary', json=geojson, params=params,
                  timeout=HTTP_TIMEOUT)
     if r.status_code == 401:
         raise RuntimeError('인증 실패 — API 토큰 확인')
@@ -152,61 +148,7 @@ def submit_boundary(cfg, geojson, updated_by='', resolved_markup_ids=None):
     body = r.json() if r.content else {}
     affected = body.get('affected', body.get('count', 0))
     msg = body.get('message', f'{affected}건 반영')
-    resolved = body.get('resolved') or []
-    failed = body.get('resolve_failed') or []
-    if resolved or failed:
-        msg += f' · 마크업 반영 {len(resolved)}건'
-        if failed:
-            # 어떤 마크업이 왜 실패했는지 명시 — 작업자가 후속 조치 가능하게
-            details = '; '.join(
-                f"#{f.get('id')}: {f.get('detail', '?')}" for f in failed)
-            msg += f' / 실패 {len(failed)}건 ({details})'
     return affected, msg
-
-
-def reject_markup(cfg, markup_id, reason, version=None):
-    """마크업 반려 — pending → rejected (사유 필수). PATCH /api/markup/{id}/reject.
-
-    version: 회수 시점의 markup version(낙관적 잠금). 서버 상태가 그 사이
-    바뀌었으면 409 — 마크업을 다시 회수해 최신 상태 확인 후 재시도.
-    """
-    sess = _session(cfg)
-    payload = {'reason': reason}
-    if version is not None:
-        payload['version'] = int(version)
-    r = sess.patch(f'{cfg.api_base}/markup/{markup_id}/reject',
-                   json=payload, timeout=HTTP_TIMEOUT)
-    if r.status_code == 401:
-        raise RuntimeError('인증 실패 — API 토큰 확인')
-    r.raise_for_status()
-    return True
-
-
-# ----- 마크업 회수 -----
-
-def get_markup(cfg, adm_cd=None, status='pending'):
-    """발주자 마크업 회수 — 신규 스키마(kind/status/attrs) 대응.
-
-    GET /api/markup?adm_cd=&status=
-    - status: 'pending'(기본) | 'applied' | 'rejected' | 'closed'
-              | 'all' (status param 생략)
-    - 응답: GeoJSON FeatureCollection — feature.properties 에
-      {id, kind('add'|'delete'|'attr'|'delete_mark'), status, version,
-       attrs(dict), adm_cd, created_at, applied_at, rejected_at,
-       reject_reason, created_by, closed_at, reopened_at} 포함
-    """
-    sess = _session(cfg)
-    params = {}
-    if adm_cd:
-        params['adm_cd'] = adm_cd
-    if status and status != 'all':
-        params['status'] = status
-    r = sess.get(f'{cfg.api_base}/markup', params=params or None,
-                 timeout=HTTP_TIMEOUT)
-    if r.status_code == 401:
-        raise RuntimeError('인증 실패 — API 토큰 확인')
-    r.raise_for_status()
-    return r.json()
 
 
 # ----- COG 등록 -----

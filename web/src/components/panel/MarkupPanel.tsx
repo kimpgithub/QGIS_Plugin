@@ -8,8 +8,9 @@ type Props = {
   onFilterChange: (f: Record<MarkupStatus, boolean>) => void;
   selectedId: number | null;
   onSelect: (id: number) => void;
-  // 반영됨(applied) 결과 확인 → 종료. 웹의 유일한 처리 동작.
-  onClose: (id: number) => void;
+  // 작업자(master) 처리 — 반영(QGIS 수정 완료 선언) / 반려(사유)
+  onApply: (id: number) => void;
+  onReject: (id: number) => void;
   canProcess?: boolean;
   loading?: boolean;
 };
@@ -18,7 +19,6 @@ const FILTER_ROWS: { key: MarkupStatus; label: string }[] = [
   { key: 'pending', label: '미처리' },
   { key: 'applied', label: '반영' },
   { key: 'rejected', label: '반려' },
-  { key: 'closed', label: '종료' },
 ];
 
 export default function MarkupPanel({
@@ -27,7 +27,8 @@ export default function MarkupPanel({
   onFilterChange,
   selectedId,
   onSelect,
-  onClose,
+  onApply,
+  onReject,
   canProcess,
   loading,
 }: Props) {
@@ -67,7 +68,8 @@ export default function MarkupPanel({
             selected={m.id === selectedId}
             canProcess={canProcess}
             onClick={() => onSelect(m.id)}
-            onClose={() => onClose(m.id)}
+            onApply={() => onApply(m.id)}
+            onReject={() => onReject(m.id)}
           />
         ))}
       </div>

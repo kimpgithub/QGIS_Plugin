@@ -14,28 +14,28 @@ const KIND_COLOR: Record<MarkupKind, string> = {
   delete_mark: '#b45309',
 };
 
-// 단순 흐름: 대기 → (QGIS)반영 → (웹 확인)종료  /  대기 → (QGIS)반려 (끝)
+// 처리는 전부 웹에서: 대기 → [반영](끝) / 대기 → [반려·사유](끝)
 const STATUS_LABEL: Record<MarkupStatus, string> = {
   pending: '처리대기',
   applied: '반영됨',
   rejected: '반려',
-  closed: '확인종료',
 };
 const STATUS_COLOR: Record<MarkupStatus, string> = {
   pending: '#6b7280',
   applied: '#15803d',
   rejected: '#b91c1c',
-  closed: '#1d4ed8',
 };
 
 type Props = {
   item: Markup;
   selected?: boolean;
-  // 처리 권한(master) 여부 — false 면 [확인] 버튼 숨김(일반 사용자는 열람만)
+  // 처리 권한(master=작업자) 여부 — false 면 처리 버튼 숨김(발주자는 열람·등록만)
   canProcess?: boolean;
   onClick?: () => void;
-  // 반영됨(applied) 결과 확인 → 종료. 웹의 유일한 처리 버튼.
-  onClose?: () => void;
+  // 작업자가 QGIS 로 경계를 고친 뒤 누르는 [반영]
+  onApply?: () => void;
+  // 수행 불가/오요청 [반려] (사유 입력 모달)
+  onReject?: () => void;
 };
 
 export default function MarkupCard({
@@ -43,7 +43,8 @@ export default function MarkupCard({
   selected,
   canProcess,
   onClick,
-  onClose,
+  onApply,
+  onReject,
 }: Props) {
   const note =
     (item.attrs?.note as string | undefined) ?? defaultNote(item.kind);
@@ -65,33 +66,39 @@ export default function MarkupCard({
       <div style={styles.meta}>
         작업자 {item.created_by || '-'} · {fmt(item.created_at)}
       </div>
-      {/* 반영됨: 결과 확인 → 종료. 웹의 유일한 처리 버튼.
-          반려/되돌리기는 없음 — 반려는 QGIS 작업자가, 재작업은 새 요청 등록으로. */}
-      {canProcess && item.status === 'applied' && (
+      {/* 대기: 작업자(master)가 QGIS 로 경계를 고친 뒤 [반영], 또는 [반려](사유). */}
+      {canProcess && item.status === 'pending' && (
         <div style={styles.actions}>
+          <button
+            type="button"
+            style={styles.btnApply}
+            onClick={(e) => {
+              e.stopPropagation();
+              onApply?.();
+            }}
+          >
+            반영
+          </button>
           <button
             type="button"
             style={styles.btn}
             onClick={(e) => {
               e.stopPropagation();
-              onClose?.();
+              onReject?.();
             }}
           >
-            확인
+            반려
           </button>
         </div>
       )}
-      {(item.status === 'applied' || item.status === 'closed') && (
+      {item.status === 'applied' && (
         <div style={styles.footnote}>
           반영 {item.applied_by || '-'} · {fmt(item.applied_at)}
-          {item.status === 'closed' && (
-            <div>확인 {item.closed_by || '-'} · {fmt(item.closed_at)}</div>
-          )}
         </div>
       )}
       {item.status === 'rejected' && (
         <div style={styles.footnote}>
-          반려 {item.rejected_by || 'QGIS 작업자'} · {fmt(item.rejected_at)}
+          반려 {item.rejected_by || '-'} · {fmt(item.rejected_at)}
           {item.reject_reason && (
             <div style={styles.reason}>사유: {item.reject_reason}</div>
           )}
@@ -154,6 +161,16 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '4px 0',
     border: '1px solid #c9ced6',
     background: '#fff',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  btnApply: {
+    flex: 1,
+    padding: '4px 0',
+    border: '1px solid #15803d',
+    background: '#15803d',
+    color: '#fff',
     borderRadius: 4,
     fontSize: 12,
     cursor: 'pointer',

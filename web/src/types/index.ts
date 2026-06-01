@@ -41,13 +41,13 @@ export type AuthUser = {
 // 수정요청 종류 — 라인등록/라인삭제/속성등록/삭제표기
 export type MarkupKind = 'add' | 'delete' | 'attr' | 'delete_mark';
 
-// lifecycle (단순 한 방향, reopen 없음):
-//   pending(요청) → applied(QGIS 반영) → closed(웹 확인 종료)
-//   pending → rejected(QGIS 반려, 끝) — 보완은 새 요청 등록으로
-export type MarkupStatus = 'pending' | 'applied' | 'rejected' | 'closed';
+// lifecycle — 처리는 전부 웹에서 (QGIS 와 동기화 없음):
+//   pending(요청) → applied(웹 작업자 반영, 끝)
+//   pending → rejected(웹 작업자 반려·사유, 끝) — 보완은 새 요청 등록으로
+export type MarkupStatus = 'pending' | 'applied' | 'rejected';
 
-// 서버 → 클라이언트 (api_client.py 신규 스키마 기준).
-// created_by = 작업자(행정구역코드 8자), applied_by/rejected_by/closed_by = 처리자 admin_cd.
+// 서버 → 클라이언트.
+// created_by = 요청자(발주자 admin_cd), applied_by/rejected_by = 처리자(웹 작업자) admin_cd.
 // version = 낙관적 잠금 — 상태 변경 요청에 함께 보내 동시 수정 충돌(409)을 감지.
 export type Markup = {
   id: number;
@@ -68,8 +68,6 @@ export type Markup = {
   rejected_by?: string | null;
   rejected_at?: string | null;
   reject_reason?: string | null;
-  closed_by?: string | null;
-  closed_at?: string | null;
 };
 
 // GET /api/boundary feature.properties — QGIS 가 제출한 행정리 경계 + 비고(remark)

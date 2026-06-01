@@ -6,12 +6,14 @@ import LayerControls from '../components/map/LayerControls';
 import MarkupPanel from '../components/panel/MarkupPanel';
 import BoundaryListPanel from '../components/panel/BoundaryListPanel';
 import SaveMarkupModal from '../components/modal/SaveMarkupModal';
+import RejectReasonModal from '../components/modal/RejectReasonModal';
 import AdminPickerModal from '../components/modal/AdminPickerModal';
 import DrawHint from '../components/map/DrawHint';
 import {
   listMarkup,
   createMarkup,
-  closeMarkup,
+  applyMarkup,
+  rejectMarkup,
   deleteMarkup,
 } from '../api/markup';
 import Modal from '../components/common/Modal';
@@ -95,7 +97,6 @@ export default function InspectPage() {
     pending: true,
     applied: true,
     rejected: true,
-    closed: true,
   });
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
@@ -318,11 +319,15 @@ export default function InspectPage() {
     if (b) setBoundary(b);
   }
 
+  // 반려 — 사유 입력 모달 대상 id
+  const [rejectId, setRejectId] = useState<number | null>(null);
+
   // QGIS 작업 결과 자동 동기화 — 30초 주기로 markup/boundary 재조회.
   // 그리기·모달 진행 중에는 건너뛰어 작업 흐름을 방해하지 않는다.
   const idle =
     tool == null &&
     pendingGeom == null &&
+    rejectId == null &&
     deleteTargetId == null &&
     deleteManyIds == null;
   useEffect(() => {
@@ -354,10 +359,17 @@ export default function InspectPage() {
 
   const versionOf = (id: number) => items.find((x) => x.id === id)?.version;
 
-  // applied 결과 확인·수락 → 종료(closed). 웹의 유일한 상태 변경.
-  // 반려는 QGIS 작업자 전용, 재작업이 필요하면 새 요청을 등록한다.
-  const onClose = (id: number) =>
-    transition(() => closeMarkup(id, versionOf(id)), '확인 처리');
+  // 처리는 전부 웹에서 — 작업자(master)가 QGIS 로 경계를 고친 뒤 [반영],
+  // 수행 불가/오요청은 [반려](사유). 둘 다 종결 상태.
+  const onApply = (id: number) =>
+    transition(() => applyMarkup(id, versionOf(id)), '반영 처리');
+
+  async function onConfirmReject(reason: string) {
+    if (rejectId == null) return;
+    const id = rejectId;
+    setRejectId(null);
+    await transition(() => rejectMarkup(id, reason, versionOf(id)), '반려 처리');
+  }
 
   function onSelectCard(id: number) {
     setSelectedId(id);
@@ -489,7 +501,8 @@ export default function InspectPage() {
           onFilterChange={setFilter}
           selectedId={selectedId}
           onSelect={onSelectCard}
-          onClose={onClose}
+          onApply={onApply}
+          onReject={(id) => setRejectId(id)}
           canProcess={isMaster}
           loading={loading}
         />
@@ -500,6 +513,11 @@ export default function InspectPage() {
         kind={(tool ?? 'add') as MarkupKind}
         onCancel={onCancelPending}
         onSave={onSavePending}
+      />
+      <RejectReasonModal
+        open={rejectId != null}
+        onCancel={() => setRejectId(null)}
+        onSave={onConfirmReject}
       />
       <AdminPickerModal
         open={adminPickerOpen}

@@ -25,16 +25,28 @@ export function createMarkup(
   return api('/api/markup', { method: 'POST', body: payload });
 }
 
-// 단순 라이프사이클: 대기 → 반영(QGIS) → 확인종료(웹) / 대기 → 반려(QGIS, 끝).
-// 웹이 호출하는 상태 변경은 close(확인) 하나뿐 — 반영/반려는 QGIS 작업자만.
-// 반려됐거나 결과가 다르면 새 요청을 등록한다.
-
-// PATCH /api/markup/{id}/close — applied 결과 확인·수락 → 종료 (master)
+// 라이프사이클 — 처리는 전부 웹에서 (QGIS 와 동기화 없음):
+//   대기 → 반영(웹 작업자, 끝) / 대기 → 반려(웹 작업자·사유, 끝)
+// 작업자는 요청 카드를 보고 QGIS 로 경계를 수정한 뒤, 여기서 [반영] 또는 [반려] 처리.
 // version(낙관적 잠금) 불일치 시 409 — 호출부는 목록 새로고침 후 재시도 안내.
-export function closeMarkup(id: number, version?: number): Promise<void> {
-  return api(`/api/markup/${id}/close`, {
+
+// PATCH /api/markup/{id}/apply — 반영 처리 (master)
+export function applyMarkup(id: number, version?: number): Promise<void> {
+  return api(`/api/markup/${id}/apply`, {
     method: 'PATCH',
     body: { version },
+  });
+}
+
+// PATCH /api/markup/{id}/reject — 반려 처리, 사유 필수 (master)
+export function rejectMarkup(
+  id: number,
+  reason: string,
+  version?: number
+): Promise<void> {
+  return api(`/api/markup/${id}/reject`, {
+    method: 'PATCH',
+    body: { reason, version },
   });
 }
 

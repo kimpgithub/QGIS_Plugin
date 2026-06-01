@@ -90,9 +90,9 @@ CREATE TABLE IF NOT EXISTS admin_outline (
 CREATE INDEX IF NOT EXISTS admin_outline_geom_idx ON admin_outline USING GIST(geom);
 
 -- ---------------------------------------------------------------- review_markup (수정요청)
--- 검수 웹이 write, 대전 QGIS가 read/처리.
--- lifecycle: pending →(QGIS 반영) applied →(웹 확인) closed
---            pending →(반려) rejected ; applied/rejected →(reopen) pending
+-- 검수 웹이 write/처리. QGIS 와는 동기화하지 않음 (작업자는 웹 화면을 보고 QGIS 로 수정).
+-- lifecycle: pending →(웹 작업자 반영) applied (끝)
+--            pending →(웹 작업자 반려·사유) rejected (끝)
 CREATE TABLE IF NOT EXISTS review_markup (
     id            SERIAL PRIMARY KEY,
     adm_cd        CHAR(8) NOT NULL,                -- 8자리 행정읍면 코드
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS review_markup (
     geom          GEOMETRY(Geometry, 5179) NOT NULL,
     attrs         JSONB,
     status        TEXT NOT NULL DEFAULT 'pending'
-                          CHECK (status IN ('pending', 'applied', 'rejected', 'closed')),
+                          CHECK (status IN ('pending', 'applied', 'rejected')),
     version       INT  NOT NULL DEFAULT 1,         -- 낙관적 잠금
     reject_reason TEXT,
     created_by    TEXT,                            -- admin_cd 또는 master admin_cd
@@ -109,10 +109,7 @@ CREATE TABLE IF NOT EXISTS review_markup (
     applied_by    CHAR(8),
     applied_at    TIMESTAMPTZ,
     rejected_by   CHAR(8),
-    rejected_at   TIMESTAMPTZ,
-    closed_by     CHAR(8),
-    closed_at     TIMESTAMPTZ,
-    reopened_at   TIMESTAMPTZ
+    rejected_at   TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS review_markup_adm_status ON review_markup(adm_cd, status);
 CREATE INDEX IF NOT EXISTS review_markup_geom_idx   ON review_markup USING GIST(geom);

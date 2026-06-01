@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-06-01 — 근본 재설계: 마크업 처리를 전부 웹으로, QGIS 동기화 제거
+
+발주처 요구 반영 — QGIS 와 웹의 수정요청을 동기화할 필요가 없음. 작업자는 웹의
+요청 카드를 보고 QGIS 로 경계만 수정·제출하고, 요청의 반영/반려는 웹에서 처리한다.
+
+```
+pending ──[반영](웹 작업자)──> applied (끝)
+   └────[반려·사유](웹 작업자)──> rejected (끝)
+```
+
+- **서버** — `apply`/`reject` 를 master(웹 작업자) 권한으로 변경(plugin 도 허용).
+  `close` 엔드포인트·`closed` 상태 제거. `PUT /api/boundary` 의
+  `resolved_markup_ids`(원자적 결합) 제거 — 경계 데이터만 다룸.
+- **웹** — 요청 카드(pending)에 **[반영]/[반려]** 버튼(master). 반려는 사유 모달
+  (`RejectReasonModal` 복원). `closed` 필터·라벨 제거. version 낙관적 잠금 유지.
+- **QGIS 플러그인** — 마크업 기능 전체 제거: `MarkupReviewDialog`, [마크업 받기],
+  상태 필터, [처리함] 체크, `resolved_markup_ids` 제출, `api_client.get_markup`/
+  `reject_markup`, `layer_control.load_markup_layer`. 플러그인은 경계 제출 + COG
+  업로드만 담당.
+- **마이그레이션** — `202606_simplify_lifecycle.sql`: 기존 `closed`→`applied` 변환,
+  status 제약 3상태, `closed_by/closed_at/reopened_at` 컬럼 제거. init.sql 동기.
+- 검증: 서버/플러그인 `py_compile` OK, 웹 `tsc -b` OK
+  (vite build 는 로컬 Node 버전 제약으로 배포 서버에서 수행).
+
 ## 2026-06-01 — 마크업 라이프사이클 단순화 (반려=QGIS 전용, reopen 제거)
 
 웹/QGIS 양쪽에 반려 버튼이 중복돼 있고, 되돌리기/재요청(reopen) 분기가 많아

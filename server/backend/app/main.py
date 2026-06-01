@@ -138,7 +138,7 @@ class RejectBody(BaseModel):
     version: int | None = None        # 낙관적 잠금 — 불일치 시 409
 
 
-class CloseBody(BaseModel):
+class ApplyBody(BaseModel):
     version: int | None = None
 
 
@@ -311,17 +311,13 @@ def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
 def upsert_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_plugin)):
     """플러그인 전용 — GeoJSON FC 를 boundary 테이블에 upsert (adm_cd+ri_cd 키).
 
-    body.resolved_markup_ids: [int] 지정 시, 경계 upsert 와 **같은 트랜잭션**에서
-    해당 마크업을 pending→applied 로 전이한다 → "경계는 고쳤는데 요청은 대기"
-    표류 차단. 전이 불가(stale)한 id 는 건너뛰고 resolve_failed 로 보고.
+    경계 데이터만 다룬다. 수정요청(마크업) 처리는 웹에서 별도로 진행
+    (QGIS 와 마크업은 동기화하지 않음).
     feature.properties.remark 는 boundary.remark(비고)로 함께 저장."""
     if srid not in (4326, 5179):
         raise HTTPException(status_code=400, detail="srid는 4326 또는 5179만 허용")
     if body.get("type") != "FeatureCollection" or not isinstance(body.get("features"), list):
         raise HTTPException(status_code=400, detail="GeoJSON FeatureCollection이 필요합니다")
-    resolved_ids = body.get("resolved_markup_ids") or []
-    if not isinstance(resolved_ids, list):
-        raise HTTPException(status_code=400, detail="resolved_markup_ids는 배열")
 
     def _norm_ri(props: dict):
         """빈 문자열/공백 ri_cd 를 None 으로 정규화 ('' 와 NULL 동일 취급)."""
@@ -414,20 +410,9 @@ def upsert_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_p
                 )
                 counts = cur.fetchone()
                 inserted, updated = counts["inserted"], counts["updated"]
-        # 경계 저장과 같은 트랜잭션에서 처리 마크업을 applied 로 — 둘 다 커밋되거나 둘 다 롤백.
-        resolved: list = []
-        resolve_failed: list = []
-        for mid in resolved_ids:
-            try:
-                with conn.cursor() as mcur:
-                    _transition(mcur, int(mid), "applied", user)
-                resolved.append(int(mid))
-            except HTTPException as e:
-                resolve_failed.append({"id": mid, "detail": e.detail})
         conn.commit()
     return {"affected": inserted + updated, "inserted": inserted, "updated": updated,
-            "features": len(body["features"]),
-            "resolved": resolved, "resolve_failed": resolve_failed}
+            "features": len(body["features"])}
 
 
 # ---------------------------------------------------------------- cog
@@ -517,8 +502,8 @@ def list_markup(
         conds.append("adm_cd = %s")
         params.append(adm_cd)
     if status:
-        if status not in ("pending", "applied", "rejected", "closed"):
-            raise HTTPException(status_code=400, detail="status는 pending/applied/rejected/closed 중 하나")
+        if status not in ("pending", "applied", "rejected"):
+            raise HTTPException(status_code=400, detail="status는 pending/applied/rejected 중 하나")
         conds.append("status = %s")
         params.append(status)
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
@@ -535,9 +520,7 @@ def list_markup(
               'reject_reason', reject_reason,
               'created_by', created_by, 'created_at', created_at,
               'applied_by', applied_by, 'applied_at', applied_at,
-              'rejected_by', rejected_by, 'rejected_at', rejected_at,
-              'closed_by', closed_by, 'closed_at', closed_at,
-              'reopened_at', reopened_at)
+              'rejected_by', rejected_by, 'rejected_at', rejected_at)
           )) FILTER (WHERE id IS NOT NULL), '[]'::json)
         ) AS fc
         FROM review_markup {where}
@@ -577,14 +560,13 @@ def create_markup(body: MarkupCreate, user: dict = Depends(get_user)):
 
 
 # 상태머신 — 전이는 전부 _transition 경유(직접 status UPDATE 금지).
-# 단순 한 방향 흐름 (되돌리기/reopen 없음):
-#   pending → applied(QGIS 반영) → closed(웹 확인)
-#   pending → rejected(QGIS 반려, 끝)
+# 마크업 처리는 전부 웹에서 — QGIS 와 동기화하지 않는다.
+#   pending → applied(웹 작업자 반영, 끝)
+#   pending → rejected(웹 작업자 반려·사유, 끝)
 # 반려됐거나 결과가 다르면 → 새 요청을 등록한다.
 _ALLOWED_FROM = {
     "applied":  {"pending"},
     "rejected": {"pending"},
-    "closed":   {"applied"},
 }
 
 
@@ -632,9 +614,6 @@ def _transition(cur, markup_id: int, to_status: str, user: dict, *,
         sets += ["rejected_at = now()", "rejected_by = %s", "reject_reason = %s",
                  "applied_by = NULL", "applied_at = NULL"]
         params += [actor_cd, reason]
-    elif to_status == "closed":
-        sets += ["closed_at = now()", "closed_by = %s"]
-        params.append(actor_cd)
     params.append(markup_id)
     cur.execute(f"UPDATE review_markup SET {', '.join(sets)} WHERE id = %s", params)
     cur.execute(
@@ -645,22 +624,31 @@ def _transition(cur, markup_id: int, to_status: str, user: dict, *,
     return "changed"
 
 
+def require_processor(user: dict = Depends(get_user)) -> dict:
+    """마크업 처리(반영/반려) 권한 — 웹 작업자(master). plugin 도 허용(운영 보조)."""
+    if user["role"] not in ("master", "plugin"):
+        raise HTTPException(status_code=403, detail="반영/반려는 master 만 가능")
+    return user
+
+
 @app.patch("/api/markup/{markup_id}/apply", status_code=204)
-def apply_markup(markup_id: int, user: dict = Depends(require_plugin)):
-    """pending → applied. QGIS(plugin) 전용 — 경계를 실제로 고친 주체만 '반영' 선언.
-    일괄 경로는 PUT /api/boundary 의 resolved_markup_ids(같은 트랜잭션)."""
+def apply_markup(markup_id: int, body: ApplyBody | None = None,
+                 user: dict = Depends(require_processor)):
+    """pending → applied. 웹 작업자가 QGIS 로 경계를 고친 뒤 요청 카드에서 '반영' 처리.
+    body.version(선택) 불일치 시 409."""
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            _transition(cur, markup_id, "applied", user)
+            _transition(cur, markup_id, "applied", user,
+                        expected_version=body.version if body else None)
         conn.commit()
     return Response(status_code=204)
 
 
 @app.patch("/api/markup/{markup_id}/reject", status_code=204)
 def reject_markup(markup_id: int, body: RejectBody,
-                  user: dict = Depends(require_plugin)):
-    """pending → rejected. QGIS(plugin) 전용 — 작업자가 수행 불가/오요청을 사유와 함께 반려.
-    웹(발주자)은 반려하지 않는다 — 자기 요청 취소는 DELETE(회수)로."""
+                  user: dict = Depends(require_processor)):
+    """pending → rejected. 웹 작업자가 수행 불가/오요청을 사유와 함께 반려(종결).
+    발주자의 자기 요청 취소는 DELETE(회수)로."""
     if not body.reason or not body.reason.strip():
         raise HTTPException(status_code=400, detail="reason 필수")
     with pool.connection() as conn:
@@ -671,26 +659,12 @@ def reject_markup(markup_id: int, body: RejectBody,
     return Response(status_code=204)
 
 
-@app.patch("/api/markup/{markup_id}/close", status_code=204)
-def close_markup(markup_id: int, body: CloseBody | None = None,
-                 user: dict = Depends(get_user)):
-    """applied → closed. 발주자(웹 master)가 반영 결과를 확인·수락 → 종료."""
-    if user["role"] not in ("master", "plugin"):
-        raise HTTPException(status_code=403, detail="확인(close)은 master/plugin 만 가능")
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            _transition(cur, markup_id, "closed", user,
-                        expected_version=body.version if body else None)
-        conn.commit()
-    return Response(status_code=204)
-
-
 @app.delete("/api/markup/{markup_id}")
 def delete_markup(markup_id: int, user: dict = Depends(get_user)):
     """수정요청 회수 — 작성자가 잘못 올린 요청을 지움.
 
     대기(pending)·반려(rejected) 요청은 삭제 가능(실제 경계를 바꾼 적 없음).
-    이미 반영(applied)·확인종료(closed)된 요청만 이력 보존을 위해 거부(409).
+    이미 반영(applied)된 요청만 이력 보존을 위해 거부(409).
     권한은 본인 adm_cd 만(마스터/플러그인은 전체).
     """
     cur = fetchone(
@@ -699,9 +673,9 @@ def delete_markup(markup_id: int, user: dict = Depends(get_user)):
     if not cur:
         raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
     check_admin_access(user, cur["adm_cd"].strip())
-    if cur["status"] in ("applied", "closed"):
+    if cur["status"] == "applied":
         raise HTTPException(
-            status_code=409, detail="반영/확인된 요청은 이력 보존을 위해 삭제할 수 없습니다"
+            status_code=409, detail="반영된 요청은 이력 보존을 위해 삭제할 수 없습니다"
         )
     execute("DELETE FROM review_markup WHERE id = %s", (markup_id,))
     return Response(status_code=204)
