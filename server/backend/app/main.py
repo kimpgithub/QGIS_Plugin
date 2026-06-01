@@ -138,11 +138,6 @@ class RejectBody(BaseModel):
     version: int | None = None        # 낙관적 잠금 — 불일치 시 409
 
 
-class ReopenBody(BaseModel):
-    reason: str | None = None
-    version: int | None = None
-
-
 class CloseBody(BaseModel):
     version: int | None = None
 
@@ -582,13 +577,14 @@ def create_markup(body: MarkupCreate, user: dict = Depends(get_user)):
 
 
 # 상태머신 — 전이는 전부 _transition 경유(직접 status UPDATE 금지).
+# 단순 한 방향 흐름 (되돌리기/reopen 없음):
 #   pending → applied(QGIS 반영) → closed(웹 확인)
-#   pending → rejected(반려) ;  applied/rejected → pending(reopen)
+#   pending → rejected(QGIS 반려, 끝)
+# 반려됐거나 결과가 다르면 → 새 요청을 등록한다.
 _ALLOWED_FROM = {
     "applied":  {"pending"},
     "rejected": {"pending"},
     "closed":   {"applied"},
-    "pending":  {"applied", "rejected"},   # reopen
 }
 
 
@@ -639,10 +635,6 @@ def _transition(cur, markup_id: int, to_status: str, user: dict, *,
     elif to_status == "closed":
         sets += ["closed_at = now()", "closed_by = %s"]
         params.append(actor_cd)
-    elif to_status == "pending":                           # reopen — 처리 흔적 초기화
-        sets += ["reopened_at = now()", "applied_by = NULL", "applied_at = NULL",
-                 "rejected_by = NULL", "rejected_at = NULL", "reject_reason = NULL",
-                 "closed_by = NULL", "closed_at = NULL"]
     params.append(markup_id)
     cur.execute(f"UPDATE review_markup SET {', '.join(sets)} WHERE id = %s", params)
     cur.execute(
@@ -665,10 +657,10 @@ def apply_markup(markup_id: int, user: dict = Depends(require_plugin)):
 
 
 @app.patch("/api/markup/{markup_id}/reject", status_code=204)
-def reject_markup(markup_id: int, body: RejectBody, user: dict = Depends(get_user)):
-    """pending → rejected. 수행 불가/오요청을 사유와 함께 반려(plugin/master)."""
-    if user["role"] not in ("plugin", "master"):
-        raise HTTPException(status_code=403, detail="반려는 plugin/master 만 가능")
+def reject_markup(markup_id: int, body: RejectBody,
+                  user: dict = Depends(require_plugin)):
+    """pending → rejected. QGIS(plugin) 전용 — 작업자가 수행 불가/오요청을 사유와 함께 반려.
+    웹(발주자)은 반려하지 않는다 — 자기 요청 취소는 DELETE(회수)로."""
     if not body.reason or not body.reason.strip():
         raise HTTPException(status_code=400, detail="reason 필수")
     with pool.connection() as conn:
@@ -682,26 +674,13 @@ def reject_markup(markup_id: int, body: RejectBody, user: dict = Depends(get_use
 @app.patch("/api/markup/{markup_id}/close", status_code=204)
 def close_markup(markup_id: int, body: CloseBody | None = None,
                  user: dict = Depends(get_user)):
-    """applied → closed. 발주자(master)가 반영 결과를 확인·수락 → 왕복 종료.
-    plugin 도 허용(검수 대행 시나리오)."""
+    """applied → closed. 발주자(웹 master)가 반영 결과를 확인·수락 → 종료."""
     if user["role"] not in ("master", "plugin"):
         raise HTTPException(status_code=403, detail="확인(close)은 master/plugin 만 가능")
     with pool.connection() as conn:
         with conn.cursor() as cur:
             _transition(cur, markup_id, "closed", user,
                         expected_version=body.version if body else None)
-        conn.commit()
-    return Response(status_code=204)
-
-
-@app.patch("/api/markup/{markup_id}/reopen", status_code=204)
-def reopen_markup(markup_id: int, body: ReopenBody, user: dict = Depends(get_user)):
-    """다시 pending 으로 — applied 거부(발주자, 사유 권장) 또는 rejected 보완(작성자)."""
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            _transition(cur, markup_id, "pending", user,
-                        reason=(body.reason.strip() if body.reason else None),
-                        expected_version=body.version)
         conn.commit()
     return Response(status_code=204)
 
@@ -722,7 +701,7 @@ def delete_markup(markup_id: int, user: dict = Depends(get_user)):
     check_admin_access(user, cur["adm_cd"].strip())
     if cur["status"] in ("applied", "closed"):
         raise HTTPException(
-            status_code=409, detail="반영/확인된 요청은 삭제할 수 없습니다(reopen 후 회수)"
+            status_code=409, detail="반영/확인된 요청은 이력 보존을 위해 삭제할 수 없습니다"
         )
     execute("DELETE FROM review_markup WHERE id = %s", (markup_id,))
     return Response(status_code=204)

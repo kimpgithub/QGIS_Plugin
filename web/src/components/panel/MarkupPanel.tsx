@@ -8,9 +8,8 @@ type Props = {
   onFilterChange: (f: Record<MarkupStatus, boolean>) => void;
   selectedId: number | null;
   onSelect: (id: number) => void;
-  onReject: (id: number) => void;
+  // 반영됨(applied) 결과 확인 → 종료. 웹의 유일한 처리 동작.
   onClose: (id: number) => void;
-  onReopen: (id: number) => void;
   canProcess?: boolean;
   loading?: boolean;
 };
@@ -28,9 +27,7 @@ export default function MarkupPanel({
   onFilterChange,
   selectedId,
   onSelect,
-  onReject,
   onClose,
-  onReopen,
   canProcess,
   loading,
 }: Props) {
@@ -70,9 +67,7 @@ export default function MarkupPanel({
             selected={m.id === selectedId}
             canProcess={canProcess}
             onClick={() => onSelect(m.id)}
-            onReject={() => onReject(m.id)}
             onClose={() => onClose(m.id)}
-            onReopen={() => onReopen(m.id)}
           />
         ))}
       </div>

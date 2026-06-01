@@ -56,9 +56,9 @@ backend 에 CORS 미들웨어 적용 — **로컬 개발 PC 에서 공개 API �
 | `GET /api/health`, `POST /api/login` | 불필요 |
 | `GET /api/admins`, `GET /api/admin_outline` | Bearer (검수자/플러그인 누구나) |
 | `GET /api/boundary`, `GET /api/cog/{adm_cd}`, `GET /api/markup` | Bearer + adm_cd 권한 체크 |
-| `POST /api/markup`, `PATCH /api/markup/{id}/reopen`, `DELETE /api/markup/{id}` | Bearer + adm_cd 권한 체크 |
-| `PATCH /api/markup/{id}/reject`, `PATCH /api/markup/{id}/close` | Bearer + **master/plugin** |
-| `PATCH /api/markup/{id}/apply` | **PLUGIN_TOKEN 전용**(반영=QGIS만) |
+| `POST /api/markup`, `DELETE /api/markup/{id}` | Bearer + adm_cd 권한 체크 |
+| `PATCH /api/markup/{id}/close` | Bearer + **master/plugin** |
+| `PATCH /api/markup/{id}/apply`, `PATCH /api/markup/{id}/reject` | **PLUGIN_TOKEN 전용**(반영·반려=QGIS만) |
 | `PUT /api/boundary`, `POST /api/cog` | **PLUGIN_TOKEN 전용** |
 
 - 토큰 없음/스킴 불일치/만료/무효 → `401 {"detail":"..."}`
@@ -266,7 +266,7 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/api/markup?adm_cd=21510110&status=
 ```
 - `kind`: `add`/`delete` → `LineString`, `attr` → `Point`, `delete_mark` → `LineString`(구버전 `Point`).
 - `status`: `pending`|`applied`|`rejected`|`closed`. `version`=낙관적 잠금 카운터 —
-  reject/close/reopen 요청 body 에 되돌려 보내면 불일치 시 `409`(동시 수정 감지).
+  reject/close 요청 body 에 되돌려 보내면 불일치 시 `409`(동시 수정 감지).
   `created_by`=요청자, `applied_by`/`rejected_by`/`closed_by`=처리자 admin_cd(plugin 은 NULL).
 
 ### 3.8 `POST /api/markup`  → `201`
@@ -289,20 +289,20 @@ body (`MarkupCreate`):
 가드를 강제하고(어긋나면 `409`), 매 전이마다 `version`+1 및 `markup_event`(append-only
 이력) 1행을 남긴다. 목표 상태와 현재 상태가 같으면 멱등(`204`, 변화 없음).
 
+단순 한 방향 흐름 — 되돌리기(reopen) 없음. 반려됐거나 반영 결과가 다르면
+**새 요청을 등록**한다.
+
 ```
 pending ──apply(plugin)──> applied ──close(master)──> closed
-   │                          │
-   └──reject(master/plugin)   └──reopen──┐
-   │        │                            │
-rejected ───┴────reopen──────────────> pending
+   │
+   └──reject(plugin)──> rejected (끝)
 ```
 
 | 전이 | 엔드포인트 | 허용 from | 행위자 |
 |---|---|---|---|
 | 반영 | `PATCH .../apply` (또는 `PUT /boundary` 의 `resolved_markup_ids`) | pending | plugin |
-| 반려 | `PATCH .../reject` | pending | master/plugin |
+| 반려 | `PATCH .../reject` | pending | plugin |
 | 확인종료 | `PATCH .../close` | applied | master/plugin |
-| 되돌리기 | `PATCH .../reopen` | applied·rejected | 작성자(본인)/master/plugin |
 
 ### 3.9 `PATCH /api/markup/{id}/apply`  → `204`  (PLUGIN_TOKEN 전용)
 
@@ -311,31 +311,26 @@ rejected ───┴────reopen─────────────�
 `applied_at=now()`, `applied_by`=토큰 admin_cd(plugin=NULL), `reject_*` 초기화.
 없는 id → `404`, from≠pending → `409`, 비-plugin → `403`.
 
-### 3.10 `PATCH /api/markup/{id}/reject`  → `204`  (master/plugin)
+### 3.10 `PATCH /api/markup/{id}/reject`  → `204`  (PLUGIN_TOKEN 전용)
 
-`pending → rejected`. body `{"reason":"겹침", "version":1}`(reason 필수·빈 값 `400`,
-version 선택·불일치 `409`). `rejected_at=now()`, `rejected_by`, `reject_reason`, `applied_*=NULL`.
-없는 id → `404`, from≠pending → `409`, 권한 없음 → `403`.
+`pending → rejected`. **QGIS(plugin)만** — 작업자가 수행 불가/오요청을 사유와 함께 반려.
+웹(발주자)은 반려하지 않는다(자기 요청 취소 = `DELETE` 회수).
+body `{"reason":"겹침", "version":1}`(reason 필수·빈 값 `400`, version 선택·불일치 `409`).
+`rejected_at=now()`, `rejected_by`, `reject_reason`, `applied_*=NULL`.
+없는 id → `404`, from≠pending → `409`, 비-plugin → `403`.
 
 ### 3.11 `PATCH /api/markup/{id}/close`  → `204`  (master/plugin)
 
-`applied → closed`. 웹 발주자가 반영 결과를 확인·수락 → 왕복 종료.
+`applied → closed`. 웹 발주자가 반영 결과를 확인·수락 → 종료. 웹의 유일한 상태 변경.
 body `{"version":2}`(선택, 불일치 `409`). `closed_at=now()`, `closed_by`.
 없는 id → `404`, from≠applied → `409`, 권한 없음 → `403`.
 
-### 3.12 `PATCH /api/markup/{id}/reopen`  → `204`
-
-`applied|rejected → pending`. applied 거부(발주자) 또는 rejected 보완(작성자).
-body `{"reason":"...", "version":2}`(둘 다 선택, version 불일치 `409`).
-처리 흔적(applied/rejected/closed) 초기화.
-없는 id → `404`, from∉{applied,rejected} → `409`, 본인 adm_cd 외 → `403`.
-
-### 3.13 `DELETE /api/markup/{id}`  → `204`
+### 3.12 `DELETE /api/markup/{id}`  → `204`
 
 수정요청 회수 — 작성자가 잘못 올린 요청을 완전히 삭제(행 제거). 웹 `라인삭제` 툴이
 지도에서 마크업을 클릭해 호출. **대기(`pending`)·반려(`rejected`)** 는 삭제 가능
 (실제 경계를 바꾼 적 없음). 이미 **반영(`applied`)·확인종료(`closed`)** 는 이력 보존으로
-`409`(reopen 후 회수). 없는 id → `404`, 본인 adm_cd 외 → `403`(마스터/플러그인은 전체).
+`409`. 없는 id → `404`, 본인 adm_cd 외 → `403`(마스터/플러그인은 전체).
 
 ---
 
@@ -410,8 +405,9 @@ curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/js
 # 반영(apply)은 PLUGIN_TOKEN 으로만 — 보통 PUT /boundary 의 resolved_markup_ids 로 일괄
 curl -s -X PATCH -H "Authorization: Bearer $PLUGIN_TOK" $BASE/api/markup/7/apply -o /dev/null -w '%{http_code}\n'
 curl -s -X PATCH -H "Authorization: Bearer $TOK" $BASE/api/markup/7/close  -o /dev/null -w '%{http_code}\n'
-curl -s -X PATCH -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-  -d '{"reason":"재작업"}' $BASE/api/markup/7/reopen -o /dev/null -w '%{http_code}\n'
+# 반려(reject)도 PLUGIN_TOKEN 으로만
+curl -s -X PATCH -H "Authorization: Bearer $PLUGIN_TOK" -H 'Content-Type: application/json' \
+  -d '{"reason":"수행 불가"}' $BASE/api/markup/7/reject -o /dev/null -w '%{http_code}\n'
 ```
 
 ---

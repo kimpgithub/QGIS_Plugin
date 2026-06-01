@@ -41,8 +41,9 @@ export type AuthUser = {
 // 수정요청 종류 — 라인등록/라인삭제/속성등록/삭제표기
 export type MarkupKind = 'add' | 'delete' | 'attr' | 'delete_mark';
 
-// lifecycle: pending(요청) → applied(QGIS 반영) → closed(웹 확인 종료)
-//            pending → rejected(반려) ;  applied/rejected → pending(reopen)
+// lifecycle (단순 한 방향, reopen 없음):
+//   pending(요청) → applied(QGIS 반영) → closed(웹 확인 종료)
+//   pending → rejected(QGIS 반려, 끝) — 보완은 새 요청 등록으로
 export type MarkupStatus = 'pending' | 'applied' | 'rejected' | 'closed';
 
 // 서버 → 클라이언트 (api_client.py 신규 스키마 기준).
@@ -69,7 +70,6 @@ export type Markup = {
   reject_reason?: string | null;
   closed_by?: string | null;
   closed_at?: string | null;
-  reopened_at?: string | null;
 };
 
 // GET /api/boundary feature.properties — QGIS 가 제출한 행정리 경계 + 비고(remark)

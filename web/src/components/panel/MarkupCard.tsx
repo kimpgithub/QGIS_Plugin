@@ -14,7 +14,7 @@ const KIND_COLOR: Record<MarkupKind, string> = {
   delete_mark: '#b45309',
 };
 
-// 대기 → (QGIS)반영 → (확인)종료 / 반려
+// 단순 흐름: 대기 → (QGIS)반영 → (웹 확인)종료  /  대기 → (QGIS)반려 (끝)
 const STATUS_LABEL: Record<MarkupStatus, string> = {
   pending: '처리대기',
   applied: '반영됨',
@@ -31,12 +31,11 @@ const STATUS_COLOR: Record<MarkupStatus, string> = {
 type Props = {
   item: Markup;
   selected?: boolean;
-  // 처리 권한(master) 여부 — false 면 처리 버튼 숨김(일반 사용자는 의견 등록·열람만)
+  // 처리 권한(master) 여부 — false 면 [확인] 버튼 숨김(일반 사용자는 열람만)
   canProcess?: boolean;
   onClick?: () => void;
-  onReject?: () => void;
+  // 반영됨(applied) 결과 확인 → 종료. 웹의 유일한 처리 버튼.
   onClose?: () => void;
-  onReopen?: () => void;
 };
 
 export default function MarkupCard({
@@ -44,9 +43,7 @@ export default function MarkupCard({
   selected,
   canProcess,
   onClick,
-  onReject,
   onClose,
-  onReopen,
 }: Props) {
   const note =
     (item.attrs?.note as string | undefined) ?? defaultNote(item.kind);
@@ -68,59 +65,20 @@ export default function MarkupCard({
       <div style={styles.meta}>
         작업자 {item.created_by || '-'} · {fmt(item.created_at)}
       </div>
-      {canProcess && (
+      {/* 반영됨: 결과 확인 → 종료. 웹의 유일한 처리 버튼.
+          반려/되돌리기는 없음 — 반려는 QGIS 작업자가, 재작업은 새 요청 등록으로. */}
+      {canProcess && item.status === 'applied' && (
         <div style={styles.actions}>
-          {/* 대기: 반려만 (반영=QGIS 전용) */}
-          {item.status === 'pending' && (
-            <button
-              type="button"
-              style={styles.btn}
-              onClick={(e) => {
-                e.stopPropagation();
-                onReject?.();
-              }}
-            >
-              반려
-            </button>
-          )}
-          {/* 반영됨: 결과 확인(종료) / 되돌리기(재요청) */}
-          {item.status === 'applied' && (
-            <>
-              <button
-                type="button"
-                style={styles.btn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onClose?.();
-                }}
-              >
-                확인
-              </button>
-              <button
-                type="button"
-                style={styles.btn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onReopen?.();
-                }}
-              >
-                되돌리기
-              </button>
-            </>
-          )}
-          {/* 반려됨: 다시 대기로 (보완 재요청) */}
-          {item.status === 'rejected' && (
-            <button
-              type="button"
-              style={styles.btn}
-              onClick={(e) => {
-                e.stopPropagation();
-                onReopen?.();
-              }}
-            >
-              재요청
-            </button>
-          )}
+          <button
+            type="button"
+            style={styles.btn}
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose?.();
+            }}
+          >
+            확인
+          </button>
         </div>
       )}
       {(item.status === 'applied' || item.status === 'closed') && (
@@ -133,10 +91,11 @@ export default function MarkupCard({
       )}
       {item.status === 'rejected' && (
         <div style={styles.footnote}>
-          반려 {item.rejected_by || '-'} · {fmt(item.rejected_at)}
+          반려 {item.rejected_by || 'QGIS 작업자'} · {fmt(item.rejected_at)}
           {item.reject_reason && (
             <div style={styles.reason}>사유: {item.reject_reason}</div>
           )}
+          <div style={styles.hint}>보완이 필요하면 새 수정요청을 등록하세요</div>
         </div>
       )}
     </div>
@@ -210,4 +169,5 @@ const styles: Record<string, React.CSSProperties> = {
   },
   footnote: { fontSize: 11, color: '#6b7280' },
   reason: { marginTop: 2, color: '#374151' },
+  hint: { marginTop: 4, color: '#9ca3af' },
 };
