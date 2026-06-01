@@ -189,16 +189,26 @@ class MarkupReviewDialog(QDialog):
                                QgsCoordinateTransform, QgsProject)
         geom = _feature_geometry(feat)
         if geom is None or geom.isEmpty():
+            QMessageBox.warning(self, '경고', '마크업 geometry 를 읽을 수 없습니다.')
             return
         bbox = geom.boundingBox()
         canvas = self.iface.mapCanvas()
         dst = canvas.mapSettings().destinationCrs()
         src = QgsCoordinateReferenceSystem('EPSG:4326')
-        if src.isValid() and dst.isValid() and src != dst:
+        if not dst.isValid():
+            dst = src                      # 빈 프로젝트 — 4326 그대로 사용
+        if src != dst:
             tr = QgsCoordinateTransform(src, dst, QgsProject.instance())
-            bbox = tr.transformBoundingBox(bbox)
-        if bbox.isEmpty():
-            return
+            try:
+                bbox = tr.transformBoundingBox(bbox)
+            except Exception:
+                QMessageBox.warning(self, '경고', '좌표 변환 실패 — 프로젝트 CRS 확인')
+                return
+        # Point(속성등록)·수평/수직 라인은 bbox 폭 또는 높이가 0 → 그대로 setExtent
+        # 하면 줌이 무시된다. 캔버스 단위 기준 최소 크기로 확장 후 줌.
+        min_span = 0.002 if dst.isGeographic() else 200.0   # 도(deg) / 미터(m)
+        if bbox.width() < min_span or bbox.height() < min_span:
+            bbox.grow(min_span / 2.0)
         bbox.scale(1.5)
         canvas.setExtent(bbox)
         canvas.refresh()
