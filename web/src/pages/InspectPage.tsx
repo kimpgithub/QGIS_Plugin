@@ -6,7 +6,6 @@ import LayerControls from '../components/map/LayerControls';
 import MarkupPanel from '../components/panel/MarkupPanel';
 import SaveMarkupModal from '../components/modal/SaveMarkupModal';
 import RejectReasonModal from '../components/modal/RejectReasonModal';
-import AttrFormModal from '../components/modal/AttrFormModal';
 import AdminPickerModal from '../components/modal/AdminPickerModal';
 import DrawHint from '../components/map/DrawHint';
 import {
@@ -146,7 +145,6 @@ export default function InspectPage() {
   const [tool, setTool] = useState<ToolId>(null);
   const activeToolRef = useRef<ActiveTool | null>(null);
   const [pendingGeom, setPendingGeom] = useState<GjGeometry | null>(null);
-  const [attrOpen, setAttrOpen] = useState(false);
   // 그리기 진행 중 여부 (drawstart~drawend). 안내바 버튼 상태 + 단축키 분기에 사용.
   const [drawing, setDrawing] = useState(false);
 
@@ -243,10 +241,9 @@ export default function InspectPage() {
       const t = e.target as HTMLElement | null;
       const tag = t?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
-      // 저장/속성/삭제확인 모달이 떠 있으면 그리기 단축키 비활성
+      // 저장/삭제확인 모달이 떠 있으면 그리기 단축키 비활성
       if (
         pendingGeom != null ||
-        attrOpen ||
         deleteTargetId != null ||
         deleteManyIds != null
       )
@@ -266,22 +263,23 @@ export default function InspectPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [tool, drawing, pendingGeom, attrOpen, deleteTargetId, deleteManyIds]);
+  }, [tool, drawing, pendingGeom, deleteTargetId, deleteManyIds]);
 
-  // 저장 모달 콜백
-  async function onSavePending(note: string) {
+  // 저장 모달 콜백 — attr(속성등록)는 행정리명/부호도 같은 모달에서 함께 받는다.
+  async function onSavePending(
+    note: string,
+    attrData?: { ri_nm: string; ri_cd: string }
+  ) {
     if (!pendingGeom || !tool || !admin) return;
     try {
-      if (tool === 'attr') {
-        // attr 는 별도 폼 모달로 전환
-        setAttrOpen(true);
-        return;
-      }
       await createMarkup({
         adm_cd: admin.adm_cd,
         kind: tool as MarkupKind,
         geometry: pendingGeom,
-        attrs: note ? { note } : {},
+        attrs: {
+          ...(attrData ?? {}),
+          ...(note ? { note } : {}),
+        },
       });
       await reloadMarkup();
     } catch (e) {
@@ -293,29 +291,8 @@ export default function InspectPage() {
     }
   }
 
-  async function onSaveAttr(data: { ri_nm: string; ri_cd: string }) {
-    if (!pendingGeom || !admin) return;
-    try {
-      await createMarkup({
-        adm_cd: admin.adm_cd,
-        kind: 'attr',
-        geometry: pendingGeom,
-        attrs: data,
-      });
-      await reloadMarkup();
-    } catch (e) {
-      console.error('createMarkup(attr) 실패', e);
-      alert('저장 실패 — 콘솔 확인');
-    } finally {
-      setAttrOpen(false);
-      setPendingGeom(null);
-      activeToolRef.current?.source.clear();
-    }
-  }
-
   function onCancelPending() {
     setPendingGeom(null);
-    setAttrOpen(false);
     activeToolRef.current?.source.clear();
   }
 
@@ -343,7 +320,6 @@ export default function InspectPage() {
   const idle =
     tool == null &&
     pendingGeom == null &&
-    !attrOpen &&
     rejectId == null &&
     deleteTargetId == null &&
     deleteManyIds == null;
@@ -451,7 +427,7 @@ export default function InspectPage() {
             onPickBoundary={(p) => setBoundaryInfo(p as BoundaryProps | null)}
             highlightId={deleteTargetId}
           />
-          {tool && pendingGeom == null && !attrOpen && (
+          {tool && pendingGeom == null && (
             <DrawHint
               kind={tool}
               drawing={drawing}
@@ -509,15 +485,10 @@ export default function InspectPage() {
       </div>
 
       <SaveMarkupModal
-        open={pendingGeom != null && tool != null && !attrOpen}
+        open={pendingGeom != null && tool != null}
         kind={(tool ?? 'add') as MarkupKind}
         onCancel={onCancelPending}
         onSave={onSavePending}
-      />
-      <AttrFormModal
-        open={attrOpen}
-        onCancel={onCancelPending}
-        onSave={onSaveAttr}
       />
       <RejectReasonModal
         open={rejectId != null}
