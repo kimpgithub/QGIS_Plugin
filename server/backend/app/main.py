@@ -493,7 +493,7 @@ def list_markup(
     status: str | None = None,
     user: dict = Depends(get_user),
 ):
-    """수정요청 GeoJSON FC. adm_cd 지정 시 role 검증."""
+    """수정요청 GeoJSON FC. adm_cd 지정 시 role 검증. 최신 등록(id 큰 것)이 먼저."""
     if adm_cd:
         check_admin_access(user, adm_cd)
     conds: list[str] = []
@@ -521,7 +521,7 @@ def list_markup(
               'created_by', created_by, 'created_at', created_at,
               'applied_by', applied_by, 'applied_at', applied_at,
               'rejected_by', rejected_by, 'rejected_at', rejected_at)
-          )) FILTER (WHERE id IS NOT NULL), '[]'::json)
+          ) ORDER BY id DESC) FILTER (WHERE id IS NOT NULL), '[]'::json)
         ) AS fc
         FROM review_markup {where}
         """,
