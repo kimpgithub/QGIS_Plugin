@@ -30,6 +30,8 @@ export type MapHandle = {
   getMap: () => Map | null;
   // 삭제표기 스냅 대상 — 행정리경계 소스. 그리기 툴이 경계선에 스냅하도록 전달.
   getBoundarySource: () => VectorSource | null;
+  // 행정리(gid) 영역을 노란 펄스로 잠깐 깜빡여 강조 — 목록 더블클릭 이동 시 사용.
+  flashBoundary: (gid: number) => void;
 };
 
 type Props = {
@@ -82,6 +84,8 @@ export default function MapView({
   const adminSrcRef = useRef<VectorSource | null>(null);
   const cogBboxRef = useRef<[number, number, number, number] | null>(null);
   const highlightIdRef = useRef<number | null>(null);
+  // 진행 중인 플래시 정리 함수 — 새 플래시 시작/언마운트 시 이전 것을 중단.
+  const flashCleanupRef = useRef<(() => void) | null>(null);
 
   // map init (once)
   useEffect(() => {
@@ -159,6 +163,58 @@ export default function MapView({
     const handle: MapHandle = {
       getMap: () => mapRef.current,
       getBoundarySource: () => boundarySrcRef.current,
+      // 행정리 영역 플래시 — 대상 피처를 임시 레이어에 복제해 노란 펄스(채움+외곽선)
+      // 애니메이션 후 제거. 새 플래시가 시작되면 이전 것은 즉시 정리.
+      flashBoundary: (gid: number) => {
+        const m = mapRef.current;
+        const src = boundarySrcRef.current;
+        if (!m || !src) return;
+        const feat = src
+          .getFeatures()
+          .find((f) => Number(f.get('gid')) === gid);
+        if (!feat) return;
+
+        flashCleanupRef.current?.();
+
+        const flashSrc = new VectorSource();
+        flashSrc.addFeature(feat.clone());
+        const flashLayer = new VectorLayer({ source: flashSrc, zIndex: 100 });
+        m.addLayer(flashLayer);
+
+        const DURATION = 2000; // ms — 펄스 3회
+        const start = performance.now();
+        let raf = 0;
+        const cleanup = () => {
+          cancelAnimationFrame(raf);
+          m.removeLayer(flashLayer);
+          flashCleanupRef.current = null;
+        };
+        flashCleanupRef.current = cleanup;
+
+        const tick = (now: number) => {
+          const t = (now - start) / DURATION;
+          if (t >= 1) {
+            cleanup();
+            return;
+          }
+          // 0→1→0 펄스 3회 + 전체적으로 서서히 사라짐
+          const pulse = Math.abs(Math.sin(t * Math.PI * 3));
+          const fade = 1 - t * 0.6;
+          flashLayer.setStyle(
+            new Style({
+              stroke: new Stroke({
+                color: `rgba(250,204,21,${(0.5 + 0.5 * pulse) * fade})`,
+                width: 3 + 5 * pulse,
+              }),
+              fill: new Fill({
+                color: `rgba(250,204,21,${0.35 * pulse * fade})`,
+              }),
+            })
+          );
+          raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+      },
       fitToBoundary: () => {
         const m = mapRef.current;
         if (!m) return;
@@ -181,6 +237,7 @@ export default function MapView({
 
     return () => {
       window.removeEventListener('resize', onResize);
+      flashCleanupRef.current?.();
       map.setTarget(undefined);
       mapRef.current = null;
     };
@@ -190,6 +247,7 @@ export default function MapView({
   // COG URL 변경 시 source 교체 + 가시성. bbox 가 있고 boundary 가 비어있으면
   // COG 범위로 fit (boundary 가 있으면 그쪽 useEffect 가 우선 fit). bbox 는 ref 에도
   // 보관 — '범위 맞춤' 버튼이 boundary 없을 때 fallback 으로 사용.
+  const lastFitCogRef = useRef<string | null>(null);
   useEffect(() => {
     cogBboxRef.current = cogBbox ?? null;
     const l = cogRef.current;
@@ -198,15 +256,28 @@ export default function MapView({
       // transition:0 — 반투명(opacity 0.9) COG 타일의 줌 시 페이드 깜빡임 제거.
       l.setSource(new XYZ({ url: cogTileUrl, transition: 0 }));
       l.setVisible(visible.cog);
-      if (cogBbox && !boundary?.features?.length) {
+      if (cogBbox) {
+        // 레이어 extent 를 이미지 bbox 로 제한 — 범위 밖 타일 요청을 막아
+        // titiler 의 TileOutsideBounds 404 가 콘솔에 도배되는 것을 방지.
         const ext = transformExtent(cogBbox, 'EPSG:4326', 'EPSG:3857');
+        if (isFinite(ext[0])) l.setExtent(ext);
         const m = mapRef.current;
-        if (m && isFinite(ext[0])) {
+        // fit 은 COG 가 처음/새로 로드될 때만 (boundary 없는 읍면 한정)
+        if (
+          m &&
+          isFinite(ext[0]) &&
+          !boundary?.features?.length &&
+          lastFitCogRef.current !== cogTileUrl
+        ) {
+          lastFitCogRef.current = cogTileUrl;
           m.getView().fit(ext, { padding: [40, 40, 40, 40], duration: 400 });
         }
+      } else {
+        l.setExtent(undefined);
       }
     } else {
       l.setVisible(false);
+      lastFitCogRef.current = null;
     }
   }, [cogTileUrl, cogBbox, visible.cog, boundary]);
 
@@ -224,7 +295,10 @@ export default function MapView({
     }
   }, [adminOutline]);
 
-  // boundary 변경
+  // boundary 변경 — 데이터 교체. 자동 줌(fit)은 "다른 읍면으로 바뀌었을 때"만.
+  // (30초 자동 동기화가 같은 읍면 데이터를 다시 내려줄 때마다 fit 하면
+  //  사용자가 이동해 둔 화면이 전체 범위로 되돌아가 버림)
+  const lastFitAdmRef = useRef<string | null>(null);
   useEffect(() => {
     const src = boundarySrcRef.current;
     if (!src) return;
@@ -235,12 +309,18 @@ export default function MapView({
         featureProjection: 'EPSG:3857',
       });
       src.addFeatures(feats);
-      // 자동 줌
-      const ext = src.getExtent();
-      const m = mapRef.current;
-      if (m && ext && isFinite(ext[0])) {
-        m.getView().fit(ext, { padding: [40, 40, 40, 40], duration: 400 });
+      // 자동 줌 — 읍면(adm_cd)이 달라졌을 때만
+      const admCd = String(boundary.features[0]?.properties?.adm_cd ?? '');
+      if (admCd !== lastFitAdmRef.current) {
+        lastFitAdmRef.current = admCd;
+        const ext = src.getExtent();
+        const m = mapRef.current;
+        if (m && ext && isFinite(ext[0])) {
+          m.getView().fit(ext, { padding: [40, 40, 40, 40], duration: 400 });
+        }
       }
+    } else {
+      lastFitAdmRef.current = null;
     }
   }, [boundary]);
 

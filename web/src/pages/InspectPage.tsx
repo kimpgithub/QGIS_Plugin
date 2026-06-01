@@ -4,6 +4,7 @@ import MapView, { type LayerVisibility, type MapHandle } from '../components/map
 import ToolBar, { type ToolId } from '../components/map/ToolBar';
 import LayerControls from '../components/map/LayerControls';
 import MarkupPanel from '../components/panel/MarkupPanel';
+import BoundaryListPanel from '../components/panel/BoundaryListPanel';
 import SaveMarkupModal from '../components/modal/SaveMarkupModal';
 import RejectReasonModal from '../components/modal/RejectReasonModal';
 import AdminPickerModal from '../components/modal/AdminPickerModal';
@@ -31,6 +32,7 @@ import type {
   BoundaryCollection,
   BoundaryProps,
   CogInfo,
+  GjFeature,
   GjGeometry,
   Markup,
   MarkupCollection,
@@ -88,6 +90,8 @@ export default function InspectPage() {
   const [loading, setLoading] = useState(false);
   // 클릭한 행정리경계 정보(QGIS 비고 포함) — 툴 비활성 상태에서 경계 클릭 시 표시
   const [boundaryInfo, setBoundaryInfo] = useState<BoundaryProps | null>(null);
+  // 행정리 목록 패널 (행정리명/부호/비고 테이블, 더블클릭 → 위치 이동)
+  const [riListOpen, setRiListOpen] = useState(false);
 
   // 필터 + 선택
   const [filter, setFilter] = useState<Record<MarkupStatus, boolean>>({
@@ -140,6 +144,11 @@ export default function InspectPage() {
 
   // 지도 핸들 (fit 등)
   const mapHandleRef = useRef<MapHandle | null>(null);
+
+  // 행정리 목록(도킹 패널) 토글로 지도 폭이 바뀌므로 OL 캔버스 크기 재계산
+  useEffect(() => {
+    mapHandleRef.current?.getMap()?.updateSize();
+  }, [riListOpen]);
 
   // 활성 툴
   const [tool, setTool] = useState<ToolId>(null);
@@ -390,6 +399,22 @@ export default function InspectPage() {
     );
   }
 
+  // 행정리 목록 행 더블클릭 → 해당 행정리 영역으로 화면 이동 후 노란 펄스 플래시
+  function onZoomToBoundary(f: GjFeature<BoundaryProps>) {
+    const m = mapHandleRef.current?.getMap();
+    if (!m) return;
+    const ext = extentOf(f.geometry);
+    if (!ext) return;
+    const gid = f.properties.gid;
+    m.getView().fit(projectExtentToWebMerc(ext), {
+      padding: [80, 80, 80, 80],
+      duration: 400,
+      maxZoom: 17,
+      // 이동 애니메이션이 끝난 뒤 해당 영역을 깜빡여 위치를 알려준다.
+      callback: () => mapHandleRef.current?.flashBoundary(gid),
+    });
+  }
+
   const adminLabel = admin
     ? `${admin.adm_cd} · ${admin.adm_nm || ''}`
     : '행정읍면 미선택';
@@ -410,6 +435,16 @@ export default function InspectPage() {
           visible={visible}
           onToggle={(k, v) => setVisible((s) => ({ ...s, [k]: v }))}
           onFitBoundary={() => mapHandleRef.current?.fitToBoundary()}
+          onToggleRiList={() => setRiListOpen((v) => !v)}
+          riListOpen={riListOpen}
+        />
+        {/* 행정리 목록 — 지도 옆 도킹 패널 (지도를 가리지 않음).
+            ri_nm/ri_cd/remark 테이블, 행 더블클릭 → 위치 이동 + 플래시 */}
+        <BoundaryListPanel
+          open={riListOpen}
+          boundary={boundary}
+          onClose={() => setRiListOpen(false)}
+          onZoomTo={onZoomToBoundary}
         />
         <div style={styles.mapWrap}>
           <MapView
