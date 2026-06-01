@@ -35,7 +35,9 @@ export default function SaveMarkupModal({ open, kind, onCancel, onSave }: Props)
   const canSave = !isAttr || (riNm.trim() !== '' && riCd.trim() !== '');
 
   return (
-    <Modal open={open} title={TITLES[kind]} onClose={onCancel} width={420}>
+    // dim=false — 지도(스캔 이미지)의 지명·부호를 보면서 입력해야 하므로
+    // 배경을 어둡게 하지 않고, 모달을 드래그로 치우거나 지도를 움직일 수 있게 한다.
+    <Modal open={open} title={TITLES[kind]} onClose={onCancel} width={420} dim={false}>
       {isAttr && (
         <>
           <div style={styles.q}>행정리 명칭 및 부호를 입력하세요.</div>

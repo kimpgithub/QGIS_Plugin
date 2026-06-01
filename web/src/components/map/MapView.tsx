@@ -6,13 +6,17 @@ import XYZ from 'ol/source/XYZ';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
 import GeoJSON from 'ol/format/GeoJSON';
-import { Style, Stroke, Circle as CircleStyle, Fill } from 'ol/style';
+import { Style, Stroke, Circle as CircleStyle, Fill, Text } from 'ol/style';
 import { transformExtent } from 'ol/proj';
 import DragBox from 'ol/interaction/DragBox';
 import { platformModifierKeyOnly } from 'ol/events/condition';
 import type { MapBrowserEvent } from 'ol';
+import type Feature from 'ol/Feature';
 import type { FeatureLike } from 'ol/Feature';
 import type BaseLayer from 'ol/layer/Base';
+import Point from 'ol/geom/Point';
+import LineString from 'ol/geom/LineString';
+import type { Coordinate } from 'ol/coordinate';
 import 'ol/ol.css';
 import type { GjFeatureCollection, MarkupCollection } from '../../types';
 import type { AdminOutlineCollection } from '../../api/admin_outline';
@@ -32,6 +36,9 @@ export type MapHandle = {
   getBoundarySource: () => VectorSource | null;
   // 행정리(gid) 영역을 노란 펄스로 잠깐 깜빡여 강조 — 목록 더블클릭 이동 시 사용.
   flashBoundary: (gid: number) => void;
+  // 마크업(선/점)과 겹치는 행정리 폴리곤들을 노란 펄스로 잠깐 깜빡여 강조
+  // — 수정요청 카드 클릭 시 "어느 행정리에 영향을 주는 요청인지" 표시.
+  flashIntersectingBoundaries: (markupId: number) => void;
 };
 
 type Props = {
@@ -160,60 +167,90 @@ export default function MapView({
     const onResize = () => map.updateSize();
     window.addEventListener('resize', onResize);
 
+    // 피처들을 임시 레이어에 복제해 노란 펄스(채움+외곽선) 애니메이션 후 제거.
+    // 새 플래시가 시작되면 이전 것은 즉시 정리. (단일/다중 공용)
+    const flashFeatures = (feats: Feature[]) => {
+      const m = mapRef.current;
+      if (!m || !feats.length) return;
+
+      flashCleanupRef.current?.();
+
+      const flashSrc = new VectorSource();
+      feats.forEach((f) => flashSrc.addFeature(f.clone()));
+      const flashLayer = new VectorLayer({ source: flashSrc, zIndex: 100 });
+      m.addLayer(flashLayer);
+
+      const DURATION = 2000; // ms — 펄스 3회
+      const start = performance.now();
+      let raf = 0;
+      const cleanup = () => {
+        cancelAnimationFrame(raf);
+        m.removeLayer(flashLayer);
+        flashCleanupRef.current = null;
+      };
+      flashCleanupRef.current = cleanup;
+
+      const tick = (now: number) => {
+        const t = (now - start) / DURATION;
+        if (t >= 1) {
+          cleanup();
+          return;
+        }
+        // 0→1→0 펄스 3회 + 전체적으로 서서히 사라짐
+        const pulse = Math.abs(Math.sin(t * Math.PI * 3));
+        const fade = 1 - t * 0.6;
+        flashLayer.setStyle(
+          new Style({
+            stroke: new Stroke({
+              color: `rgba(250,204,21,${(0.5 + 0.5 * pulse) * fade})`,
+              width: 3 + 5 * pulse,
+            }),
+            fill: new Fill({
+              color: `rgba(250,204,21,${0.35 * pulse * fade})`,
+            }),
+          })
+        );
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    };
+
     const handle: MapHandle = {
       getMap: () => mapRef.current,
       getBoundarySource: () => boundarySrcRef.current,
-      // 행정리 영역 플래시 — 대상 피처를 임시 레이어에 복제해 노란 펄스(채움+외곽선)
-      // 애니메이션 후 제거. 새 플래시가 시작되면 이전 것은 즉시 정리.
+      // 행정리(gid) 1개 플래시 — 행정리 목록 더블클릭 이동 시 사용.
       flashBoundary: (gid: number) => {
-        const m = mapRef.current;
         const src = boundarySrcRef.current;
-        if (!m || !src) return;
+        if (!src) return;
         const feat = src
           .getFeatures()
           .find((f) => Number(f.get('gid')) === gid);
-        if (!feat) return;
+        if (feat) flashFeatures([feat]);
+      },
+      // 마크업(선/점)과 겹치는 행정리 폴리곤들을 한꺼번에 플래시.
+      // 점 = 점이 들어있는 폴리곤, 선 = 선이 지나가는 폴리곤 전부.
+      flashIntersectingBoundaries: (markupId: number) => {
+        const mSrc = markupSrcRef.current;
+        const bSrc = boundarySrcRef.current;
+        if (!mSrc || !bSrc) return;
+        const markupFeat = mSrc
+          .getFeatures()
+          .find((f) => Number(f.get('id')) === markupId);
+        const geom = markupFeat?.getGeometry();
+        if (!geom) return;
 
-        flashCleanupRef.current?.();
-
-        const flashSrc = new VectorSource();
-        flashSrc.addFeature(feat.clone());
-        const flashLayer = new VectorLayer({ source: flashSrc, zIndex: 100 });
-        m.addLayer(flashLayer);
-
-        const DURATION = 2000; // ms — 펄스 3회
-        const start = performance.now();
-        let raf = 0;
-        const cleanup = () => {
-          cancelAnimationFrame(raf);
-          m.removeLayer(flashLayer);
-          flashCleanupRef.current = null;
-        };
-        flashCleanupRef.current = cleanup;
-
-        const tick = (now: number) => {
-          const t = (now - start) / DURATION;
-          if (t >= 1) {
-            cleanup();
-            return;
-          }
-          // 0→1→0 펄스 3회 + 전체적으로 서서히 사라짐
-          const pulse = Math.abs(Math.sin(t * Math.PI * 3));
-          const fade = 1 - t * 0.6;
-          flashLayer.setStyle(
-            new Style({
-              stroke: new Stroke({
-                color: `rgba(250,204,21,${(0.5 + 0.5 * pulse) * fade})`,
-                width: 3 + 5 * pulse,
-              }),
-              fill: new Fill({
-                color: `rgba(250,204,21,${0.35 * pulse * fade})`,
-              }),
-            })
-          );
-          raf = requestAnimationFrame(tick);
-        };
-        raf = requestAnimationFrame(tick);
+        // 1차: bbox 로 후보 추림 → 2차: 선/점을 따라 찍은 좌표의 폴리곤 포함 여부로 판정
+        const candidates: Feature[] = [];
+        bSrc.forEachFeatureIntersectingExtent(geom.getExtent(), (f) => {
+          candidates.push(f as Feature);
+        });
+        const samples = sampleCoords(geom as Point | LineString);
+        const hits = candidates.filter((bf) => {
+          const poly = bf.getGeometry();
+          if (!poly) return false;
+          return samples.some((c) => poly.intersectsCoordinate(c));
+        });
+        flashFeatures(hits);
       },
       fitToBoundary: () => {
         const m = mapRef.current;
@@ -451,6 +488,28 @@ export default function MapView({
   return <div ref={ref} style={{ width: '100%', height: '100%' }} />;
 }
 
+// 마크업 geometry 를 따라 겹침 판정용 좌표를 뽑는다.
+//  - 점: 그 좌표 1개
+//  - 선: 꼭짓점 + 각 구간을 ~20m(EPSG:3857 기준) 간격으로 샘플링한 좌표
+//    (선이 폴리곤 꼭짓점 사이를 통과해도 놓치지 않도록)
+function sampleCoords(geom: Point | LineString): Coordinate[] {
+  if (geom instanceof Point) return [geom.getCoordinates()];
+  if (!(geom instanceof LineString)) return [];
+  const out: Coordinate[] = [];
+  const cs = geom.getCoordinates();
+  for (let i = 0; i < cs.length - 1; i++) {
+    const [x1, y1] = cs[i];
+    const [x2, y2] = cs[i + 1];
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    // 구간당 최대 200개로 제한 (아주 긴 선에서 과도한 연산 방지)
+    const steps = Math.min(Math.max(1, Math.ceil(len / 20)), 200);
+    for (let s = 0; s <= steps; s++) {
+      out.push([x1 + ((x2 - x1) * s) / steps, y1 + ((y2 - y1) * s) / steps]);
+    }
+  }
+  return out;
+}
+
 // kind 별 스타일 (라인등록=파랑, 라인삭제=빨강, 속성등록=파란점, 삭제표기=빨간X).
 // highlightId 와 feature 의 id 가 일치하면 노란 강조 헤일로를 밑에 깔아 선택 표시.
 function styleMarkup(
@@ -459,7 +518,7 @@ function styleMarkup(
 ): Style | Style[] {
   const props = feature.getProperties();
   const kind = String(props.kind ?? 'add');
-  const base = baseMarkupStyle(kind);
+  const base = baseMarkupStyle(kind, props);
   const id = feature.get('id');
   if (highlightId != null && id != null && Number(id) === highlightId) {
     return [highlightHalo(kind), base];
@@ -467,18 +526,36 @@ function styleMarkup(
   return base;
 }
 
-function baseMarkupStyle(kind: string): Style {
+function baseMarkupStyle(kind: string, props?: Record<string, unknown>): Style {
   switch (kind) {
     case 'delete':
       return new Style({ stroke: new Stroke({ color: '#dc2626', width: 4 }) });
-    case 'attr':
+    case 'attr': {
+      // 속성등록 — 파란 점 + 등록한 행정리명·부호를 라벨로 함께 표시
+      // (작업자가 지도만 보고도 어떤 이름/부호 요청인지 알 수 있게).
+      const attrs = (props?.attrs ?? {}) as { ri_nm?: string; ri_cd?: string };
+      const label = [attrs.ri_nm, attrs.ri_cd]
+        .map((s) => (s ?? '').trim())
+        .filter(Boolean)
+        .join(' · ');
       return new Style({
         image: new CircleStyle({
           radius: 7,
           fill: new Fill({ color: '#1d4ed8' }),
           stroke: new Stroke({ color: '#fff', width: 2 }),
         }),
+        text: label
+          ? new Text({
+              text: label,
+              font: 'bold 12px sans-serif',
+              offsetY: -16,
+              fill: new Fill({ color: '#1d4ed8' }),
+              // 흰 외곽선 — 배경지도/스캔이미지 위에서도 가독
+              stroke: new Stroke({ color: '#ffffff', width: 3 }),
+            })
+          : undefined,
       });
+    }
     case 'delete_mark':
       // 경계선 삭제표기 — 빨간 선 + 선 위에 ✕ 를 일정 간격으로(작업자에게 "여기 삭제" 전달).
       // 캔버스 renderer 로 직접 그려 픽셀 간격/크기를 정밀 제어(✕ 는 흰 헤일로로 항상 가독).

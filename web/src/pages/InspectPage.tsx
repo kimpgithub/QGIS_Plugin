@@ -89,6 +89,35 @@ export default function InspectPage() {
   const [loading, setLoading] = useState(false);
   // 클릭한 행정리경계 정보(QGIS 비고 포함) — 툴 비활성 상태에서 경계 클릭 시 표시
   const [boundaryInfo, setBoundaryInfo] = useState<BoundaryProps | null>(null);
+  // 정보 카드 위치 — 머리 부분을 드래그해서 옮길 수 있다. null = 기본 위치(좌측 하단).
+  const [infoCardPos, setInfoCardPos] = useState<{ x: number; y: number } | null>(null);
+  const infoCardRef = useRef<HTMLDivElement | null>(null);
+  // 카드 머리 mousedown → window mousemove/mouseup 으로 드래그 추적.
+  function onInfoCardDragStart(e: React.MouseEvent) {
+    const card = infoCardRef.current;
+    if (!card) return;
+    e.preventDefault();
+    // 현재 화면상 위치(부모 기준)를 시작점으로 — 기본 위치(bottom 고정)에서도 자연스럽게 전환
+    const parent = card.offsetParent as HTMLElement | null;
+    const parentRect = parent?.getBoundingClientRect();
+    const rect = card.getBoundingClientRect();
+    const origX = rect.left - (parentRect?.left ?? 0);
+    const origY = rect.top - (parentRect?.top ?? 0);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const onMove = (ev: MouseEvent) => {
+      setInfoCardPos({
+        x: origX + (ev.clientX - startX),
+        y: origY + (ev.clientY - startY),
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
   // 행정리 목록 패널 (행정리명/부호/비고 테이블, 더블클릭 → 위치 이동)
   const [riListOpen, setRiListOpen] = useState(false);
 
@@ -373,20 +402,69 @@ export default function InspectPage() {
 
   function onSelectCard(id: number) {
     setSelectedId(id);
-    // Extent×1.5 줌 — MVP 로 단순히 해당 geometry 의 fit 사용
     const m = mapHandleRef.current?.getMap();
     if (!m) return;
     const it = items.find((x) => x.id === id);
     if (!it) return;
-    // TODO: kind=attr 인 경우 intersect 폴리곤 extent
     const ext = extentOf(it.geometry);
     if (!ext) return;
     m.getView().fit(
       [
         ...projectExtentToWebMerc(ext),
       ],
-      { padding: [80, 80, 80, 80], duration: 400, maxZoom: 17 }
+      {
+        padding: [80, 80, 80, 80],
+        duration: 400,
+        maxZoom: 17,
+        // 이동이 끝나면: 선/점 강조(highlightId)는 유지된 채,
+        // 겹치는 행정리 폴리곤들을 노란 펄스로 잠시 깜빡여 영향 범위를 보여준다.
+        callback: () =>
+          mapHandleRef.current?.flashIntersectingBoundaries(id),
+      }
     );
+  }
+
+  // 공간정보 다운로드 — 라인등록/삭제표기/속성등록 수정요청을 종류별 GeoJSON 파일로
+  // 저장(QGIS 에 드래그하면 바로 열림). 현재 패널 필터(상태)에 보이는 것만 대상.
+  function onDownloadMarkup() {
+    if (!admin) return;
+    const targets: Array<{ kind: MarkupKind; label: string }> = [
+      { kind: 'add', label: '라인등록' },
+      { kind: 'delete_mark', label: '삭제표기' },
+      { kind: 'attr', label: '속성등록' },
+    ];
+    const visibleItems = items.filter((i) => filter[i.status]);
+    let fileCount = 0;
+    targets.forEach(({ kind, label }, idx) => {
+      const feats = visibleItems.filter((i) => i.kind === kind);
+      if (!feats.length) return;
+      const fc = {
+        type: 'FeatureCollection',
+        // QGIS 속성 테이블에서 바로 읽히도록 attrs 를 평탄화해서 담는다.
+        features: feats.map((i) => ({
+          type: 'Feature',
+          geometry: i.geometry,
+          properties: {
+            id: i.id,
+            kind: i.kind,
+            status: i.status,
+            ri_nm: (i.attrs?.ri_nm as string | undefined) ?? null,
+            ri_cd: (i.attrs?.ri_cd as string | undefined) ?? null,
+            note: (i.attrs?.note as string | undefined) ?? null,
+            created_by: i.created_by,
+            created_at: i.created_at,
+          },
+        })),
+      };
+      // 브라우저가 연속 다운로드를 막지 않도록 파일 간 약간의 시차를 둔다.
+      window.setTimeout(() => {
+        downloadJson(fc, `수정요청_${label}_${admin.adm_cd}.geojson`);
+      }, idx * 300);
+      fileCount++;
+    });
+    if (fileCount === 0) {
+      alert('다운로드할 수정요청이 없습니다 (라인등록/삭제표기/속성등록).');
+    }
   }
 
   // 행정리 목록 행 더블클릭 → 해당 행정리 영역으로 화면 이동 후 노란 펄스 플래시
@@ -450,7 +528,8 @@ export default function InspectPage() {
             onPickMarkup={(id) => setDeleteTargetId(id)}
             onPickMarkupMany={(ids) => setDeleteManyIds(ids)}
             onPickBoundary={(p) => setBoundaryInfo(p as BoundaryProps | null)}
-            highlightId={deleteTargetId}
+            // 삭제 대상 또는 패널에서 선택한 카드의 마크업을 노란 강조 표시
+            highlightId={deleteTargetId ?? selectedId}
           />
           {tool && pendingGeom == null && (
             <DrawHint
@@ -463,10 +542,23 @@ export default function InspectPage() {
               onExit={() => setTool(null)}
             />
           )}
-          {/* 경계 클릭 정보 카드 — 행정리 속성 + QGIS 작업자 비고(remark) */}
+          {/* 경계 클릭 정보 카드 — 행정리 속성 + QGIS 작업자 비고(remark).
+              머리 부분을 드래그하면 원하는 위치로 옮길 수 있다. */}
           {tool == null && boundaryInfo && (
-            <div style={styles.infoCard}>
-              <div style={styles.infoHead}>
+            <div
+              ref={infoCardRef}
+              style={{
+                ...styles.infoCard,
+                ...(infoCardPos
+                  ? { left: infoCardPos.x, top: infoCardPos.y, bottom: 'auto' }
+                  : {}),
+              }}
+            >
+              <div
+                style={styles.infoHead}
+                onMouseDown={onInfoCardDragStart}
+                title="드래그해서 이동"
+              >
                 <b>
                   {boundaryInfo.ri_nm || '(행정리명 없음)'}
                   {boundaryInfo.ri_cd ? ` · ${boundaryInfo.ri_cd}` : ''}
@@ -475,6 +567,7 @@ export default function InspectPage() {
                   type="button"
                   style={styles.infoClose}
                   onClick={() => setBoundaryInfo(null)}
+                  onMouseDown={(e) => e.stopPropagation()}
                 >
                   ✕
                 </button>
@@ -503,6 +596,7 @@ export default function InspectPage() {
           onSelect={onSelectCard}
           onApply={onApply}
           onReject={(id) => setRejectId(id)}
+          onDownload={onDownloadMarkup}
           canProcess={isMaster}
           loading={loading}
         />
@@ -597,6 +691,21 @@ const KIND_LABEL: Record<MarkupKind, string> = {
   delete_mark: '삭제표기',
 };
 
+// GeoJSON 객체 → 파일 다운로드 (브라우저 메모리에서 생성, 서버 요청 없음)
+function downloadJson(obj: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], {
+    type: 'application/geo+json',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // Geometry → bbox [minX,minY,maxX,maxY] (lon/lat 좌표 기준)
 function extentOf(g: GjGeometry): [number, number, number, number] | null {
   let xmin = Infinity, ymin = Infinity, xmax = -Infinity, ymax = -Infinity;
@@ -661,6 +770,8 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     alignItems: 'center',
     fontSize: 13,
+    cursor: 'move',          // 머리 부분 드래그로 카드 이동
+    userSelect: 'none',
   },
   infoClose: {
     border: 'none',

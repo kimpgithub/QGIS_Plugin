@@ -11,6 +11,8 @@ type Props = {
   // 작업자(master) 처리 — 반영(QGIS 수정 완료 선언) / 반려(사유)
   onApply: (id: number) => void;
   onReject: (id: number) => void;
+  // 라인등록/삭제표기/속성등록 공간정보를 GeoJSON 으로 다운로드 (QGIS 작업용)
+  onDownload?: () => void;
   canProcess?: boolean;
   loading?: boolean;
 };
@@ -29,6 +31,7 @@ export default function MarkupPanel({
   onSelect,
   onApply,
   onReject,
+  onDownload,
   canProcess,
   loading,
 }: Props) {
@@ -40,7 +43,19 @@ export default function MarkupPanel({
   return (
     <div style={styles.box}>
       <div style={styles.head}>
-        <div style={styles.title}>수정요청</div>
+        <div style={styles.titleRow}>
+          <div style={styles.title}>수정요청</div>
+          {onDownload && (
+            <button
+              type="button"
+              style={styles.dlBtn}
+              onClick={onDownload}
+              title="라인등록/삭제표기/속성등록을 GeoJSON 파일로 저장 (QGIS에서 바로 열림)"
+            >
+              ⬇ 공간정보
+            </button>
+          )}
+        </div>
         <div style={styles.filters}>
           {FILTER_ROWS.map((r) => (
             <label key={r.key} style={styles.flbl}>
@@ -94,7 +109,21 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: 8,
   },
+  titleRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
   title: { fontSize: 13, fontWeight: 600, color: '#1f2937' },
+  dlBtn: {
+    padding: '3px 10px',
+    border: '1px solid #c9ced6',
+    background: '#fff',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    color: '#374151',
+  },
   filters: { display: 'flex', gap: 12 },
   flbl: {
     display: 'flex',
