@@ -351,7 +351,8 @@ export default function InspectPage() {
   // 반려 — 사유 입력 모달 대상 id
   const [rejectId, setRejectId] = useState<number | null>(null);
 
-  // QGIS 작업 결과 자동 동기화 — 30초 주기로 markup/boundary 재조회.
+  // 자동 동기화 — 3분 주기로 markup/boundary 재조회.
+  // (QGIS 경계 제출, 다른 사용자의 요청/처리 결과를 수동 새로고침 없이 반영)
   // 그리기·모달 진행 중에는 건너뛰어 작업 흐름을 방해하지 않는다.
   const idle =
     tool == null &&
@@ -364,7 +365,7 @@ export default function InspectPage() {
     const t = window.setInterval(() => {
       reloadMarkup();
       reloadBoundary();
-    }, 30_000);
+    }, 180_000);
     return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [admin, idle]);
