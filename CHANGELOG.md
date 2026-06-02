@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-06-02 — 정식 도메인 https://www.kosisgis.kr 개통 (Caddy HTTPS 종단)
+
+전국 단위 공개를 위해 Tailscale Funnel 대신 정식 도메인으로 접속하는 경로를 신설.
+기존 compose 스택은 손대지 않고, 그 앞단에 HTTPS 종단 계층(Caddy)을 별도 컨테이너로 추가.
+
+```
+인터넷 → 공유기(443 포워딩) → 192.168.0.105:443 Caddy → 127.0.0.1:8080 기존 nginx
+```
+
+- **`server/caddy/` 신설** — Caddyfile + 운영 README. 운영 경로는 `/srv/gis/caddy/`.
+- 인증서: Let's Encrypt 자동 발급/갱신. 80 포트가 다른 서비스(geoband)에 점유되어 있어
+  **TLS-ALPN-01**(443만 사용) 챌린지로 발급 — `http://` 접속 불가, `https://` 필수.
+- 443 은 tailscaled 와의 충돌을 피해 사내망 IP(192.168.0.105)에만 바인딩.
+- 도메인: kosisgis.kr (가비아), A 레코드 www → 180.71.194.230 (SK브로드밴드 고정 IP).
+- Tailscale Funnel(gis-hq.tail3b9b19.ts.net)은 당분간 병행 유지 — 같은 백엔드의 두 번째 출입구.
+- 이번 세션에 DB 수정요청(markup) 데이터 전체 초기화도 수행 (운영 데이터 작업, 코드 변경 없음).
+
 ## 2026-06-01 — 웹 UX 개선 5종: 카드 하이라이트·attr 라벨·모달 드래그·GeoJSON 다운로드·겹침 플래시
 
 - **카드 클릭 → 지도 하이라이트** — 수정요청 카드를 클릭하면 지도 이동과 함께

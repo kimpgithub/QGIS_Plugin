@@ -1,0 +1,16 @@
+# kosisgis.kr HTTPS 종단 — Let's Encrypt 자동 발급/갱신 (TLS-ALPN-01, 443만 사용)
+#
+# 구조: 인터넷 → 공유기(443 포워딩) → 192.168.0.105:443 (Caddy) → 127.0.0.1:8080 (기존 nginx 컨테이너)
+# 80 포트는 공유기에서 다른 서비스(geoband)로 가므로 HTTP-01 챌린지는 불가 — TLS-ALPN-01 사용.
+#
+# 주의: 443 을 0.0.0.0 에 바인딩하면 tailscaled(100.106.19.100:443)와 충돌하므로
+#       사내망 IP 에만 바인딩한다.
+{
+	default_bind 192.168.0.105
+	# 80 포트는 외부에서 안 들어오므로 HTTP 리다이렉트 리스너 불필요
+	auto_https disable_redirects
+}
+
+www.kosisgis.kr {
+	reverse_proxy 127.0.0.1:8080
+}
