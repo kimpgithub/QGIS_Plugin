@@ -62,7 +62,7 @@ class ServerConnectionTab(QWidget):
         api_box = QGroupBox('API (경계 제출 / COG 등록)')
         api_form = QFormLayout(api_box)
         self.base_url = QLineEdit()
-        self.base_url.setPlaceholderText('https://<funnel-host>')
+        self.base_url.setPlaceholderText('https://www.kosisgis.kr')
         self.api_token = QLineEdit()
         self.api_token.setEchoMode(QLineEdit.Password)
         self.api_token.setPlaceholderText('서버에서 발급한 플러그인 API 토큰')

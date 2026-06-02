@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-02 — 플러그인 서버 주소 자동 마이그레이션 (구 Funnel → 정식 도메인)
+
+작업자 PC 의 QSettings 에 구 Tailscale Funnel 주소가 저장돼 있으면 연결 테스트가
+계속 구 주소로 나가던 문제. `load_config()` 가 구 주소(`LEGACY_BASE_URLS`)를
+감지하면 `https://www.kosisgis.kr` 로 자동 치환 후 재저장 — 작업자 수동 조치 불필요.
+서버 URL 입력칸 placeholder 도 정식 도메인으로 교체.
+
 ## 2026-06-02 — 행정리 목록: 기본 "비고 있음"만 표시 + [전체] 토글
 
 행정리 목록 패널이 열릴 때 비고(remark)가 있는 행정리만 기본 표시 — 작업자

@@ -15,8 +15,9 @@ from dataclasses import dataclass, asdict
 SETTINGS_PREFIX = 'gis_scan_tools/server'
 
 # 정식 도메인 (Caddy HTTPS 종단, Let's Encrypt 자동 갱신).
-# 구 Tailscale Funnel 주소(gis-hq.tail3b9b19.ts.net)도 당분간 병행 동작.
 DEFAULT_BASE_URL = 'https://www.kosisgis.kr'
+# 구 주소 — QSettings 에 저장돼 있으면 load_config() 가 정식 도메인으로 자동 치환.
+LEGACY_BASE_URLS = ('https://gis-hq.tail3b9b19.ts.net',)
 DEFAULT_BUCKET = 'gis-scan'
 HTTP_TIMEOUT = 30          # 일반 API 호출
 UPLOAD_TIMEOUT = 600       # 대용량 업로드
@@ -25,7 +26,7 @@ UPLOAD_TIMEOUT = 600       # 대용량 업로드
 @dataclass
 class ServerConfig:
     """서버 연결 설정 — QSettings 저장."""
-    base_url: str = DEFAULT_BASE_URL      # 예: https://<funnel-host>
+    base_url: str = DEFAULT_BASE_URL      # 예: https://www.kosisgis.kr
     api_token: str = ''                   # /api Bearer 토큰
     s3_access_key: str = ''               # MinIO write 키
     s3_secret_key: str = ''
@@ -55,13 +56,21 @@ def save_config(cfg):
 
 
 def load_config():
-    """QSettings 에서 로드. 없으면 기본값."""
+    """QSettings 에서 로드. 없으면 기본값.
+
+    구 서버 주소(Tailscale Funnel)가 저장돼 있으면 정식 도메인으로 자동 치환 후
+    다시 저장 — 작업자 PC 에서 수동으로 주소를 바꿀 필요 없음.
+    """
     from qgis.PyQt.QtCore import QSettings
     s = QSettings()
     d = {}
     for k, default in ServerConfig().as_dict().items():
         d[k] = s.value(f'{SETTINGS_PREFIX}/{k}', default)
-    return ServerConfig.from_dict(d)
+    cfg = ServerConfig.from_dict(d)
+    if cfg.base_url.rstrip('/') in LEGACY_BASE_URLS:
+        cfg.base_url = DEFAULT_BASE_URL
+        save_config(cfg)
+    return cfg
 
 
 # ----- 내부 헬퍼 -----
