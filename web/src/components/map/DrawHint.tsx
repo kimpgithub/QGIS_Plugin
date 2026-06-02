@@ -7,7 +7,6 @@ type Props = {
   kind: MarkupKind;
   drawing: boolean;       // drawstart~drawend 사이 (그리는 중)
   isLine: boolean;        // 라인 툴(add)만 점 취소 노출
-  eraseMode?: boolean;    // 라인삭제 = 마크업 선택·삭제 모드 (그리기 아님)
   onUndoPoint: () => void;
   onAbort: () => void;    // 그리던 도형 전체 취소
   onExit: () => void;     // 툴 종료(비활성)
@@ -24,29 +23,11 @@ export default function DrawHint({
   kind,
   drawing,
   isLine,
-  eraseMode,
   onUndoPoint,
   onAbort,
   onExit,
 }: Props) {
   const label = KIND_LABEL[kind];
-
-  // 삭제모드: 그리기가 아니라 마크업 클릭 선택 — 안내만 다르게, 버튼은 [툴 종료].
-  if (eraseMode) {
-    return (
-      <div style={styles.bar}>
-        <span style={styles.icon}>🗑</span>
-        <span style={styles.guide}>
-          {label} — 클릭으로 1건, Ctrl+드래그로 여러 건 선택해 삭제
-        </span>
-        <div style={styles.btns}>
-          <button type="button" style={styles.btn} onClick={onExit} title="Esc">
-            ✕ 툴 종료
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   let guide: string;
   if (kind === 'delete_mark') {

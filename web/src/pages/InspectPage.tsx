@@ -195,9 +195,7 @@ export default function InspectPage() {
     activeToolRef.current?.detach();
     activeToolRef.current = null;
     setDrawing(false);
-    // 라인삭제(delete)는 그리기가 아니라 마크업 선택·삭제 모드 — Draw 미부착.
-    // MapView 의 eraseMode 가 hit-test 클릭을 처리한다.
-    if (!tool || tool === 'delete') return;
+    if (!tool) return;
     // 삭제표기(delete_mark)는 행정리경계에 스냅해 경계선을 따라 그림.
     const snapSrc =
       tool === 'delete_mark'
@@ -217,7 +215,7 @@ export default function InspectPage() {
     };
   }, [tool, handleToolComplete]);
 
-  // 삭제모드에서 클릭된 마크업 id (삭제 확인 모달 대상)
+  // [요청삭제] 대상 마크업 id — 수정요청 카드 버튼 클릭 → 확인 모달을 거쳐 삭제
   const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null);
   const deleteTarget = useMemo(
     () => items.find((x) => x.id === deleteTargetId) ?? null,
@@ -246,29 +244,6 @@ export default function InspectPage() {
     }
   }
 
-  // Ctrl+드래그 박스로 고른 다중 삭제 대상 id 목록 (일괄 삭제 확인 모달)
-  const [deleteManyIds, setDeleteManyIds] = useState<number[] | null>(null);
-
-  async function onConfirmDeleteMany() {
-    const ids = deleteManyIds;
-    if (!ids || !ids.length) {
-      setDeleteManyIds(null);
-      return;
-    }
-    // 일부는 applied(409)/권한(403) 으로 실패할 수 있음 — 개별 처리 후 실패 id 명시.
-    const results = await Promise.allSettled(ids.map((id) => deleteMarkup(id)));
-    const ok = results.filter((r) => r.status === 'fulfilled').length;
-    const failedIds = ids.filter((_, i) => results[i].status === 'rejected');
-    await reloadMarkup();
-    setDeleteManyIds(null);
-    if (failedIds.length > 0) {
-      alert(
-        `${ok}건 삭제, ${failedIds.length}건 실패 — #${failedIds.join(', #')}\n` +
-          '(이미 반영됐거나 권한이 없는 요청)'
-      );
-    }
-  }
-
   // 그리기 단축키: Backspace=마지막 점 취소, Esc=그리던 도형 취소(없으면 툴 종료).
   // 입력란 포커스 중에는 무시 (저장 모달 textarea 등).
   useEffect(() => {
@@ -278,12 +253,7 @@ export default function InspectPage() {
       const tag = t?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
       // 저장/삭제확인 모달이 떠 있으면 그리기 단축키 비활성
-      if (
-        pendingGeom != null ||
-        deleteTargetId != null ||
-        deleteManyIds != null
-      )
-        return;
+      if (pendingGeom != null || deleteTargetId != null) return;
       const at = activeToolRef.current;
       if (!at) return;
       if (e.key === 'Backspace') {
@@ -299,7 +269,7 @@ export default function InspectPage() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [tool, drawing, pendingGeom, deleteTargetId, deleteManyIds]);
+  }, [tool, drawing, pendingGeom, deleteTargetId]);
 
   // 저장 모달 콜백 — attr(속성등록)는 행정리명/부호도 같은 모달에서 함께 받는다.
   async function onSavePending(
@@ -358,8 +328,7 @@ export default function InspectPage() {
     tool == null &&
     pendingGeom == null &&
     rejectId == null &&
-    deleteTargetId == null &&
-    deleteManyIds == null;
+    deleteTargetId == null;
   useEffect(() => {
     if (!admin || !idle) return;
     const t = window.setInterval(() => {
@@ -524,10 +493,7 @@ export default function InspectPage() {
             boundary={boundary}
             markup={markupFC}
             onMapReady={(h) => (mapHandleRef.current = h)}
-            eraseMode={tool === 'delete'}
             infoMode={tool == null}
-            onPickMarkup={(id) => setDeleteTargetId(id)}
-            onPickMarkupMany={(ids) => setDeleteManyIds(ids)}
             onPickBoundary={(p) => setBoundaryInfo(p as BoundaryProps | null)}
             // 삭제 대상 또는 패널에서 선택한 카드의 마크업을 노란 강조 표시
             highlightId={deleteTargetId ?? selectedId}
@@ -537,7 +503,6 @@ export default function InspectPage() {
               kind={tool}
               drawing={drawing}
               isLine={tool === 'add' || tool === 'delete_mark'}
-              eraseMode={tool === 'delete'}
               onUndoPoint={() => activeToolRef.current?.removeLastPoint()}
               onAbort={() => activeToolRef.current?.abort()}
               onExit={() => setTool(null)}
@@ -597,6 +562,11 @@ export default function InspectPage() {
           onSelect={onSelectCard}
           onApply={onApply}
           onReject={(id) => setRejectId(id)}
+          // [요청삭제] — 카드를 선택(지도 강조)하면서 확인 모달을 띄운다
+          onDelete={(id) => {
+            setSelectedId(id);
+            setDeleteTargetId(id);
+          }}
           onDownload={onDownloadMarkup}
           canProcess={isMaster}
           loading={loading}
@@ -624,6 +594,7 @@ export default function InspectPage() {
         }}
       />
 
+      {/* [요청삭제] 확인 모달 — 바로 지우지 않고 한 번 더 확인받는다 */}
       <Modal
         open={deleteTargetId != null}
         title="수정요청 삭제"
@@ -631,8 +602,10 @@ export default function InspectPage() {
         width={400}
       >
         <div style={styles.delQ}>
-          선택한 수정요청{deleteTarget ? ` (#${deleteTarget.id} · ${KIND_LABEL[deleteTarget.kind]})` : ''}을(를)
-          삭제하시겠습니까?
+          정말 삭제하시겠습니까?
+          {deleteTarget
+            ? ` 선택한 수정요청 (#${deleteTarget.id} · ${KIND_LABEL[deleteTarget.kind]})이(가) 삭제됩니다.`
+            : ''}
         </div>
         <div style={styles.delNote}>
           삭제하면 복구할 수 없습니다. 대기·반려 요청만 삭제됩니다(반영된 요청 제외).
@@ -647,37 +620,6 @@ export default function InspectPage() {
           </button>
           <button type="button" style={styles.delConfirm} onClick={onConfirmDelete}>
             삭제
-          </button>
-        </div>
-      </Modal>
-
-      <Modal
-        open={deleteManyIds != null}
-        title="수정요청 일괄 삭제"
-        onClose={() => setDeleteManyIds(null)}
-        width={400}
-      >
-        <div style={styles.delQ}>
-          선택한 {deleteManyIds?.length ?? 0}건의 수정요청을 삭제하시겠습니까?
-        </div>
-        <div style={styles.delNote}>
-          Ctrl+드래그로 선택한 범위입니다. 대기·반려 요청만 삭제되고
-          반영된 요청은 건너뜁니다.
-        </div>
-        <div style={styles.delActions}>
-          <button
-            type="button"
-            style={styles.delCancel}
-            onClick={() => setDeleteManyIds(null)}
-          >
-            취소
-          </button>
-          <button
-            type="button"
-            style={styles.delConfirm}
-            onClick={onConfirmDeleteMany}
-          >
-            삭제 ({deleteManyIds?.length ?? 0}건)
           </button>
         </div>
       </Modal>

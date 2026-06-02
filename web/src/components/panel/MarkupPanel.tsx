@@ -11,6 +11,8 @@ type Props = {
   // 작업자(master) 처리 — 반영(QGIS 수정 완료 선언) / 반려(사유)
   onApply: (id: number) => void;
   onReject: (id: number) => void;
+  // [요청삭제] — 확인 모달을 거쳐 삭제
+  onDelete: (id: number) => void;
   // 라인등록/삭제표기/속성등록 공간정보를 GeoJSON 으로 다운로드 (QGIS 작업용)
   onDownload?: () => void;
   canProcess?: boolean;
@@ -31,6 +33,7 @@ export default function MarkupPanel({
   onSelect,
   onApply,
   onReject,
+  onDelete,
   onDownload,
   canProcess,
   loading,
@@ -85,6 +88,7 @@ export default function MarkupPanel({
             onClick={() => onSelect(m.id)}
             onApply={() => onApply(m.id)}
             onReject={() => onReject(m.id)}
+            onDelete={() => onDelete(m.id)}
           />
         ))}
       </div>

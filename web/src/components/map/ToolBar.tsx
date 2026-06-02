@@ -12,9 +12,10 @@ type Props = {
   onLogout?: () => void;
 };
 
+// '라인삭제'(delete) 툴은 혼동을 일으켜 제거 — 요청 삭제는 수정요청 카드의
+// [요청삭제] 버튼으로 이동 (MarkupCard).
 const BTNS: { id: Exclude<ToolId, null>; label: string }[] = [
   { id: 'add', label: '라인등록' },
-  { id: 'delete', label: '라인삭제' },
   { id: 'delete_mark', label: '삭제표기' },
   { id: 'attr', label: '속성등록' },
 ];

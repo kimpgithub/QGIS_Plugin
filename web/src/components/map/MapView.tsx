@@ -8,8 +8,6 @@ import VectorSource from 'ol/source/Vector';
 import GeoJSON from 'ol/format/GeoJSON';
 import { Style, Stroke, Circle as CircleStyle, Fill, Text } from 'ol/style';
 import { transformExtent } from 'ol/proj';
-import DragBox from 'ol/interaction/DragBox';
-import { platformModifierKeyOnly } from 'ol/events/condition';
 import type { MapBrowserEvent } from 'ol';
 import type Feature from 'ol/Feature';
 import type { FeatureLike } from 'ol/Feature';
@@ -49,10 +47,7 @@ type Props = {
   markup?: MarkupCollection | null;              // 수정요청 레이어
   visible: LayerVisibility;
   onMapReady?: (handle: MapHandle) => void;
-  eraseMode?: boolean;                           // 라인삭제 = 마크업 선택·삭제 모드
   infoMode?: boolean;                            // 툴 비활성 상태 = 경계 클릭으로 정보(비고) 확인
-  onPickMarkup?: (id: number) => void;           // 삭제모드에서 마크업 클릭 시 id 전달
-  onPickMarkupMany?: (ids: number[]) => void;    // Ctrl+드래그 박스 안 마크업 id 목록
   // 정보모드에서 행정리경계 클릭 시 properties 전달 (빈 곳 클릭 = null → 카드 닫기)
   onPickBoundary?: (props: Record<string, unknown> | null) => void;
   highlightId?: number | null;                   // 강조 표시할 마크업 id (삭제 대상)
@@ -72,10 +67,7 @@ export default function MapView({
   markup,
   visible,
   onMapReady,
-  eraseMode,
   infoMode,
-  onPickMarkup,
-  onPickMarkupMany,
   onPickBoundary,
   highlightId,
 }: Props) {
@@ -138,10 +130,11 @@ export default function MapView({
     boundarySrcRef.current = boundarySrc;
     const boundaryLayer = new VectorLayer({
       source: boundarySrc,
-      style: new Style({
-        stroke: new Stroke({ color: '#f59e0b', width: 2 }),
-        fill: new Fill({ color: 'rgba(245,158,11,0.04)' }),
-      }),
+      // 데이터에 기입력된 행정리명·부호(ri_nm/ri_cd)가 있으면 폴리곤 안에 라벨 표시.
+      // 속성등록(파랑) 라벨과 구분되도록 갈색 계열. 줌이 멀면(resolution 큼) 숨김.
+      style: (feat, resolution) => styleBoundary(feat, resolution),
+      // 라벨 겹침 자동 처리 — 겹치는 텍스트는 OL 이 알아서 숨긴다 (선·채움은 영향 없음)
+      declutter: true,
     });
     boundaryLayerRef.current = boundaryLayer;
 
@@ -151,6 +144,10 @@ export default function MapView({
       source: markupSrc,
       // highlightIdRef 를 클로저로 읽어, 선택된 마크업을 강조 스타일로 렌더.
       style: (feat) => styleMarkup(feat, highlightIdRef.current),
+      // 속성등록 라벨끼리(또는 행정리 라벨과) 겹치면 자동으로 숨김.
+      // markup 레이어가 boundary 보다 위(나중 추가) → 같은 declutter 그룹에서
+      // 수정요청 라벨이 행정리 라벨보다 우선 표시된다.
+      declutter: true,
     });
     markupLayerRef.current = markupLayer;
 
@@ -384,15 +381,7 @@ export default function MapView({
     cogRef.current?.setVisible(visible.cog && !!cogTileUrl);
   }, [visible, cogTileUrl]);
 
-  // 콜백을 ref 로 보관 — eraseMode 효과가 콜백 변경마다 재바인딩되지 않게.
-  const onPickRef = useRef(onPickMarkup);
-  useEffect(() => {
-    onPickRef.current = onPickMarkup;
-  }, [onPickMarkup]);
-  const onPickManyRef = useRef(onPickMarkupMany);
-  useEffect(() => {
-    onPickManyRef.current = onPickMarkupMany;
-  }, [onPickMarkupMany]);
+  // 콜백을 ref 로 보관 — infoMode 효과가 콜백 변경마다 재바인딩되지 않게.
   const onPickBoundaryRef = useRef(onPickBoundary);
   useEffect(() => {
     onPickBoundaryRef.current = onPickBoundary;
@@ -431,60 +420,6 @@ export default function MapView({
     markupLayerRef.current?.changed();
   }, [highlightId]);
 
-  // 라인삭제(삭제모드):
-  //  - 단일: 마크업 레이어 위 피처를 클릭하면 id 를 호출부에 전달(확인 모달).
-  //  - 다중: Ctrl(⌘)+드래그 박스 안의 마크업 id 목록을 전달(일괄 삭제 확인).
-  //    (맨 드래그는 지도 이동과 겹치므로 modifier 를 요구)
-  // 그리기(Draw) 대신 hit-test/extent 로 동작. 커서는 pointer 로.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !eraseMode) return;
-    const el = map.getTargetElement() as HTMLElement | null;
-    if (el) el.style.cursor = 'pointer';
-
-    const onClick = (evt: MapBrowserEvent) => {
-      let pickedId: number | null = null;
-      map.forEachFeatureAtPixel(
-        evt.pixel,
-        (feat: FeatureLike) => {
-          const id = feat.get('id');
-          if (id != null) {
-            pickedId = Number(id);
-            return true;
-          }
-          return false;
-        },
-        {
-          layerFilter: (l: BaseLayer) => l === markupLayerRef.current,
-          hitTolerance: 6,
-        }
-      );
-      if (pickedId != null) onPickRef.current?.(pickedId);
-    };
-    map.on('singleclick', onClick);
-
-    // Ctrl+드래그 박스 다중 선택.
-    const dragBox = new DragBox({ condition: platformModifierKeyOnly });
-    map.addInteraction(dragBox);
-    dragBox.on('boxend', () => {
-      const src = markupSrcRef.current;
-      if (!src) return;
-      const ext = dragBox.getGeometry().getExtent();
-      const ids: number[] = [];
-      src.forEachFeatureIntersectingExtent(ext, (f) => {
-        const id = f.get('id');
-        if (id != null) ids.push(Number(id));
-      });
-      if (ids.length) onPickManyRef.current?.(ids);
-    });
-
-    return () => {
-      map.un('singleclick', onClick);
-      map.removeInteraction(dragBox);
-      if (el) el.style.cursor = '';
-    };
-  }, [eraseMode]);
-
   return <div ref={ref} style={{ width: '100%', height: '100%' }} />;
 }
 
@@ -508,6 +443,37 @@ function sampleCoords(geom: Point | LineString): Coordinate[] {
     }
   }
   return out;
+}
+
+// 행정리경계 스타일 — 주황 외곽선 + (있으면) 기입력된 행정리명·부호 라벨.
+// 라벨은 속성등록(파랑) 요청 라벨과 구분되도록 갈색(#92400e).
+// 줌이 멀면(해상도 > 20m/px ≈ 줌 13 미만) 라벨을 숨겨 글자 뒤엉킴 방지 —
+// 가까이 들어가면 declutter 가 남은 겹침을 자동 정리한다.
+const BOUNDARY_LABEL_MAX_RESOLUTION = 20;
+
+function styleBoundary(
+  feature: FeatureLike,
+  resolution: number
+): Style {
+  const riNm = String(feature.get('ri_nm') ?? '').trim();
+  const riCd = String(feature.get('ri_cd') ?? '').trim();
+  const label = [riNm, riCd].filter(Boolean).join(' · ');
+  const showLabel = !!label && resolution < BOUNDARY_LABEL_MAX_RESOLUTION;
+  return new Style({
+    stroke: new Stroke({ color: '#f59e0b', width: 2 }),
+    fill: new Fill({ color: 'rgba(245,158,11,0.04)' }),
+    text: showLabel
+      ? new Text({
+          text: label,
+          font: '12px sans-serif',
+          fill: new Fill({ color: '#92400e' }),
+          // 흰 외곽선 — 배경지도/스캔이미지 위에서도 가독
+          stroke: new Stroke({ color: '#ffffff', width: 3 }),
+          // 폴리곤 안에 들어가는 경우만 표시 (overflow 끔 → 작은 폴리곤에서 숨김)
+          overflow: false,
+        })
+      : undefined,
+  });
 }
 
 // kind 별 스타일 (라인등록=파랑, 라인삭제=빨강, 속성등록=파란점, 삭제표기=빨간X).

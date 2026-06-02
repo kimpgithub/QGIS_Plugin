@@ -36,6 +36,8 @@ type Props = {
   onApply?: () => void;
   // 수행 불가/오요청 [반려] (사유 입력 모달)
   onReject?: () => void;
+  // [요청삭제] — 확인 모달을 거쳐 삭제 (반영된 요청은 버튼 숨김)
+  onDelete?: () => void;
 };
 
 export default function MarkupCard({
@@ -45,6 +47,7 @@ export default function MarkupCard({
   onClick,
   onApply,
   onReject,
+  onDelete,
 }: Props) {
   const note =
     (item.attrs?.note as string | undefined) ?? defaultNote(item.kind);
@@ -55,12 +58,28 @@ export default function MarkupCard({
       onClick={onClick}
     >
       <div style={styles.head}>
-        <span style={{ ...styles.badge, background: KIND_COLOR[item.kind] }}>
-          [{KIND_LABEL[item.kind]}]
-        </span>
-        <span style={{ ...styles.statusBadge, color: STATUS_COLOR[item.status] }}>
-          {STATUS_LABEL[item.status]}
-        </span>
+        {/* 종류 배지 바로 옆에 상태 텍스트 — 오른쪽 자리는 [요청삭제] 버튼 */}
+        <div style={styles.headLeft}>
+          <span style={{ ...styles.badge, background: KIND_COLOR[item.kind] }}>
+            [{KIND_LABEL[item.kind]}]
+          </span>
+          <span style={{ ...styles.statusBadge, color: STATUS_COLOR[item.status] }}>
+            {STATUS_LABEL[item.status]}
+          </span>
+        </div>
+        {/* 반영된 요청은 삭제 불가(서버 409) — 버튼 자체를 숨긴다 */}
+        {onDelete && item.status !== 'applied' && (
+          <button
+            type="button"
+            style={styles.btnDelete}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+          >
+            요청삭제
+          </button>
+        )}
       </div>
       <div style={styles.body}>요청: {note}</div>
       <div style={styles.meta}>
@@ -144,6 +163,20 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     alignItems: 'center',
     fontSize: 11,
+  },
+  headLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+  btnDelete: {
+    padding: '2px 8px',
+    border: '1px solid #fca5a5',
+    background: '#fff',
+    color: '#dc2626',
+    borderRadius: 3,
+    fontSize: 11,
+    cursor: 'pointer',
   },
   badge: {
     color: '#fff',
