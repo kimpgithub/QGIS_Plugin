@@ -32,9 +32,11 @@ CREATE TABLE IF NOT EXISTS boundary (
 );
 CREATE INDEX IF NOT EXISTS boundary_geom_idx ON boundary USING GIST (geom);
 CREATE INDEX IF NOT EXISTS boundary_adm_idx  ON boundary (adm_cd);
--- upsert 키 (adm_cd, ri_cd) DB 무결성 — ri_cd NULL 은 '' 와 동일 취급
+-- 실제 부호(ri_cd)는 읍면 안에서 유일 강제. 빈 부호(NULL/'')는 여러 개 허용
+-- (저장은 읍면 단위 전체 교체 방식이라 upsert 키가 필요 없음).
 CREATE UNIQUE INDEX IF NOT EXISTS boundary_adm_ri_uniq
-    ON boundary (adm_cd, COALESCE(ri_cd, ''));
+    ON boundary (adm_cd, ri_cd)
+    WHERE ri_cd IS NOT NULL AND btrim(ri_cd) <> '';
 
 -- ---------------------------------------------------------------- cog_catalog
 -- merged COG 등록부: 대전 플러그인이 업로드 후 insert, 검수 웹이 read

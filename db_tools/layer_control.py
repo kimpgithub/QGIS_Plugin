@@ -224,69 +224,6 @@ def boundary_to_geojson(layer):
     return fc
 
 
-def ensure_unique_ri_cd(fc):
-    """admin 안에서 ri_cd 가 비었거나 중복이면 3자리 일련번호 자동 부여.
-
-    서버 boundary upsert 키가 (adm_cd, ri_cd) 라서, 한 읍면 안에서 ri_cd 가
-    유일하지 않으면 폴리곤들이 같은 행으로 뭉개져 데이터가 손실된다
-    (ri_cd 전부 NULL → 마지막 1개만 생존). 이를 막기 위해:
-
-    - 읍면 안에서 *딱 한 번만* 나타나는 실제 ri_cd 는 그대로 보존
-    - 빈 값 / 중복되는 ri_cd 는 미사용 일련번호('001','002'…)로 채움
-
-    fc 를 in-place 수정하고 자동부여한 피처 수를 반환한다. ri_nm 은 건드리지
-    않음 (실제 이름은 사용자가 채워야 하므로).
-    """
-    from collections import Counter
-    feats = fc.get('features', [])
-    # adm_cd 별 그룹
-    groups = {}
-    for feat in feats:
-        props = feat.setdefault('properties', {})
-        adm = str(props.get('adm_cd', '') or '').strip()
-        groups.setdefault(adm, []).append(props)
-
-    n_assigned = 0
-    for adm, plist in groups.items():
-        counts = Counter()
-        for props in plist:
-            ri = str(props.get('ri_cd', '') or '').strip()
-            if ri:
-                counts[ri] += 1
-        # 유일하게 1번만 등장하는 실제 코드만 보존 대상
-        used = {ri for ri, c in counts.items() if c == 1}
-        seq = [1]
-
-        def _next():
-            while True:
-                cand = f'{seq[0]:03d}'
-                seq[0] += 1
-                if cand not in used:
-                    used.add(cand)
-                    return cand
-
-        for props in plist:
-            ri = str(props.get('ri_cd', '') or '').strip()
-            if ri and counts[ri] == 1:
-                props['ri_cd'] = ri          # 유일 실제코드 보존
-            else:
-                props['ri_cd'] = _next()      # 빈 값 또는 중복 → 일련번호
-                n_assigned += 1
-    return n_assigned
-
-
-# ============================================================
-# 발주자 마크업 회수 레이어
-# ============================================================
-
-# 마크업 kind 별 표시 스타일 — (layer_name, color RGB, geom_keyword, dash)
-_MARKUP_KIND_STYLE = {
-    'add':    ('발주자_마크업_등록', '#1b9e3a', 'line',  False),
-    'delete': ('발주자_마크업_삭제', '#d62728', 'line',  True),
-    'attr':   ('발주자_마크업_속성', '#1f77b4', 'point', False),
-}
-
-
 # ============================================================
 # 작업 모드 — 작업데이터만 편집 활성, 나머지 readOnly
 # ============================================================

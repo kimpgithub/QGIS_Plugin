@@ -308,111 +308,91 @@ def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
 
 
 @app.put("/api/boundary")
-def upsert_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_plugin)):
-    """플러그인 전용 — GeoJSON FC 를 boundary 테이블에 upsert (adm_cd+ri_cd 키).
+def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_plugin)):
+    """플러그인 전용 — 제출된 읍면(adm_cd)의 경계를 **전체 교체**(DELETE 후 INSERT).
 
-    경계 데이터만 다룬다. 수정요청(마크업) 처리는 웹에서 별도로 진행
-    (QGIS 와 마크업은 동기화하지 않음).
-    feature.properties.remark 는 boundary.remark(비고)로 함께 저장."""
+    QGIS 제출 = 해당 읍면의 최신 스냅샷. 키 매칭(upsert)이 없으므로 ri_cd(부호)가
+    빈 폴리곤도 여러 개 그대로 저장된다 — 빈 부호는 웹에서 발주자가 속성등록
+    요청으로 채운다(가짜 일련번호 자동부여 제거).
+
+    주의: payload 에 포함된 adm_cd 의 기존 경계는 전부 지워진다. 일부 폴리곤만
+    보내면 나머지는 삭제됨 — 플러그인은 항상 읍면 전체를 제출한다.
+    수정요청(마크업) 처리는 웹에서 별도 진행(QGIS 와 동기화하지 않음)."""
     if srid not in (4326, 5179):
         raise HTTPException(status_code=400, detail="srid는 4326 또는 5179만 허용")
     if body.get("type") != "FeatureCollection" or not isinstance(body.get("features"), list):
         raise HTTPException(status_code=400, detail="GeoJSON FeatureCollection이 필요합니다")
 
     def _norm_ri(props: dict):
-        """빈 문자열/공백 ri_cd 를 None 으로 정규화 ('' 와 NULL 동일 취급)."""
+        """빈 문자열/공백 ri_cd 를 None 으로 정규화."""
         v = props.get("ri_cd")
         return (str(v).strip() or None) if v is not None else None
 
-    # 충돌 사전 검사 — upsert 키 (adm_cd, ri_cd) 가 payload 안에서 중복되면 같은
-    # 행을 서로 덮어써 폴리곤이 소실된다(한 admin 에 ri_cd 누락이 여러 건일 때
-    # 특히 위험: 전부 (adm_cd, NULL) 한 키로 뭉개짐). 조용히 잃지 말고 거부한다.
+    # 사전 검사 — *실제 부호*가 한 읍면 안에서 중복되면 데이터 오류 (빈 부호는 허용).
     seen: set = set()
     dups: set = set()
-    for feat in body["features"]:
-        if not feat.get("geometry"):
-            continue
-        props = feat.get("properties") or {}
-        adm_cd = props.get("adm_cd")
-        if not adm_cd:
-            raise HTTPException(status_code=400, detail="각 feature는 properties.adm_cd 필요")
-        key = (adm_cd, _norm_ri(props))
-        if key in seen:
-            dups.add(adm_cd)
-        seen.add(key)
-    if dups:
-        sample = ", ".join(sorted(dups)[:10])
-        raise HTTPException(
-            status_code=400,
-            detail=(f"(adm_cd, ri_cd) 키가 중복됩니다 — ri_cd 누락/중복 시 폴리곤이 "
-                    f"서로 덮어써져 소실됩니다. 각 폴리곤에 admin 내 유일한 ri_cd 를 "
-                    f"부여하세요. 해당 adm_cd({len(dups)}개): {sample}"),
-        )
-
-    # 배치 upsert — 피처 N건을 단일 쿼리로 (UPDATE 매칭분 + INSERT 신규분).
-    # 키 (adm_cd, ri_cd) 의 DB 무결성은 boundary_adm_ri_uniq 유니크 인덱스가 보장.
     rows = []
     for feat in body["features"]:
         geom = feat.get("geometry")
         props = feat.get("properties") or {}
         if not geom:
             continue
+        adm_cd = props.get("adm_cd")
+        if not adm_cd:
+            raise HTTPException(status_code=400, detail="각 feature는 properties.adm_cd 필요")
+        ri_cd = _norm_ri(props)
+        if ri_cd is not None:
+            key = (adm_cd, ri_cd)
+            if key in seen:
+                dups.add(f"{adm_cd}/{ri_cd}")
+            seen.add(key)
         rows.append({
             "geometry": geom,
-            "adm_cd": props.get("adm_cd"),
+            "adm_cd": adm_cd,
             "adm_nm": props.get("adm_nm"),
-            "ri_cd": _norm_ri(props),
+            "ri_cd": ri_cd,
             "ri_nm": props.get("ri_nm"),
             "status": props.get("status"),
             "remark": props.get("remark"),
             "updated_by": props.get("updated_by") or "daejeon",
         })
+    if dups:
+        sample = ", ".join(sorted(dups)[:10])
+        raise HTTPException(
+            status_code=400,
+            detail=(f"같은 읍면 안에 동일한 부호(ri_cd)가 중복됩니다 — "
+                    f"부호를 정정하거나 비워서 제출하세요. "
+                    f"중복({len(dups)}건): {sample}"),
+        )
 
-    inserted = updated = 0
+    admins = sorted({r["adm_cd"] for r in rows})
+    deleted = inserted = 0
     with pool.connection() as conn:
         with conn.cursor() as cur:
             if rows:
+                # 1) 제출된 읍면의 기존 경계 전부 삭제
+                cur.execute(
+                    "DELETE FROM boundary WHERE adm_cd = ANY(%s)", (admins,))
+                deleted = cur.rowcount
+                # 2) 새 경계 일괄 삽입 (빈 ri_cd 는 NULL 그대로)
                 cur.execute(
                     """
-                    WITH src AS (
-                      SELECT ST_Multi(ST_Transform(ST_SetSRID(
-                               ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179)) AS geom,
-                             f->>'adm_cd' AS adm_cd, f->>'adm_nm' AS adm_nm,
-                             f->>'ri_cd'  AS ri_cd,  f->>'ri_nm'  AS ri_nm,
-                             f->>'status' AS status, f->>'remark' AS remark,
-                             f->>'updated_by' AS updated_by
-                      FROM jsonb_array_elements(%s::jsonb) AS f
-                    ), upd AS (
-                      UPDATE boundary b
-                         SET geom = s.geom, adm_nm = s.adm_nm, ri_nm = s.ri_nm,
-                             status = COALESCE(s.status, b.status),
-                             remark = COALESCE(s.remark, b.remark),
-                             updated_at = now(), updated_by = s.updated_by
-                        FROM src s
-                       WHERE b.adm_cd = s.adm_cd AND b.ri_cd IS NOT DISTINCT FROM s.ri_cd
-                      RETURNING 1
-                    ), ins AS (
-                      INSERT INTO boundary
-                        (geom, adm_cd, adm_nm, ri_cd, ri_nm, status, remark, updated_by)
-                      SELECT s.geom, s.adm_cd, s.adm_nm, s.ri_cd, s.ri_nm,
-                             COALESCE(s.status, 'draft'), s.remark, s.updated_by
-                        FROM src s
-                       WHERE NOT EXISTS (
-                               SELECT 1 FROM boundary b
-                                WHERE b.adm_cd = s.adm_cd
-                                  AND b.ri_cd IS NOT DISTINCT FROM s.ri_cd)
-                      RETURNING 1
-                    )
-                    SELECT (SELECT count(*) FROM upd) AS updated,
-                           (SELECT count(*) FROM ins) AS inserted
+                    INSERT INTO boundary
+                      (geom, adm_cd, adm_nm, ri_cd, ri_nm, status, remark, updated_by)
+                    SELECT ST_Multi(ST_Transform(ST_SetSRID(
+                             ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179)),
+                           f->>'adm_cd', f->>'adm_nm',
+                           f->>'ri_cd',  f->>'ri_nm',
+                           COALESCE(f->>'status', 'draft'),
+                           f->>'remark', f->>'updated_by'
+                    FROM jsonb_array_elements(%s::jsonb) AS f
                     """,
                     (srid, json.dumps(rows)),
                 )
-                counts = cur.fetchone()
-                inserted, updated = counts["inserted"], counts["updated"]
+                inserted = cur.rowcount
         conn.commit()
-    return {"affected": inserted + updated, "inserted": inserted, "updated": updated,
-            "features": len(body["features"])}
+    return {"affected": inserted, "inserted": inserted, "deleted": deleted,
+            "admins": admins, "features": len(body["features"])}
 
 
 # ---------------------------------------------------------------- cog

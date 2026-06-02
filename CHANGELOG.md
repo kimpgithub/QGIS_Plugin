@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-06-02 — 빈 부호(ri_cd) 가짜 채움 제거: 경계 저장을 읍면 단위 전체 교체로
+
+QGIS 에서 부호가 빈 폴리곤을 제출하면 웹에서 '001','002' 같은 부호가 채워져
+보이던 문제. 원인은 플러그인 제출 직전의 `ensure_unique_ri_cd()` 자동부여 —
+서버 upsert 키 (adm_cd, ri_cd) 충돌(빈 부호 여러 개 → 한 행으로 뭉개짐)을 막기
+위한 우회책이었으나, 가짜 부호가 진짜처럼 저장되는 부작용.
+
+- **서버** — `PUT /api/boundary` 를 upsert → **읍면 단위 전체 교체**(제출된
+  adm_cd 의 기존 행 DELETE 후 INSERT)로 변경. 키 매칭이 없으므로 빈 부호
+  폴리곤도 그대로 저장. *실제 부호* 중복만 400 거부.
+  응답에 `deleted`/`admins` 추가, `updated` 제거.
+- **플러그인** — `ensure_unique_ri_cd()` 함수·호출(작업 제출 + 완료 데이터
+  업로드 2곳) 삭제. 빈 부호는 빈 채로 제출 → 웹에서 발주자가 속성등록 요청.
+  기본 서버 주소를 정식 도메인 `https://www.kosisgis.kr` 로 교체
+  (기존 작업자 PC 는 QSettings 저장값 우선 — 서버 연결 탭에서 직접 변경 필요).
+  마크업 제거(165a429) 잔재 정리: `_MARKUP_KIND_STYLE`, UI 문구.
+- **마이그레이션** — `202606_boundary_full_replace.sql`: 유니크 인덱스를
+  부분 인덱스(실제 부호만 유일 강제, 빈 부호 다수 허용)로 교체. init.sql 동기.
+- 검증: 서버/플러그인 `py_compile` OK.
+
 ## 2026-06-02 — 정식 도메인 https://www.kosisgis.kr 개통 (Caddy HTTPS 종단)
 
 전국 단위 공개를 위해 Tailscale Funnel 대신 정식 도메인으로 접속하는 경로를 신설.

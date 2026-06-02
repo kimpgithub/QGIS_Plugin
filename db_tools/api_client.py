@@ -14,9 +14,9 @@ from dataclasses import dataclass, asdict
 
 SETTINGS_PREFIX = 'gis_scan_tools/server'
 
-# 서버 구축 직후 기본값. Tailscale 회사계정 교체 시 Funnel URL 이 바뀌므로
-# 서버측 보고를 받으면 이 기본값 또는 사용자 설정을 갱신할 것.
-DEFAULT_BASE_URL = 'https://gis-hq.tail3b9b19.ts.net'
+# 정식 도메인 (Caddy HTTPS 종단, Let's Encrypt 자동 갱신).
+# 구 Tailscale Funnel 주소(gis-hq.tail3b9b19.ts.net)도 당분간 병행 동작.
+DEFAULT_BASE_URL = 'https://www.kosisgis.kr'
 DEFAULT_BUCKET = 'gis-scan'
 HTTP_TIMEOUT = 30          # 일반 API 호출
 UPLOAD_TIMEOUT = 600       # 대용량 업로드

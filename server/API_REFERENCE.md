@@ -188,15 +188,18 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/api/boundary?adm_cd=21510110"
 
 ### 3.5b `PUT /api/boundary?srid=4326`  (PLUGIN_TOKEN 전용)
 
-플러그인이 GeoJSON FC 를 `boundary` 테이블에 upsert(`adm_cd`+`ri_cd` 키).
+플러그인이 제출한 읍면(adm_cd)의 경계를 **전체 교체** — 해당 읍면의 기존 행을
+전부 DELETE 후 제출본을 INSERT. QGIS 제출 = 그 읍면의 최신 스냅샷.
 
 - `srid` 쿼리: `4326`(기본) 또는 `5179`. 그 외 `400`.
 - body: GeoJSON FeatureCollection. 각 feature `properties.adm_cd` 필수.
-- 인식 properties: `adm_cd, ri_cd, adm_nm, ri_nm, status`(미지정 시 신규는 `draft`), `remark`(비고, 미지정 시 기존 유지), `updated_by`(미지정 시 `daejeon`).
+- 인식 properties: `adm_cd, ri_cd, adm_nm, ri_nm, status`(미지정 시 `draft`), `remark`(비고), `updated_by`(미지정 시 `daejeon`).
+- **빈 부호(ri_cd) 허용** — 키 매칭이 없으므로 부호 없는 폴리곤도 여러 개 그대로
+  저장된다(웹에서 발주자가 속성등록 요청으로 채움). 단, *실제 부호*가 같은 읍면
+  안에서 중복이면 `400`(DB 부분 유니크 인덱스 `boundary_adm_ri_uniq` 이중 보장).
+- ⚠ payload 에 포함된 adm_cd 의 기존 경계는 전부 삭제됨 — 항상 읍면 전체를 제출할 것.
 - 경계 데이터만 다룬다 — 수정요청(마크업) 처리는 웹에서(QGIS 와 동기화 없음).
-- 응답: `{"affected":N,"inserted":I,"updated":U,"features":F}`.
-- 구현: 피처 N건을 단일 배치 쿼리(UPDATE 매칭분 + INSERT 신규분)로 upsert.
-  키 무결성은 `boundary_adm_ri_uniq` 유니크 인덱스(DB)와 payload 내 중복 사전검사(400)가 이중 보장.
+- 응답: `{"affected":N,"inserted":N,"deleted":D,"admins":[...],"features":F}`.
 
 ---
 

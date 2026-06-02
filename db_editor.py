@@ -51,7 +51,7 @@ class ServerConnectionTab(QWidget):
 
         help_label = QLabel(
             '<i>서울 서버 접속 설정입니다. 대전은 PostGIS/MinIO에 직접 붙지 않고 '
-            'HTTPS로만 통신합니다 — 경계 제출/마크업 회수는 API, 이미지 업로드는 S3.'
+            'HTTPS로만 통신합니다 — 경계 제출/COG 등록은 API, 이미지 업로드는 S3.'
             '<br>설정은 QGIS 설정(QSettings)에 저장되어 다음 실행 시 복원됩니다.</i>')
         help_label.setWordWrap(True)
         help_label.setStyleSheet(
@@ -59,7 +59,7 @@ class ServerConnectionTab(QWidget):
         layout.addWidget(help_label)
 
         # API
-        api_box = QGroupBox('API (경계 제출 / 마크업 회수 / COG 등록)')
+        api_box = QGroupBox('API (경계 제출 / COG 등록)')
         api_form = QFormLayout(api_box)
         self.base_url = QLineEdit()
         self.base_url.setPlaceholderText('https://<funnel-host>')
@@ -151,14 +151,14 @@ class ServerConnectionTab(QWidget):
 # ============================================================
 
 class WorkListTab(QWidget):
-    """행정리 작업 — 작업 폴더 자동인식 → 13레이어 구성 → 편집 → 제출/마크업.
+    """행정리 작업 — 작업 폴더 자동인식 → 13레이어 구성 → 편집 → 제출.
 
     화면정의서 슬11~12 흐름:
     1. 작업 폴더 지정 → 하위 폴더 규칙(01_~13_)으로 슬롯 자동 인식
     2. [화면 구성] — 13레이어를 on/off 기본값대로 QGIS 로드 + 명부 로드
     3. [작업 시작] — 작업데이터 레이어만 편집 활성, 나머지 잠금
     4. 명부에서 행정리 선택 → split/추가 시 RI 속성 자동 부여
-    5. [마크업 받기] — 발주자 수정요청 회수 / [제출] — 작업데이터 → 서버
+    5. [제출] — 작업데이터 → 서버 (수정요청 확인/처리는 검수 웹에서)
     """
 
     def __init__(self, parent_dialog):
@@ -936,12 +936,10 @@ class WorkListTab(QWidget):
         if n == 0:
             QMessageBox.warning(self, '경고', '제출할 경계(geom)가 없습니다.')
             return
-        # admin 안에서 ri_cd 유일성 보정 — 빈/중복이면 일련번호 자동부여
-        # (서버 upsert 키가 (adm_cd, ri_cd) 라 중복 시 폴리곤 손실)
-        n_seq = layer_control.ensure_unique_ri_cd(geojson)
-        if n_seq:
-            self.status.setText(
-                f'ri_cd 빈/중복 {n_seq}건 일련번호 자동부여 후 제출')
+        # 부호(ri_cd)가 빈 폴리곤은 빈 채로 제출한다 — 서버가 읍면 단위 전체
+        # 교체로 저장하므로 키 충돌이 없고, 빈 부호는 웹에서 발주자가
+        # 속성등록 요청으로 채운다. (가짜 일련번호 자동부여 제거)
+        # 단, *실제 부호*가 같은 읍면 안에서 중복이면 서버가 400 으로 거부한다.
         # 수정요청(마크업) 처리는 웹에서 — 여기서는 경계 데이터만 제출한다.
         if QMessageBox.question(
                 self, '제출 확인',
@@ -1249,13 +1247,9 @@ class CompletedUploadTab(QWidget):
                     self.log.append(f'[건너뜀] SHP 무효: {shp}')
                     continue
                 gj = layer_control.boundary_to_geojson(lyr)
-                # admin 안에서 ri_cd 유일성 보정 (빈/중복 → 일련번호)
-                n_seq = layer_control.ensure_unique_ri_cd(gj)
+                # 빈 부호(ri_cd)는 빈 채로 업로드 — 서버가 읍면 단위 전체
+                # 교체로 저장하므로 자동부여 불필요. 실제 부호 중복만 서버가 거부.
                 n = len(gj.get('features', []))
-                if n_seq:
-                    self.log.append(
-                        f'[보정] {os.path.basename(shp)} — ri_cd 빈/중복 '
-                        f'{n_seq}건 일련번호 자동부여')
                 if n:
                     boundary_tasks.append((os.path.basename(shp), gj, n))
 
