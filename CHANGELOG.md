@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-06-02 — 부호(ri_cd) 중복: 400 거부 → ST_Union 병합 (비연속 행정리 허용)
+
+같은 읍면 안에 동일한 실제 부호 폴리곤이 여러 개면(섬·분리 구역 등 비연속
+행정리) 서버가 400 으로 제출 전체를 거부하던 문제 — 31130 401건 업로드 실패.
+
+- **서버** — `PUT /api/boundary` 가 같은 (adm_cd, ri_cd) 폴리곤들을
+  `ST_Union` 으로 병합해 1개 MultiPolygon 행으로 저장. 빈 부호(NULL)는
+  병합하지 않고 각각 1행 유지(ordinality 그룹 분리). remark 는 `' / '`
+  로 연결. 응답에 `merged`(병합된 부호 목록) 추가.
+- **플러그인** — `submit_boundary()` 가 서버 거부 사유(`detail`)를 그대로
+  노출(기존엔 "400 Bad Request" 만 표시). 응답의 `deleted`/`merged` 를
+  결과 메시지에 표시.
+- 검증: 서버/플러그인 `py_compile` OK.
+
 ## 2026-06-02 — 플러그인 서버 주소 자동 마이그레이션 (구 Funnel → 정식 도메인)
 
 작업자 PC 의 QSettings 에 구 Tailscale Funnel 주소가 저장돼 있으면 연결 테스트가

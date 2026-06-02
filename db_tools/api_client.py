@@ -142,9 +142,9 @@ def test_connection(cfg, timeout_s=10):
 # ----- 경계 제출 -----
 
 def submit_boundary(cfg, geojson, updated_by=''):
-    """경계 GeoJSON(FeatureCollection)을 서버에 upsert.
+    """경계 GeoJSON(FeatureCollection)을 서버에 제출 — 읍면 단위 전체 교체.
 
-    PUT /api/boundary — adm_cd+ri_cd 기준 업서트. (affected_count, 메시지) 반환.
+    PUT /api/boundary. (affected_count, 메시지) 반환.
     경계 데이터만 다룬다 — 수정요청(마크업) 처리는 웹에서.
     """
     sess = _session(cfg)
@@ -153,10 +153,27 @@ def submit_boundary(cfg, geojson, updated_by=''):
                  timeout=HTTP_TIMEOUT)
     if r.status_code == 401:
         raise RuntimeError('인증 실패 — API 토큰 확인')
-    r.raise_for_status()
+    if not r.ok:
+        # 서버가 보낸 거부 사유(detail)를 그대로 노출 — "400 Bad Request" 만으로는
+        # 원인 파악 불가.
+        try:
+            detail = (r.json() or {}).get('detail')
+        except Exception:
+            detail = None
+        raise RuntimeError(
+            f'서버 거부 ({r.status_code}): {detail or r.text[:300]}')
     body = r.json() if r.content else {}
     affected = body.get('affected', body.get('count', 0))
     msg = body.get('message', f'{affected}건 반영')
+    deleted = body.get('deleted')
+    if deleted:
+        msg += f' (기존 {deleted}건 교체)'
+    merged = body.get('merged') or []
+    if merged:
+        # 같은 부호 폴리곤 여러 개 → 서버가 MultiPolygon 으로 병합 (비연속 행정리)
+        sample = ', '.join(merged[:5])
+        more = f' 외 {len(merged) - 5}건' if len(merged) > 5 else ''
+        msg += f' · 부호 중복 {len(merged)}건 병합({sample}{more})'
     return affected, msg
 
 

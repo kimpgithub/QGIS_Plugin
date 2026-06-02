@@ -13,6 +13,7 @@ import hmac as _hmac
 import json
 import os
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
@@ -315,6 +316,9 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
     빈 폴리곤도 여러 개 그대로 저장된다 — 빈 부호는 웹에서 발주자가 속성등록
     요청으로 채운다(가짜 일련번호 자동부여 제거).
 
+    같은 읍면 안에서 *같은 실제 부호*를 가진 폴리곤 여러 개(비연속 행정리 — 섬,
+    분리 구역)는 ST_Union 으로 병합해 1개 MultiPolygon 행으로 저장한다.
+
     주의: payload 에 포함된 adm_cd 의 기존 경계는 전부 지워진다. 일부 폴리곤만
     보내면 나머지는 삭제됨 — 플러그인은 항상 읍면 전체를 제출한다.
     수정요청(마크업) 처리는 웹에서 별도 진행(QGIS 와 동기화하지 않음)."""
@@ -328,9 +332,8 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
         v = props.get("ri_cd")
         return (str(v).strip() or None) if v is not None else None
 
-    # 사전 검사 — *실제 부호*가 한 읍면 안에서 중복되면 데이터 오류 (빈 부호는 허용).
-    seen: set = set()
-    dups: set = set()
+    # 부호 중복 집계 — 같은 (adm_cd, ri_cd) 폴리곤 여러 개는 병합 대상으로 보고.
+    key_counts: Counter = Counter()
     rows = []
     for feat in body["features"]:
         geom = feat.get("geometry")
@@ -342,10 +345,7 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
             raise HTTPException(status_code=400, detail="각 feature는 properties.adm_cd 필요")
         ri_cd = _norm_ri(props)
         if ri_cd is not None:
-            key = (adm_cd, ri_cd)
-            if key in seen:
-                dups.add(f"{adm_cd}/{ri_cd}")
-            seen.add(key)
+            key_counts[(adm_cd, ri_cd)] += 1
         rows.append({
             "geometry": geom,
             "adm_cd": adm_cd,
@@ -356,14 +356,7 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
             "remark": props.get("remark"),
             "updated_by": props.get("updated_by") or "daejeon",
         })
-    if dups:
-        sample = ", ".join(sorted(dups)[:10])
-        raise HTTPException(
-            status_code=400,
-            detail=(f"같은 읍면 안에 동일한 부호(ri_cd)가 중복됩니다 — "
-                    f"부호를 정정하거나 비워서 제출하세요. "
-                    f"중복({len(dups)}건): {sample}"),
-        )
+    merged = sorted(f"{a}/{r}" for (a, r), c in key_counts.items() if c > 1)
 
     admins = sorted({r["adm_cd"] for r in rows})
     deleted = inserted = 0
@@ -374,25 +367,38 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
                 cur.execute(
                     "DELETE FROM boundary WHERE adm_cd = ANY(%s)", (admins,))
                 deleted = cur.rowcount
-                # 2) 새 경계 일괄 삽입 (빈 ri_cd 는 NULL 그대로)
+                # 2) 새 경계 일괄 삽입.
+                #    - 같은 실제 부호(ri_cd) 폴리곤들 → ST_Union 으로 1행 병합
+                #    - 빈 부호(NULL) 폴리곤들 → 병합하지 않고 각각 1행 (ordinality 로 그룹 분리)
                 cur.execute(
                     """
                     INSERT INTO boundary
                       (geom, adm_cd, adm_nm, ri_cd, ri_nm, status, remark, updated_by)
-                    SELECT ST_Multi(ST_Transform(ST_SetSRID(
-                             ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179)),
-                           f->>'adm_cd', f->>'adm_nm',
-                           f->>'ri_cd',  f->>'ri_nm',
-                           COALESCE(f->>'status', 'draft'),
-                           f->>'remark', f->>'updated_by'
-                    FROM jsonb_array_elements(%s::jsonb) AS f
+                    SELECT ST_Multi(ST_Union(s.geom)),
+                           s.adm_cd, max(s.adm_nm), s.ri_cd, max(s.ri_nm),
+                           COALESCE(max(s.status), 'draft'),
+                           string_agg(DISTINCT s.remark, ' / '),
+                           max(s.updated_by)
+                    FROM (
+                      SELECT ST_Transform(ST_SetSRID(
+                               ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179) AS geom,
+                             f->>'adm_cd' AS adm_cd, f->>'adm_nm' AS adm_nm,
+                             f->>'ri_cd'  AS ri_cd,  f->>'ri_nm'  AS ri_nm,
+                             f->>'status' AS status, f->>'remark' AS remark,
+                             f->>'updated_by' AS updated_by,
+                             ord
+                      FROM jsonb_array_elements(%s::jsonb) WITH ORDINALITY AS t(f, ord)
+                    ) s
+                    GROUP BY s.adm_cd, s.ri_cd,
+                             CASE WHEN s.ri_cd IS NULL THEN s.ord ELSE 0 END
                     """,
                     (srid, json.dumps(rows)),
                 )
                 inserted = cur.rowcount
         conn.commit()
     return {"affected": inserted, "inserted": inserted, "deleted": deleted,
-            "admins": admins, "features": len(body["features"])}
+            "admins": admins, "features": len(body["features"]),
+            "merged": merged}
 
 
 # ---------------------------------------------------------------- cog
