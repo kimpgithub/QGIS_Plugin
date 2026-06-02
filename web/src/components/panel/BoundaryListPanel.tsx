@@ -1,5 +1,6 @@
 // 행정리 목록 패널 — 현재 행정읍면의 행정리(ri_nm/ri_cd/remark) 테이블.
 // 행 더블클릭 시 해당 행정리 영역으로 지도 이동(InspectPage 의 onZoomTo 콜백).
+// 기본은 "비고 있음"만 표시 — 작업자 확인이 필요한 행정리에 집중. [전체] 토글로 전환.
 // 데이터/값이 비어 있는 경우: 목록 없음 안내 / '-' 표기.
 import { useMemo, useState } from 'react';
 import type { BoundaryCollection, BoundaryProps, GjFeature } from '../../types';
@@ -11,6 +12,9 @@ type Props = {
   onZoomTo: (feature: GjFeature<BoundaryProps>) => void;
 };
 
+const hasRemark = (f: GjFeature<BoundaryProps>) =>
+  Boolean(f.properties.remark?.trim());
+
 export default function BoundaryListPanel({
   open,
   boundary,
@@ -18,12 +22,17 @@ export default function BoundaryListPanel({
   onZoomTo,
 }: Props) {
   const [query, setQuery] = useState('');
+  // false(기본) = 비고(remark) 있는 행정리만 / true = 전체
+  const [showAll, setShowAll] = useState(false);
 
-  // ri_cd 오름차순(없는 건 뒤로) → ri_nm 순 정렬
+  const feats = boundary?.features ?? [];
+  const remarkCount = useMemo(() => feats.filter(hasRemark).length, [feats]);
+
+  // 비고 필터 → 검색 → ri_cd 오름차순(없는 건 뒤로) → ri_nm 순 정렬
   const rows = useMemo(() => {
-    const feats = boundary?.features ?? [];
+    const base = showAll ? feats : feats.filter(hasRemark);
     const filtered = query.trim()
-      ? feats.filter((f) => {
+      ? base.filter((f) => {
           const q = query.trim();
           return (
             (f.properties.ri_nm ?? '').includes(q) ||
@@ -31,23 +40,25 @@ export default function BoundaryListPanel({
             (f.properties.remark ?? '').includes(q)
           );
         })
-      : feats;
+      : base;
     return [...filtered].sort((a, b) => {
       const ac = a.properties.ri_cd ?? '￿';
       const bc = b.properties.ri_cd ?? '￿';
       if (ac !== bc) return ac < bc ? -1 : 1;
       return (a.properties.ri_nm ?? '').localeCompare(b.properties.ri_nm ?? '');
     });
-  }, [boundary, query]);
+  }, [feats, query, showAll]);
 
   if (!open) return null;
 
-  const total = boundary?.features.length ?? 0;
+  const total = feats.length;
 
   return (
     <div style={styles.panel}>
       <div style={styles.head}>
-        <b style={styles.title}>행정리 목록 ({total})</b>
+        <b style={styles.title}>
+          행정리 목록 ({showAll ? total : `비고 ${remarkCount}`})
+        </b>
         <button type="button" style={styles.close} onClick={onClose}>
           ✕
         </button>
@@ -61,6 +72,23 @@ export default function BoundaryListPanel({
         </div>
       ) : (
         <>
+          {/* 비고 있음(기본) / 전체 토글 */}
+          <div style={styles.filterRow}>
+            <button
+              type="button"
+              style={showAll ? styles.filterBtn : styles.filterBtnActive}
+              onClick={() => setShowAll(false)}
+            >
+              비고 있음 ({remarkCount})
+            </button>
+            <button
+              type="button"
+              style={showAll ? styles.filterBtnActive : styles.filterBtn}
+              onClick={() => setShowAll(true)}
+            >
+              전체 ({total})
+            </button>
+          </div>
           <input
             style={styles.search}
             value={query}
@@ -81,7 +109,21 @@ export default function BoundaryListPanel({
                 {rows.length === 0 ? (
                   <tr>
                     <td colSpan={3} style={styles.noMatch}>
-                      검색 결과가 없습니다
+                      {query.trim() ? (
+                        '검색 결과가 없습니다'
+                      ) : (
+                        <>
+                          비고가 있는 행정리가 없습니다
+                          <br />
+                          <button
+                            type="button"
+                            style={styles.showAllLink}
+                            onClick={() => setShowAll(true)}
+                          >
+                            전체 행정리 보기 ({total})
+                          </button>
+                        </>
+                      )}
                     </td>
                   </tr>
                 ) : (
@@ -155,8 +197,44 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'center',
     lineHeight: 1.7,
   },
-  search: {
+  filterRow: {
+    display: 'flex',
+    gap: 6,
     margin: '10px 12px 0',
+  },
+  filterBtn: {
+    flex: 1,
+    padding: '5px 0',
+    border: '1px solid #d0d3da',
+    background: '#fff',
+    color: '#6b7280',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  filterBtnActive: {
+    flex: 1,
+    padding: '5px 0',
+    border: '1px solid #a16207',
+    background: '#fef9c3',
+    color: '#a16207',
+    fontWeight: 600,
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  showAllLink: {
+    marginTop: 8,
+    padding: '5px 14px',
+    border: '1px solid #c9ced6',
+    background: '#fff',
+    color: '#374151',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  search: {
+    margin: '8px 12px 0',
     padding: '6px 10px',
     border: '1px solid #cbd5e0',
     borderRadius: 4,
