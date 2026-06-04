@@ -15,6 +15,8 @@ Thumbs.db
 server/compose/.env
 server/compose/*.env
 server/compose/.web-credentials.txt
+# 담당자 계정 평문 비밀번호 — git 보관 금지. 서버에 수동 복사(scp) 후 시드.
+server/scripts/web_accounts.csv
 # 런타임 데이터 (호스트 볼륨)
 server/pgdata/
 server/minio/

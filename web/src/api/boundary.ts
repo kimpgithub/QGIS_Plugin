@@ -8,6 +8,18 @@ export function getBoundary(
   return api<BoundaryCollection>('/api/boundary', { query: { adm_cd } });
 }
 
+// PUT /api/boundary/confirm — 행정리경계 확인 완료여부 토글 ((adm_cd, ri_cd) 키)
+export function setBoundaryConfirm(
+  adm_cd: string,
+  ri_cd: string,
+  confirmed: boolean
+): Promise<{ adm_cd: string; ri_cd: string; confirmed: boolean }> {
+  return api('/api/boundary/confirm', {
+    method: 'PUT',
+    body: { adm_cd, ri_cd, confirmed },
+  });
+}
+
 // PUT /api/boundary — 경계 일괄 upsert (작업자 페이지가 발주자 마크업 반영 후 호출)
 export function submitBoundary(
   geojson: GjFeatureCollection,

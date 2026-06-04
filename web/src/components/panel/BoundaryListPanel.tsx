@@ -4,6 +4,7 @@
 // 데이터/값이 비어 있는 경우: 목록 없음 안내 / '-' 표기.
 import { useMemo, useState } from 'react';
 import type { BoundaryCollection, BoundaryProps, GjFeature } from '../../types';
+import { setBoundaryConfirm } from '../../api/boundary';
 
 type Props = {
   open: boolean;
@@ -15,6 +16,13 @@ type Props = {
 const hasRemark = (f: GjFeature<BoundaryProps>) =>
   Boolean(f.properties.remark?.trim());
 
+// 완료여부 체크 대상 — 비고가 "…경계 확인"(예: 덕소1리,6리 경계 확인 / 추후 행정리경계 확인)
+// 이고 부호(ri_cd)가 있는 행정리. 작업자가 임의 작업한 경계의 검토 완료 체크용.
+const CONFIRM_REMARK = /경계\s*확인/;
+const isConfirmTarget = (f: GjFeature<BoundaryProps>) =>
+  CONFIRM_REMARK.test(f.properties.remark ?? '') &&
+  Boolean(f.properties.ri_cd?.trim());
+
 export default function BoundaryListPanel({
   open,
   boundary,
@@ -24,6 +32,38 @@ export default function BoundaryListPanel({
   const [query, setQuery] = useState('');
   // false(기본) = 비고(remark) 있는 행정리만 / true = 전체
   const [showAll, setShowAll] = useState(false);
+  // 완료여부 낙관적 갱신 — `${adm_cd}/${ri_cd}` → confirmed. 서버 값(props) 위에 덮어씀.
+  const [confirmOverride, setConfirmOverride] = useState<Record<string, boolean>>({});
+  const [confirmBusy, setConfirmBusy] = useState<Record<string, boolean>>({});
+
+  const confirmKey = (f: GjFeature<BoundaryProps>) =>
+    `${f.properties.adm_cd}/${f.properties.ri_cd?.trim() ?? ''}`;
+  const isConfirmed = (f: GjFeature<BoundaryProps>) => {
+    const k = confirmKey(f);
+    return k in confirmOverride ? confirmOverride[k] : Boolean(f.properties.confirmed);
+  };
+
+  async function toggleConfirm(f: GjFeature<BoundaryProps>) {
+    const adm_cd = f.properties.adm_cd;
+    const ri_cd = f.properties.ri_cd?.trim() ?? '';
+    const k = confirmKey(f);
+    if (confirmBusy[k]) return;
+    const next = !isConfirmed(f);
+    setConfirmOverride((s) => ({ ...s, [k]: next }));
+    setConfirmBusy((s) => ({ ...s, [k]: true }));
+    try {
+      await setBoundaryConfirm(adm_cd, ri_cd, next);
+    } catch {
+      // 실패 시 롤백
+      setConfirmOverride((s) => ({ ...s, [k]: !next }));
+      alert('완료여부 저장에 실패했습니다. 다시 시도하세요.');
+    } finally {
+      setConfirmBusy((s) => {
+        const { [k]: _drop, ...rest } = s;
+        return rest;
+      });
+    }
+  }
 
   const feats = boundary?.features ?? [];
   const remarkCount = useMemo(() => feats.filter(hasRemark).length, [feats]);
@@ -102,13 +142,14 @@ export default function BoundaryListPanel({
                 <tr>
                   <th style={styles.th}>행정리명</th>
                   <th style={{ ...styles.th, width: 56 }}>부호</th>
+                  <th style={{ ...styles.th, width: 44, textAlign: 'center' }}>완료</th>
                   <th style={styles.th}>비고</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={3} style={styles.noMatch}>
+                    <td colSpan={4} style={styles.noMatch}>
                       {query.trim() ? (
                         '검색 결과가 없습니다'
                       ) : (
@@ -141,6 +182,24 @@ export default function BoundaryListPanel({
                       </td>
                       <td style={styles.td}>
                         {f.properties.ri_cd?.trim() || (
+                          <span style={styles.dim}>-</span>
+                        )}
+                      </td>
+                      <td
+                        style={{ ...styles.td, textAlign: 'center' }}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                      >
+                        {isConfirmTarget(f) ? (
+                          <input
+                            type="checkbox"
+                            checked={isConfirmed(f)}
+                            disabled={confirmBusy[confirmKey(f)]}
+                            onChange={() => toggleConfirm(f)}
+                            onClick={(e) => e.stopPropagation()}
+                            title="행정리경계 확인 완료여부"
+                            style={{ cursor: 'pointer' }}
+                          />
+                        ) : (
                           <span style={styles.dim}>-</span>
                         )}
                       </td>

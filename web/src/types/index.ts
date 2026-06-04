@@ -35,6 +35,7 @@ export type AuthUser = {
   role: UserRole;
   adm_cd?: string;      // role=user 일 때 본인 담당 읍면
   adm_nm?: string;
+  contact?: string | null;  // 담당자 업무연락처(내선번호) — 미등록 시 첫 로그인 등록 모달
   token: string;
 };
 
@@ -79,6 +80,7 @@ export type BoundaryProps = {
   ri_nm?: string | null;
   status?: string | null;
   remark?: string | null;     // QGIS 작업자 비고
+  confirmed?: boolean;        // 행정리경계 확인 완료여부 (boundary_confirm)
   updated_at?: string | null;
   updated_by?: string | null;
 };

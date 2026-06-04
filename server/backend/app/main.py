@@ -166,7 +166,7 @@ def health():
 @app.post("/api/login")
 def login(body: LoginBody, request: Request):
     row = fetchone(
-        "SELECT admin_cd, password_hash, role FROM auth WHERE admin_cd = %s",
+        "SELECT admin_cd, password_hash, role, contact FROM auth WHERE admin_cd = %s",
         (body.id,),
     )
     ok = False
@@ -202,7 +202,26 @@ def login(body: LoginBody, request: Request):
         node = fetchone("SELECT adm_nm FROM admin_node WHERE adm_cd = %s", (admin_cd,))
         user_obj["adm_cd"] = admin_cd
         user_obj["adm_nm"] = node["adm_nm"] if node else None
+        # contact 가 비어있으면 프론트가 첫 로그인 내선번호 등록 모달을 띄운다.
+        user_obj["contact"] = (row["contact"] or None)
     return {"token": token, "user": user_obj}
+
+
+class ContactBody(BaseModel):
+    contact: str
+
+
+@app.put("/api/me/contact")
+def set_my_contact(body: ContactBody, user: dict = Depends(get_user)):
+    """담당자 업무연락처(내선번호) 등록 — 첫 로그인 시 1회. 숫자만 허용(공백 불가).
+    내선번호는 개인정보 아님 — 휴대전화번호는 등록 불가(프론트 안내)."""
+    if user["role"] == "plugin" or not user["admin_cd"]:
+        raise HTTPException(status_code=403, detail="담당자 계정만 등록할 수 있습니다")
+    contact = (body.contact or "").strip()
+    if not contact.isdigit():
+        raise HTTPException(status_code=400, detail="업무연락처는 숫자만 입력하세요(공백 불가)")
+    execute("UPDATE auth SET contact = %s WHERE admin_cd = %s", (contact, user["admin_cd"]))
+    return {"contact": contact}
 
 
 # ---------------------------------------------------------------- admins
@@ -287,25 +306,61 @@ def admin_outline(
 def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
     """해당 admin 행정리 경계 → GeoJSON FC (EPSG:4326). 없으면 빈 FC."""
     check_admin_access(user, adm_cd)
+    # confirmed = boundary_confirm 에 (adm_cd, ri_cd) 행이 있으면 true(완료).
     row = fetchone(
         """
         SELECT json_build_object(
           'type', 'FeatureCollection',
           'features', COALESCE(json_agg(json_build_object(
-            'type', 'Feature', 'id', gid,
-            'geometry', ST_AsGeoJSON(ST_Transform(geom, 4326))::json,
+            'type', 'Feature', 'id', b.gid,
+            'geometry', ST_AsGeoJSON(ST_Transform(b.geom, 4326))::json,
             'properties', json_build_object(
-              'gid', gid, 'adm_cd', adm_cd, 'adm_nm', adm_nm,
-              'ri_cd', ri_cd, 'ri_nm', ri_nm, 'status', status,
-              'remark', remark,
-              'updated_at', updated_at, 'updated_by', updated_by)
-          )) FILTER (WHERE gid IS NOT NULL), '[]'::json)
+              'gid', b.gid, 'adm_cd', b.adm_cd, 'adm_nm', b.adm_nm,
+              'ri_cd', b.ri_cd, 'ri_nm', b.ri_nm, 'status', b.status,
+              'remark', b.remark, 'confirmed', (c.ri_cd IS NOT NULL),
+              'updated_at', b.updated_at, 'updated_by', b.updated_by)
+          )) FILTER (WHERE b.gid IS NOT NULL), '[]'::json)
         ) AS fc
-        FROM boundary WHERE adm_cd = %s
+        FROM boundary b
+        LEFT JOIN boundary_confirm c
+          ON c.adm_cd = b.adm_cd AND c.ri_cd = b.ri_cd
+        WHERE b.adm_cd = %s
         """,
         (adm_cd,),
     )
     return row["fc"]
+
+
+class ConfirmBody(BaseModel):
+    adm_cd: str
+    ri_cd: str
+    confirmed: bool
+
+
+@app.put("/api/boundary/confirm")
+def set_boundary_confirm(body: ConfirmBody, user: dict = Depends(get_user)):
+    """행정리경계 확인 완료여부 토글. 행 존재=완료. (adm_cd, ri_cd) 키.
+    부호(ri_cd)가 있는 행정리만 대상 — 빈 부호는 키가 안 잡혀 거부."""
+    check_admin_access(user, body.adm_cd)
+    ri_cd = (body.ri_cd or "").strip()
+    if not ri_cd:
+        raise HTTPException(status_code=400, detail="부호(ri_cd)가 있는 행정리만 완료 체크 가능")
+    if body.confirmed:
+        execute(
+            """
+            INSERT INTO boundary_confirm (adm_cd, ri_cd, confirmed_by, confirmed_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (adm_cd, ri_cd) DO UPDATE
+              SET confirmed_by = EXCLUDED.confirmed_by, confirmed_at = now()
+            """,
+            (body.adm_cd, ri_cd, user["admin_cd"]),
+        )
+    else:
+        execute(
+            "DELETE FROM boundary_confirm WHERE adm_cd = %s AND ri_cd = %s",
+            (body.adm_cd, ri_cd),
+        )
+    return {"adm_cd": body.adm_cd, "ri_cd": ri_cd, "confirmed": body.confirmed}
 
 
 @app.put("/api/boundary")

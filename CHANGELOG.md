@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-06-04 — 행정리경계 확인 완료여부 체크
+
+행정리 목록 패널에서 비고가 "…경계 확인"(현재 덕소1리·6리, 추후 "행정리경계
+확인"으로 통일)인 행정리에 완료여부 체크박스 추가. 작업자가 임의로 작업한 경계의
+검토 완료를 표시.
+
+- **DB** — `boundary_confirm` 테이블(`adm_cd`, `ri_cd` PK). 행 존재=완료.
+  `(adm_cd, ri_cd)` 키라 플러그인 재제출(gid 변경) 후에도 유지.
+  `202606_boundary_confirm.sql` + init.sql 동기.
+- **서버** — `GET /api/boundary` properties 에 `confirmed`(LEFT JOIN) 추가.
+  `PUT /api/boundary/confirm` 신규(Bearer + adm_cd 권한, 부호 있는 행정리만).
+- **웹** — `BoundaryListPanel` 에 "완료" 체크박스 컬럼. 비고 `/경계\s*확인/`
+  매칭 + 부호 있는 행만 체크 가능(그 외 '-'), 낙관적 갱신·실패 시 롤백.
+- 검증: 서버 `py_compile` OK, 웹 `tsc -b` OK.
+
+## 2026-06-04 — 읍면별 담당자 계정 + 첫 로그인 업무연락처(내선번호) 등록
+
+발주처 배포 `읍면별(ID,PW).xlsm`(1403개 읍면, ID=8자리 읍면코드)로 담당자
+로그인 계정 일괄 구축. 첫 로그인 시 업무연락처(내선번호)를 필수 등록받아 상단에
+표시 — 내선번호는 개인정보 아님(휴대전화번호 등록 불가).
+
+- **DB** — `auth.contact VARCHAR(20)` 추가. `202606_auth_contact.sql` + init.sql 동기.
+- **시드** — `server/scripts/web_accounts.csv`(xlsm 변환, 코드는 adm_cd 파생, 'ㅊ'
+  오타·중복행 제거) + `seed_web_users.py`: admin_node·auth 멱등 시드, 비번 재발급,
+  contact 는 보존(시드 재실행이 담당자 등록 내선번호를 지우지 않음).
+- **서버** — `POST /api/login` 응답 user 에 `contact` 포함(미등록 시 `null`).
+  `PUT /api/me/contact` 신규(Bearer, 담당자 전용, 숫자만·공백 불가).
+- **웹** — `ContactModal`(닫기 불가, 숫자만 입력, 안내 문구 붉은색). 담당자가
+  내선번호 미등록이면 첫 로그인 시 자동 표시, 등록 후 상단 툴바에 "담당자 연락처"
+  칩으로 노출. 등록 1회(별도 수정 UI 없음).
+- **관리자 계정** — `seed_admin_accounts.py`: master 5개(admin001~005 / 비번 1234).
+  admin001~003 국가데이터처, admin004~005 작업관리자(권한 동일, 구분은 메모용).
+- 검증: 서버 `py_compile` OK, 웹 `tsc -b` OK.
+
 ## 2026-06-02 — 요청삭제를 카드 버튼으로 이동 + 기입력 행정리명·부호 지도 라벨
 
 발주처 요청 반영 4건.

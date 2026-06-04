@@ -94,12 +94,24 @@ curl -X POST $BASE/api/login -H 'Content-Type: application/json' \
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiJ9....",
-  "user": { "id": "21510110", "role": "user", "adm_cd": "21510110", "adm_nm": "기장읍" }
+  "user": { "id": "21510110", "role": "user", "adm_cd": "21510110", "adm_nm": "기장읍", "contact": null }
 }
 ```
-- master 계정이면 `user = {"id":"00000000","role":"master"}` (adm_cd/adm_nm 없음).
+- master 계정이면 `user = {"id":"00000000","role":"master"}` (adm_cd/adm_nm/contact 없음).
+- `contact` = 담당자 업무연락처(내선번호). `null` 이면 프론트가 첫 로그인 등록 모달(필수)을 띄운다.
 - 실패: `401 {"detail":"ID 또는 비밀번호가 올바르지 않습니다"}`.
 - 부수효과: `login_log` 에 ip/user_agent 기록(성공·실패 모두). ip 는 `X-Forwarded-For` 우선.
+
+### 3.1b `PUT /api/me/contact`  (Bearer, 담당자 전용)
+
+첫 로그인 시 담당자 본인이 업무연락처(내선번호)를 등록. 숫자만 허용(공백 불가).
+```bash
+curl -X PUT $BASE/api/me/contact -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' -d '{"contact":"0421234567"}'
+```
+- 응답 `200 {"contact":"0421234567"}`.
+- 숫자 외/공백: `400 {"detail":"업무연락처는 숫자만 입력하세요(공백 불가)"}`.
+- plugin/master 토큰: `403`. 내선번호는 개인정보 아님(휴대전화번호 등록 불가 — 프론트 안내).
 
 ### 3.2 `GET /api/health`  (인증 불필요)
 
@@ -176,7 +188,7 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/api/boundary?adm_cd=21510110"
     "properties": {
       "gid": 1, "adm_cd": "21510110", "adm_nm": "기장읍",
       "ri_cd": "9999999901", "ri_nm": "샘플리", "status": "draft",
-      "remark": "경계 동측 하천 따라 조정함",
+      "remark": "경계 동측 하천 따라 조정함", "confirmed": false,
       "updated_at": "2026-05-14T09:04:38.582203+00:00", "updated_by": "daejeon"
     }
   }]
@@ -184,7 +196,21 @@ curl -H "Authorization: Bearer $TOKEN" "$BASE/api/boundary?adm_cd=21510110"
 ```
 - geometry 는 `MultiPolygon`, 좌표 `EPSG:4326`.
 - `remark` = QGIS 작업자 비고(없으면 null). 웹 경계 클릭 정보 카드에 표시.
+- `confirmed` = 행정리경계 확인 완료여부(`boundary_confirm` 존재 여부). 아래 3.5c 로 토글.
 - `adm_cd` 필수(없으면 `422`). normal 이 본인 외 adm_cd → `403`.
+
+### 3.5c `PUT /api/boundary/confirm`  (Bearer + adm_cd 권한)
+
+행정리경계 확인 완료여부 토글. `(adm_cd, ri_cd)` 키 — 행 존재=완료.
+```bash
+curl -X PUT $BASE/api/boundary/confirm -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' \
+  -d '{"adm_cd":"21510110","ri_cd":"9999999901","confirmed":true}'
+```
+- 응답 `200 {"adm_cd":..., "ri_cd":..., "confirmed":true}`.
+- 부호(ri_cd) 빈 값: `400`. normal 이 본인 외 adm_cd: `403`.
+- 플러그인 경계 재제출(`PUT /api/boundary`, DELETE+INSERT)로 gid 가 바뀌어도 키가
+  `(adm_cd, ri_cd)` 라 완료 상태는 유지된다.
 
 ### 3.5b `PUT /api/boundary?srid=4326`  (PLUGIN_TOKEN 전용)
 

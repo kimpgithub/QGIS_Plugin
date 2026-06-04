@@ -8,6 +8,7 @@ import BoundaryListPanel from '../components/panel/BoundaryListPanel';
 import SaveMarkupModal from '../components/modal/SaveMarkupModal';
 import RejectReasonModal from '../components/modal/RejectReasonModal';
 import AdminPickerModal from '../components/modal/AdminPickerModal';
+import ContactModal from '../components/modal/ContactModal';
 import DrawHint from '../components/map/DrawHint';
 import {
   listMarkup,
@@ -40,8 +41,10 @@ import type {
 } from '../types';
 
 export default function InspectPage() {
-  const { user, signOut } = useAuth();
+  const { user, setUser, signOut } = useAuth();
   const isMaster = user?.role === 'master';
+  // 담당자(user) 가 내선번호 미등록 상태면 첫 로그인 등록 모달(필수)을 띄운다.
+  const needContact = user?.role === 'user' && !user.contact;
 
   // 현재 선택된 행정읍면 — user 는 본인 코드, master 는 picker 결과
   const [admin, setAdmin] = useState<AdminUnit | null>(null);
@@ -466,6 +469,7 @@ export default function InspectPage() {
         onOpenAdminPicker={() => setAdminPickerOpen(true)}
         adminLabel={adminLabel}
         userId={user?.id}
+        contact={user?.contact}
         onLogout={signOut}
       />
       <div style={styles.body}>
@@ -583,6 +587,11 @@ export default function InspectPage() {
         open={rejectId != null}
         onCancel={() => setRejectId(null)}
         onSave={onConfirmReject}
+      />
+      {/* 첫 로그인 — 업무연락처(내선번호) 필수 등록. 닫기 불가. */}
+      <ContactModal
+        open={!!needContact}
+        onRegistered={(contact) => user && setUser({ ...user, contact })}
       />
       <AdminPickerModal
         open={adminPickerOpen}

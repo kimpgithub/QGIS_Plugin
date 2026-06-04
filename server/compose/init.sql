@@ -38,6 +38,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS boundary_adm_ri_uniq
     ON boundary (adm_cd, ri_cd)
     WHERE ri_cd IS NOT NULL AND btrim(ri_cd) <> '';
 
+-- ---------------------------------------------------------------- boundary_confirm
+-- 행정리경계 확인 완료여부 — 작업자가 임의로 작업한 경계의 검토 완료 체크.
+-- (adm_cd, ri_cd) 키 — 플러그인 재제출로 gid 가 바뀌어도 유지. 행 존재 = 완료.
+CREATE TABLE IF NOT EXISTS boundary_confirm (
+    adm_cd       CHAR(8)     NOT NULL,
+    ri_cd        VARCHAR(10) NOT NULL,
+    confirmed_by CHAR(8),
+    confirmed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (adm_cd, ri_cd)
+);
+
 -- ---------------------------------------------------------------- cog_catalog
 -- merged COG 등록부: 대전 플러그인이 업로드 후 insert, 검수 웹이 read
 CREATE TABLE IF NOT EXISTS cog_catalog (
@@ -55,6 +66,7 @@ CREATE TABLE IF NOT EXISTS auth (
     password_hash TEXT    NOT NULL,
     role          TEXT    NOT NULL DEFAULT 'normal'
                           CHECK (role IN ('normal', 'master')),
+    contact       VARCHAR(20),               -- 담당자 업무연락처(내선번호) — 첫 로그인 시 등록
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

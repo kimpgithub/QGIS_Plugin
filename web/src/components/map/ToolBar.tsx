@@ -9,6 +9,7 @@ type Props = {
   showAdminPicker?: boolean;
   adminLabel?: string;
   userId?: string;
+  contact?: string | null;     // 담당자 업무연락처(내선번호)
   onLogout?: () => void;
 };
 
@@ -27,6 +28,7 @@ export default function ToolBar({
   showAdminPicker,
   adminLabel,
   userId,
+  contact,
   onLogout,
 }: Props) {
   return (
@@ -51,6 +53,9 @@ export default function ToolBar({
       <div style={styles.right}>
         {adminLabel && <span style={styles.adm}>{adminLabel}</span>}
         {userId && <span style={styles.user}>{userId}</span>}
+        {contact && (
+          <span style={styles.contact}>담당자 연락처 {contact}</span>
+        )}
         {onLogout && (
           <button type="button" style={styles.logout} onClick={onLogout}>
             로그아웃
@@ -92,6 +97,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   adm: { fontSize: 13, color: '#374151', fontWeight: 500 },
   user: { fontSize: 12, color: '#6b7280' },
+  contact: {
+    fontSize: 12,
+    color: '#1f6feb',
+    fontWeight: 500,
+    padding: '3px 8px',
+    background: '#eaf1fe',
+    borderRadius: 4,
+  },
   logout: {
     ...baseBtn,
     padding: '4px 10px',
