@@ -13,16 +13,21 @@ export default function RejectReasonModal({ open, onCancel, onSave }: Props) {
     if (open) setReason('');
   }, [open]);
 
+  const reasonOk = reason.trim() !== '';
+
   return (
     <Modal open={open} title="반려사유" onClose={onCancel} width={420}>
-      <div style={styles.q}>반려 사유를 입력하세요.</div>
+      <div style={styles.q}>
+        반려 사유를 입력하세요. <span style={styles.req}>*</span>
+      </div>
       <textarea
-        style={styles.area}
+        style={{ ...styles.area, ...(reasonOk ? {} : styles.areaRequired) }}
         rows={4}
         value={reason}
         onChange={(e) => setReason(e.target.value)}
         placeholder="예: 기존 화면에 맞는 라인으로 반려"
       />
+      <div style={styles.reqHint}>* 필수입력항목입니다</div>
       <div style={styles.actions}>
         <button type="button" style={styles.cancel} onClick={onCancel}>
           취소
@@ -30,8 +35,14 @@ export default function RejectReasonModal({ open, onCancel, onSave }: Props) {
         <button
           type="button"
           style={styles.save}
-          disabled={!reason.trim()}
-          onClick={() => onSave(reason.trim())}
+          onClick={() => {
+            // 아무것도 입력하지 않고 저장을 누른 경우 — 안내 창
+            if (!reasonOk) {
+              alert('필수 입력 항목입니다.');
+              return;
+            }
+            onSave(reason.trim());
+          }}
         >
           저장
         </button>
@@ -42,6 +53,9 @@ export default function RejectReasonModal({ open, onCancel, onSave }: Props) {
 
 const styles: Record<string, React.CSSProperties> = {
   q: { fontSize: 13, color: '#1f2937', marginBottom: 10 },
+  req: { color: '#dc2626', fontWeight: 700 },
+  reqHint: { marginTop: 4, fontSize: 11, color: '#dc2626' },
+  areaRequired: { borderColor: '#f0a4a4', background: '#fff7f7' },
   area: {
     width: '100%',
     border: '1px solid #cbd5e0',
