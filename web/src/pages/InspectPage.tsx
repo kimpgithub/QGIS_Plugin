@@ -474,9 +474,6 @@ export default function InspectPage() {
         adminLabel={adminLabel}
         userId={user?.id}
         contact={user?.contact}
-        onEditContact={
-          user?.role === 'user' ? () => setEditContactOpen(true) : undefined
-        }
         onLogout={signOut}
       />
       <div style={styles.body}>

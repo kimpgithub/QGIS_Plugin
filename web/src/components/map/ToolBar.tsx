@@ -114,8 +114,8 @@ const styles: Record<string, React.CSSProperties> = {
   user: { fontSize: 12, color: '#6b7280' },
   contact: {
     marginLeft: 4,
-    fontSize: 12,
-    color: '#1f6feb',
+    fontSize: 13,
+    color: '#374151',
     fontWeight: 500,
   },
   contactBtn: {

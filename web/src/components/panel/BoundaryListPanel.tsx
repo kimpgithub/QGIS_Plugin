@@ -16,12 +16,11 @@ type Props = {
 const hasRemark = (f: GjFeature<BoundaryProps>) =>
   Boolean(f.properties.remark?.trim());
 
-// 완료여부 체크 대상 — 비고가 "…경계 확인"(예: 덕소1리,6리 경계 확인 / 추후 행정리경계 확인)
-// 이고 부호(ri_cd)가 있는 행정리. 작업자가 임의 작업한 경계의 검토 완료 체크용.
-const CONFIRM_REMARK = /경계\s*확인/;
+// 완료여부 체크 대상 — 비고(remark)가 있고 부호(ri_cd)가 있는 행정리.
+// 작업자가 임의 작업한 경계의 검토 완료 체크용. 부호가 없으면 저장 키를 만들 수
+// 없어 제외(비고만 있고 부호 없는 행은 체크박스 미표시).
 const isConfirmTarget = (f: GjFeature<BoundaryProps>) =>
-  CONFIRM_REMARK.test(f.properties.remark ?? '') &&
-  Boolean(f.properties.ri_cd?.trim());
+  hasRemark(f) && Boolean(f.properties.ri_cd?.trim());
 
 export default function BoundaryListPanel({
   open,
@@ -301,8 +300,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   hint: {
     margin: '6px 12px',
-    fontSize: 11,
-    color: '#9ca3af',
+    fontSize: 12,
+    color: '#dc2626',
+    fontWeight: 600,
   },
   tableWrap: { flex: 1, overflowY: 'auto', minHeight: 0 },
   table: {
