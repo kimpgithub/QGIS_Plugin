@@ -55,7 +55,7 @@ export default function ToolBar({
       <div style={styles.right}>
         {adminLabel && (
           <span style={styles.adm}>
-            {adminLabel}
+            <span>{adminLabel}</span>
             {contact &&
               (onEditContact ? (
                 <span
@@ -63,10 +63,10 @@ export default function ToolBar({
                   onClick={onEditContact}
                   title="내선번호 수정"
                 >
-                  ({contact})
+                  - {contact}
                 </span>
               ) : (
-                <span style={styles.contact}>({contact})</span>
+                <span style={styles.contact}>- {contact}</span>
               ))}
           </span>
         )}
@@ -110,7 +110,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     borderColor: '#1f6feb',
   },
-  adm: { fontSize: 13, color: '#374151', fontWeight: 500 },
+  adm: { fontSize: 13, color: '#374151', fontWeight: 500, whiteSpace: 'nowrap' },
   user: { fontSize: 12, color: '#6b7280' },
   contact: {
     marginLeft: 4,
