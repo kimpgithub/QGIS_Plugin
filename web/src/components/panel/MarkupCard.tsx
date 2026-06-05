@@ -51,6 +51,7 @@ export default function MarkupCard({
 }: Props) {
   const note =
     (item.attrs?.note as string | undefined) ?? defaultNote(item.kind);
+  const ext = (item.attrs?.ext as string | undefined)?.trim();
 
   return (
     <div
@@ -84,6 +85,7 @@ export default function MarkupCard({
       <div style={styles.body}>요청: {note}</div>
       <div style={styles.meta}>
         작업자 {item.created_by || '-'} · {fmt(item.created_at)}
+        {ext && <> · 내선 {ext}</>}
       </div>
       {/* 대기: 작업자(master)가 QGIS 로 경계를 고친 뒤 [반영], 또는 [반려](사유). */}
       {canProcess && item.status === 'pending' && (

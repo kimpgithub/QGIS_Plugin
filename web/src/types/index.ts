@@ -61,6 +61,7 @@ export type Markup = {
     ri_nm?: string;
     ri_cd?: string;
     note?: string;
+    ext?: string;       // 요청자 내선번호(업무연락처) — 저장 시 계정 연동값 기본
   };
   created_by: string;
   created_at: string;

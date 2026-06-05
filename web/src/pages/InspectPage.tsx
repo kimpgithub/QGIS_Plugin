@@ -277,6 +277,7 @@ export default function InspectPage() {
   // 저장 모달 콜백 — attr(속성등록)는 행정리명/부호도 같은 모달에서 함께 받는다.
   async function onSavePending(
     note: string,
+    ext: string,
     attrData?: { ri_nm: string; ri_cd: string }
   ) {
     if (!pendingGeom || !tool || !admin) return;
@@ -288,6 +289,7 @@ export default function InspectPage() {
         attrs: {
           ...(attrData ?? {}),
           ...(note ? { note } : {}),
+          ...(ext ? { ext } : {}),
         },
       });
       await reloadMarkup();
@@ -580,6 +582,7 @@ export default function InspectPage() {
       <SaveMarkupModal
         open={pendingGeom != null && tool != null}
         kind={(tool ?? 'add') as MarkupKind}
+        defaultExt={user?.contact}
         onCancel={onCancelPending}
         onSave={onSavePending}
       />
