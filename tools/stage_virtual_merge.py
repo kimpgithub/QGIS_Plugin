@@ -264,65 +264,149 @@ def merge_admin_virtual(admin_code, sheets_dict, admin_geom, center_mode,
     }
 
 
-# 시트별 SHP 정합 한 장 cost 임계 (mean dist px). 이 이상이면 정합 신뢰 불가
-# → 그리드 초기값 그대로 사용(폴백). 0.5x 본문 기준 경험값.
-SHP_REFINE_COST_MAX = 8.0
+# 시트별 SHP 정합 임계. cost = SHP 경계점 ↔ 이미지 주황 스켈레톤 평균거리(px).
+SHP_REFINE_COST_MAX = 15.0   # 4-DoF mean cost 이 이상이면 정합 신뢰 불가 → 폴백
 SHP_MIN_ORANGE_PX = 500
+SHP_PS_TOL = 0.15            # 허용 ps 편차(±15%) — 벗어나면 스케일 발산으로 보고 폴백
+TPS_SMOOTH = 10.0            # TPS 평활 (작을수록 대응점에 밀착, 과적합 위험)
+TPS_MAX_CTRL = 500          # TPS control 상한 (적합 O(n^3)/평가 O(nq·n) 가드)
+TPS_RENDER_DS = 20          # TPS 렌더 희소격자 다운샘플 (잔차가 완만 → 거칠어도 무방)
 
 
-def _refine_sheet_offset(body, shp_gdf, init_ox, init_oy, ps):
-    """분할 본문(body) 한 장을 bnd_adm_pg 경계에 맞춰 좌상단 월드오프셋 리파인.
+def _sim_world2px(s, th, ox, oy):
+    """4-DoF 유사변환(스케일 s·회전 th·중심 ox/oy) world→px 평가자.
+    th=0 이면 fx=(X-ox)/s, fy=(oy-Y)/s (refine_position 과 동일 규약)."""
+    cs, sn = np.cos(th), np.sin(th)
 
-    이미지 주황선(행정 경계)을 추출 → SHP 경계점과 distance-transform 매칭.
-    그리드 초기값(init_ox, init_oy) 주변에서 Powell 로 (ps, ox, oy) 미세조정.
+    def ev(P):
+        dx = P[:, 0] - ox
+        dy = P[:, 1] - oy
+        return (cs * dx + sn * dy) / s, (sn * dx - cs * dy) / s
+    return ev
 
-    Returns: (ox, oy, ps_refined, cost) — 정합 실패/부족 시 (init_ox, init_oy, ps, None).
+
+def _sim_px2world_corners(s, th, ox, oy, bw, bh):
+    """4-DoF 역변환으로 본문 4모서리(px)의 world 좌표 → footprint 산출용."""
+    cs, sn = np.cos(th), np.sin(th)
+    out = []
+    for px, py in ((0, 0), (bw, 0), (bw, bh), (0, bh)):
+        dx = s * (cs * px + sn * py)
+        dy = s * (sn * px - cs * py)
+        out.append((ox + dx, oy + dy))
+    return out
+
+
+def _cost_mean(ev, Q, dist_map, shape):
+    """SHP 경계점 Q 를 ev 로 px 투영 → dist_map 평균거리(px). 적을수록 정합 우수."""
+    from scipy.ndimage import map_coordinates
+    H, W = shape
+    fx, fy = ev(Q)
+    m = 5
+    val = (fx >= m) & (fx < W - m) & (fy >= m) & (fy < H - m)
+    if int(val.sum()) < 50:
+        return 1e9
+    d = map_coordinates(dist_map, [fy[val], fx[val]], order=1,
+                        mode='constant', cval=30.0)
+    return float(np.mean(d))
+
+
+def _fit_sheet_transform(body, shp_gdf, init_ox, init_oy, ps0):
+    """본문 1장 → bnd_adm_pg 주황선 정합 변환 적합.
+
+    파이프라인: 4-DoF(유사변환+회전) Powell → 그 결과로 TPS 잔차보정(평활).
+    실데이터 검증상 4-DoF+TPS 가 3-DoF/affine/TPS-단독보다 안정·정밀
+    (mean ~1.5px, p90 ~5px @ 0.56 m/px ≈ 1m 미만).
+
+    Returns dict:
+      ok      : 정합 신뢰 여부 (False 면 호출자가 4-DoF 합의값으로 폴백)
+      params4 : (s, th, ox, oy) — footprint·폴백 합의용 (항상 채움)
+      ev      : world→px 평가자 (tps 또는 sim)
+      is_tps  : ev 가 TPS 인지 (렌더 시 희소격자 적용)
+      cost    : 채택 변환의 mean cost (px)
     """
     try:
         from .common import (
             extract_orange_mask, build_skeleton_and_distmap,
-            compute_aoi, clip_shp_to_aoi, sample_points_from_boundaries,
-            refine_position,
-        )
+            compute_aoi, clip_shp_to_aoi, sample_points_from_boundaries)
     except ImportError:
         from gis_scan_tools.tools.common import (
             extract_orange_mask, build_skeleton_and_distmap,
-            compute_aoi, clip_shp_to_aoi, sample_points_from_boundaries,
-            refine_position,
-        )
+            compute_aoi, clip_shp_to_aoi, sample_points_from_boundaries)
+    from scipy.optimize import minimize
+    from scipy.spatial import cKDTree
+    from scipy.interpolate import RBFInterpolator
+
     bh, bw = body.shape[:2]
+    p4 = (ps0, 0.0, init_ox, init_oy)        # 폴백 기본값
     try:
         mask = extract_orange_mask(body)
         if int(np.sum(mask > 0)) < SHP_MIN_ORANGE_PX:
-            return init_ox, init_oy, ps, None        # 주황선 부족 → 폴백
-        _, _, dist_map = build_skeleton_and_distmap(mask)
-        # 초기 추정 주변 AOI 로 SHP 경계 클립 + 점 샘플 (그리드 prior 가 탐색 한정)
-        aoi = compute_aoi(init_ox, init_oy, ps, (bh, bw))
-        bnds = clip_shp_to_aoi(shp_gdf, aoi, buffer_ratio=0.5)
-        shp_pts = sample_points_from_boundaries(bnds, num_points=2000)
-        if len(shp_pts) < 50:
-            return init_ox, init_oy, ps, None
-        rps, rox, roy, cost = refine_position(
-            shp_pts, dist_map, ps, init_ox, init_oy, (bh, bw), fix_scale=False)
-        if cost is None or cost > SHP_REFINE_COST_MAX or not (0.1 <= rps <= 20.0):
-            return init_ox, init_oy, ps, cost        # 신뢰 불가 → 그리드 폴백
-        return rox, roy, rps, cost
-    except Exception as e:                            # noqa: BLE001
+            return dict(ok=False, params4=p4,
+                        ev=_sim_world2px(*p4), is_tps=False, cost=None)
+        _, skel, dist = build_skeleton_and_distmap(mask)
+        aoi = compute_aoi(init_ox, init_oy, ps0, (bh, bw))
+        bnds = clip_shp_to_aoi(shp_gdf, aoi, buffer_ratio=0.45)
+        Q = np.asarray(sample_points_from_boundaries(bnds, num_points=3000))
+        if len(Q) < 50:
+            return dict(ok=False, params4=p4,
+                        ev=_sim_world2px(*p4), is_tps=False, cost=None)
+
+        # --- 1) 4-DoF 유사변환+회전 (Powell, dist_map mean 최소화) ---
+        def cost4(p):
+            if p[0] <= 0:
+                return 1e10
+            return _cost_mean(_sim_world2px(*p), Q, dist, (bh, bw))
+        res = minimize(cost4, [ps0, 0.0, init_ox, init_oy], method='Powell',
+                       options={'maxiter': 400, 'ftol': 1e-7})
+        s, th, ox, oy = (float(v) for v in res.x)
+        p4 = (s, th, ox, oy)
+        c4 = _cost_mean(_sim_world2px(s, th, ox, oy), Q, dist, (bh, bw))
+        lo, hi = ps0 * (1 - SHP_PS_TOL), ps0 * (1 + SHP_PS_TOL)
+        if not (c4 <= SHP_REFINE_COST_MAX and lo <= s <= hi):
+            return dict(ok=False, params4=p4,
+                        ev=_sim_world2px(*p4), is_tps=False, cost=c4)
+
+        # --- 2) TPS 잔차보정 (4-DoF 대응점 → 평활 thin-plate spline) ---
+        sim_ev = _sim_world2px(s, th, ox, oy)
+        fx, fy = sim_ev(Q)
+        val = (fx >= 0) & (fx < bw) & (fy >= 0) & (fy < bh)
+        Qv = Q[val]
+        dd, idx = cKDTree(skel).query(np.c_[fx[val], fy[val]])
+        keep = dd <= np.percentile(dd, 85)        # 잘못된 대응점(상위 15%) 절사
+        Qc, Tc = Qv[keep], skel[idx][keep]
+        ev, is_tps, cost = sim_ev, False, c4
+        if len(Qc) >= 50:
+            if len(Qc) > TPS_MAX_CTRL:
+                sel = np.linspace(0, len(Qc) - 1, TPS_MAX_CTRL).astype(int)
+                Qc, Tc = Qc[sel], Tc[sel]
+            try:
+                rbf = RBFInterpolator(Qc, Tc, kernel='thin_plate_spline',
+                                      smoothing=TPS_SMOOTH)
+                tps_ev = lambda P, _r=rbf: (_r(P)[:, 0], _r(P)[:, 1])
+                c_tps = _cost_mean(tps_ev, Q, dist, (bh, bw))
+                if c_tps < c4:                    # TPS 가 개선될 때만 채택
+                    ev, is_tps, cost = tps_ev, True, c_tps
+            except Exception as e:                # noqa: BLE001
+                print(f'  [TPS 적합 실패 → 4-DoF 유지] {e}')
+        return dict(ok=True, params4=p4, ev=ev, is_tps=is_tps, cost=cost)
+    except Exception as e:                                   # noqa: BLE001
         print(f'  [SHP refine 예외] {e}')
-        return init_ox, init_oy, ps, None
+        return dict(ok=False, params4=p4,
+                    ev=_sim_world2px(*p4), is_tps=False, cost=None)
 
 
 def merge_admin_shp_refined(admin_code, sheets_dict, admin_geom, shp_gdf,
                             out_dir, ps=None, tile_gap=3,
                             flat_layout=False, basename=None):
-    """admin 1개 — 분할을 각각 bnd_adm_pg 에 SHP 정합 후 월드좌표 모자이크.
+    """admin 1개 — 분할을 각각 bnd_adm_pg 주황선에 정합 후 월드좌표 모자이크.
 
-    merge_admin_virtual(그리드 합성 후 전역 1-transform)의 정밀도 한계를 보완:
-      1) 그리드(N-i)로 각 시트 초기 월드 위치 추정 (prior)
-      2) 시트마다 주황선 ↔ SHP 경계 Powell 리파인 (개별 ox/oy/ps)
-      3) 리파인된 시트들을 공통 ps 캔버스에 월드좌표로 합성 → 단일 JGW
-
-    정합 실패/주황선 부족 시 해당 시트는 그리드 초기값으로 폴백(placed_grid 로 표시).
+    1) centroid-캔버스로 시트별 초기 월드위치 추정 (실제 본문크기×ps 기준 —
+       admin bbox 분할이 아니라 인쇄 지도영역 크기를 반영해야 수렴함).
+    2) 시트마다 4-DoF(유사변환+회전) → TPS 잔차보정 (_fit_sheet_transform).
+    3) 정합 실패 시트는 성공 시트들의 4-DoF 합의(중앙 회전·ps + 중앙 오프셋델타)로
+       폴백(타일 일관성 유지).
+    4) 시트별 변환(world→px)을 출력 캔버스에 footprint 영역만 remap → 단일 JGW.
+       (TPS 는 희소격자 평가 후 bilinear 업샘플 — 메모리/연산 가드)
     """
     Ns = set(k[0] for k in sheets_dict)
     if len(Ns) != 1:
@@ -341,70 +425,112 @@ def merge_admin_shp_refined(admin_code, sheets_dict, admin_geom, shp_gdf,
     if not bodies:
         return {'status': 'ERROR', 'message': 'body load 실패'}
 
+    # 공통 셀 크기로 통일 (타일 정합성) — 평균 본문 크기
     h_avg = int(round(np.mean([b.shape[0] for b in bodies.values()])))
     w_avg = int(round(np.mean([b.shape[1] for b in bodies.values()])))
 
     bnd = admin_geom.bounds
-    W = bnd[2] - bnd[0]
-    H = bnd[3] - bnd[1]
-    cell_w = W / cols
-    cell_h = H / rows
-    # 전역 ps — 축척 OCR 제공 시 그 값, 없으면 그리드-셀 기하로 추정
     if ps is None:
-        ps = max(cell_w / max(w_avg, 1), cell_h / max(h_avg, 1))
+        # 축척 OCR 미제공 시 폴백 — 캔버스(2×2 시트)가 admin bbox 를 덮는다고 가정
+        ps = max((bnd[2] - bnd[0]) / (cols * w_avg),
+                 (bnd[3] - bnd[1]) / (rows * h_avg))
+    ps0 = float(ps)
 
-    # --- 1·2) 시트별 그리드 prior → SHP 리파인 ---
-    placed = []     # {(N,i): (body, ox, oy, ps_i)}
+    # centroid-캔버스 초기 레이아웃 — 실제 시트 크기(w_avg×ps)로 타일 배치 후
+    # admin 중심에 정렬. (admin bbox 를 셀로 나누면 시트 크기와 안 맞아 발산)
+    cx, cy = admin_geom.centroid.x, admin_geom.centroid.y
+    step_x = (w_avg + tile_gap) * ps0
+    step_y = (h_avg + tile_gap) * ps0
+    canvas_w_world = cols * w_avg * ps0 + (cols - 1) * tile_gap * ps0
+    canvas_h_world = rows * h_avg * ps0 + (rows - 1) * tile_gap * ps0
+    layout_tlx = cx - canvas_w_world / 2.0
+    layout_tly = cy + canvas_h_world / 2.0
+
+    # --- 시트별 변환 적합 (4-DoF → TPS) ---
+    sheets = []   # dict per sheet
     refined, fell_back, missing = [], [], []
     for i in range(1, N + 1):
         if (N, i) not in bodies:
             missing.append(i)
             continue
         body = bodies[(N, i)]
-        bh, bw = body.shape[:2]
+        if body.shape[:2] != (h_avg, w_avg):
+            body = cv2.resize(body, (w_avg, h_avg), interpolation=cv2.INTER_AREA)
         r = (i - 1) // cols
         c = (i - 1) % cols
-        init_ox = bnd[0] + c * cell_w
-        init_oy = bnd[3] - r * cell_h          # 좌상단 y (북쪽)
-        ox, oy, ps_i, cost = _refine_sheet_offset(
-            body, shp_gdf, init_ox, init_oy, ps)
-        placed.append(((N, i), (body, ox, oy, ps_i)))
-        if cost is not None and cost <= SHP_REFINE_COST_MAX:
+        init_ox = layout_tlx + c * step_x
+        init_oy = layout_tly - r * step_y
+        ft = _fit_sheet_transform(body, shp_gdf, init_ox, init_oy, ps0)
+        ft.update(i=i, body=body, init_ox=init_ox, init_oy=init_oy)
+        sheets.append(ft)
+        if ft['ok']:
             refined.append(i)
-            print(f'  [sheet {i}] SHP 정합 cost={cost:.2f}px ps={ps_i:.4f}')
+            print(f'  [sheet {i}] {"TPS" if ft["is_tps"] else "4DoF"} '
+                  f'cost={ft["cost"]:.2f}px')
         else:
             fell_back.append(i)
-            print(f'  [sheet {i}] 그리드 폴백'
-                  + (f' (cost={cost:.2f}px)' if cost is not None else ' (주황선 부족)'))
+            c_ = ft['cost']
+            print(f'  [sheet {i}] 폴백'
+                  + (f' (cost={c_:.2f}px)' if c_ is not None else ' (주황선 부족)'))
 
-    # --- 3) 월드좌표 모자이크 ---
-    out_ps = float(np.median([e[1][3] for e in placed]))   # 시트 ps 중앙값
-    sheet_boxes = []
-    for _k, (body, ox, oy, ps_i) in placed:
-        bh, bw = body.shape[:2]
-        sheet_boxes.append((ox, oy - bh * ps_i, ox + bw * ps_i, oy))  # minx,miny,maxx,maxy
-    minx = min(b[0] for b in sheet_boxes)
-    miny = min(b[1] for b in sheet_boxes)
-    maxx = max(b[2] for b in sheet_boxes)
-    maxy = max(b[3] for b in sheet_boxes)
+    # --- 실패 시트 폴백: 성공 시트 4-DoF 합의(중앙 회전·ps + 중앙 오프셋델타) ---
+    succ = [s for s in sheets if s['ok']]
+    if succ:
+        mth = float(np.median([s['params4'][1] for s in succ]))
+        mps = float(np.median([s['params4'][0] for s in succ]))
+        mdx = float(np.median([s['params4'][2] - s['init_ox'] for s in succ]))
+        mdy = float(np.median([s['params4'][3] - s['init_oy'] for s in succ]))
+        for s in sheets:
+            if not s['ok']:
+                p = (mps, mth, s['init_ox'] + mdx, s['init_oy'] + mdy)
+                s['params4'] = p
+                s['ev'] = _sim_world2px(*p)
+                s['is_tps'] = False
+
+    # --- 출력 캔버스 산정: 모든 시트 footprint(4-DoF 모서리)의 합집합 ---
+    out_ps = float(np.median([s['params4'][0] for s in sheets]))
+    for s in sheets:                       # footprint 1회 계산해 재사용
+        s['corners'] = _sim_px2world_corners(*s['params4'], w_avg, h_avg)
+    corners = [p for s in sheets for p in s['corners']]
+    minx = min(p[0] for p in corners); maxx = max(p[0] for p in corners)
+    miny = min(p[1] for p in corners); maxy = max(p[1] for p in corners)
     canvas_w = max(1, int(np.ceil((maxx - minx) / out_ps)))
     canvas_h = max(1, int(np.ceil((maxy - miny) / out_ps)))
     canvas = np.full((canvas_h, canvas_w, 3), 255, np.uint8)
 
-    for _k, (body, ox, oy, ps_i) in placed:
-        bh, bw = body.shape[:2]
-        dst_w = max(1, int(round(bw * ps_i / out_ps)))
-        dst_h = max(1, int(round(bh * ps_i / out_ps)))
-        body_r = cv2.resize(body, (dst_w, dst_h), interpolation=cv2.INTER_AREA)
-        px = int(round((ox - minx) / out_ps))
-        py = int(round((maxy - oy) / out_ps))
-        # 캔버스 경계로 클립
-        x0, y0 = max(0, px), max(0, py)
-        x1, y1 = min(canvas_w, px + dst_w), min(canvas_h, py + dst_h)
-        if x1 <= x0 or y1 <= y0:
+    # --- 시트별 footprint 영역만 remap (전체 캔버스 그리드 생성 회피) ---
+    # world→px 평가는 항상 희소격자(1/ds)에서 한 뒤 bilinear 업샘플:
+    #   - sim/affine(폴백 포함): 선형장이라 bilinear 보간이 정확 (오차 0)
+    #   - TPS: 잔차가 완만해 거친 격자로도 충분 (전 픽셀 RBF 평가 회피)
+    # → 비-TPS 경로의 전체 footprint meshgrid(float64 ~GB) 생성을 제거.
+    margin = 60   # TPS 잔차 여유(px)
+    ds = TPS_RENDER_DS
+    for s in sorted(sheets, key=lambda s: s['i']):
+        body, ev = s['body'], s['ev']
+        oxs = [(p[0] - minx) / out_ps for p in s['corners']]
+        oys = [(maxy - p[1]) / out_ps for p in s['corners']]
+        px0 = max(0, int(np.floor(min(oxs))) - margin)
+        py0 = max(0, int(np.floor(min(oys))) - margin)
+        px1 = min(canvas_w, int(np.ceil(max(oxs))) + margin)
+        py1 = min(canvas_h, int(np.ceil(max(oys))) + margin)
+        if px1 <= px0 or py1 <= py0:
             continue
-        sx0, sy0 = x0 - px, y0 - py
-        canvas[y0:y1, x0:x1] = body_r[sy0:sy0 + (y1 - y0), sx0:sx0 + (x1 - x0)]
+        sub_w, sub_h = px1 - px0, py1 - py0
+        gw, gh = max(2, sub_w // ds), max(2, sub_h // ds)
+        # 희소격자 world 좌표 (끝점만 필요 — 전체 arange 회피)
+        sxs = minx + (px0 + 0.5 + np.linspace(0, sub_w - 1, gw)) * out_ps
+        sys_ = maxy - (py0 + 0.5 + np.linspace(0, sub_h - 1, gh)) * out_ps
+        GX, GY = np.meshgrid(sxs, sys_)
+        fxs, fys = ev(np.c_[GX.ravel(), GY.ravel()])
+        mapx = cv2.resize(fxs.reshape(gh, gw).astype(np.float32), (sub_w, sub_h))
+        mapy = cv2.resize(fys.reshape(gh, gw).astype(np.float32), (sub_w, sub_h))
+        warp = cv2.remap(body, mapx, mapy, cv2.INTER_LINEAR,
+                         borderValue=(255, 255, 255))
+        # 비-흰색 & 본문 범위 내 픽셀만 합성 (min(2): 채널×bool 3배 배열 회피)
+        m = ((mapx >= 0) & (mapx < w_avg) & (mapy >= 0) & (mapy < h_avg)
+             & (warp.min(axis=2) <= 245))
+        canvas[py0:py1, px0:px1][m] = warp[m]
+        del mapx, mapy, warp, m, GX, GY, fxs, fys   # 피크 메모리 캡
 
     if flat_layout:
         sub_out = os.path.join(out_dir, admin_code[:2], admin_code[:5])

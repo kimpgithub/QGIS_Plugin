@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-06-05 — PDF-less 시트 정합 4-DoF+TPS 로 정밀화 (오차 ~1m)
+
+직전 시트별 SHP 정합(3-DoF: 스케일+이동)이 주황선과 SHP 경계가 군데군데
+어긋나던 문제. 실데이터(37570360, 분할 4장 + bnd_adm_pg)로 변환 모델을 비교
+실험 → **4-DoF(유사변환+회전) → TPS 잔차보정** 채택.
+
+- **`merge_admin_shp_refined` 재작성** — 시트마다 (a) 4-DoF Powell 정합
+  (회전 추가로 잔차 대폭 감소) → (b) 그 대응점으로 평활 TPS 잔차보정.
+  `_fit_sheet_transform` 이 world→px 평가자(sim/tps) 반환, 출력 캔버스에
+  시트별 footprint 영역만 remap (전체 그리드 생성 회피).
+- **실측 정확도** — SHP 경계점↔주황 스켈레톤 평균 cost 5.2px(3-DoF) →
+  1.0~1.9px(≈1m). 비교: 4-DoF 단독 3.9px, affine(ICP) 발산, TPS-단독 일부 발산.
+- **연산 최적화** — TPS 렌더는 희소격자(1/20) 평가 후 bilinear 업샘플.
+  1읍면 357s → 70s (품질 동일). 실패 시트는 성공 시트 4-DoF 합의값 폴백.
+- 검증: `py_compile` OK, 실데이터 시각화 확인(빨강 SHP 경계가 스캔 영역 밀착).
+
 ## 2026-06-05 — PDF-less 정합 정밀화 + OK_NO_PDF 자동 경로 복원
 
 PDF 없이 스캔만 있는 읍면의 자동 좌표부여가 (1) `_unmatched/` 고립으로 끊기고
