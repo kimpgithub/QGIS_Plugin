@@ -264,6 +264,181 @@ def merge_admin_virtual(admin_code, sheets_dict, admin_geom, center_mode,
     }
 
 
+# 시트별 SHP 정합 한 장 cost 임계 (mean dist px). 이 이상이면 정합 신뢰 불가
+# → 그리드 초기값 그대로 사용(폴백). 0.5x 본문 기준 경험값.
+SHP_REFINE_COST_MAX = 8.0
+SHP_MIN_ORANGE_PX = 500
+
+
+def _refine_sheet_offset(body, shp_gdf, init_ox, init_oy, ps):
+    """분할 본문(body) 한 장을 bnd_adm_pg 경계에 맞춰 좌상단 월드오프셋 리파인.
+
+    이미지 주황선(행정 경계)을 추출 → SHP 경계점과 distance-transform 매칭.
+    그리드 초기값(init_ox, init_oy) 주변에서 Powell 로 (ps, ox, oy) 미세조정.
+
+    Returns: (ox, oy, ps_refined, cost) — 정합 실패/부족 시 (init_ox, init_oy, ps, None).
+    """
+    try:
+        from .common import (
+            extract_orange_mask, build_skeleton_and_distmap,
+            compute_aoi, clip_shp_to_aoi, sample_points_from_boundaries,
+            refine_position,
+        )
+    except ImportError:
+        from gis_scan_tools.tools.common import (
+            extract_orange_mask, build_skeleton_and_distmap,
+            compute_aoi, clip_shp_to_aoi, sample_points_from_boundaries,
+            refine_position,
+        )
+    bh, bw = body.shape[:2]
+    try:
+        mask = extract_orange_mask(body)
+        if int(np.sum(mask > 0)) < SHP_MIN_ORANGE_PX:
+            return init_ox, init_oy, ps, None        # 주황선 부족 → 폴백
+        _, _, dist_map = build_skeleton_and_distmap(mask)
+        # 초기 추정 주변 AOI 로 SHP 경계 클립 + 점 샘플 (그리드 prior 가 탐색 한정)
+        aoi = compute_aoi(init_ox, init_oy, ps, (bh, bw))
+        bnds = clip_shp_to_aoi(shp_gdf, aoi, buffer_ratio=0.5)
+        shp_pts = sample_points_from_boundaries(bnds, num_points=2000)
+        if len(shp_pts) < 50:
+            return init_ox, init_oy, ps, None
+        rps, rox, roy, cost = refine_position(
+            shp_pts, dist_map, ps, init_ox, init_oy, (bh, bw), fix_scale=False)
+        if cost is None or cost > SHP_REFINE_COST_MAX or not (0.1 <= rps <= 20.0):
+            return init_ox, init_oy, ps, cost        # 신뢰 불가 → 그리드 폴백
+        return rox, roy, rps, cost
+    except Exception as e:                            # noqa: BLE001
+        print(f'  [SHP refine 예외] {e}')
+        return init_ox, init_oy, ps, None
+
+
+def merge_admin_shp_refined(admin_code, sheets_dict, admin_geom, shp_gdf,
+                            out_dir, ps=None, tile_gap=3,
+                            flat_layout=False, basename=None):
+    """admin 1개 — 분할을 각각 bnd_adm_pg 에 SHP 정합 후 월드좌표 모자이크.
+
+    merge_admin_virtual(그리드 합성 후 전역 1-transform)의 정밀도 한계를 보완:
+      1) 그리드(N-i)로 각 시트 초기 월드 위치 추정 (prior)
+      2) 시트마다 주황선 ↔ SHP 경계 Powell 리파인 (개별 ox/oy/ps)
+      3) 리파인된 시트들을 공통 ps 캔버스에 월드좌표로 합성 → 단일 JGW
+
+    정합 실패/주황선 부족 시 해당 시트는 그리드 초기값으로 폴백(placed_grid 로 표시).
+    """
+    Ns = set(k[0] for k in sheets_dict)
+    if len(Ns) != 1:
+        return {'status': 'ERROR', 'message': f'혼합 N: {Ns}'}
+    N = Ns.pop()
+    grid = grid_for_n(N)
+    if grid is None:
+        return {'status': 'ERROR', 'message': f'미지원 N={N} (4/9 만)'}
+    rows, cols = grid
+
+    bodies = {}
+    for k, p in sheets_dict.items():
+        img = _imread(p)
+        if img is not None:
+            bodies[k] = img
+    if not bodies:
+        return {'status': 'ERROR', 'message': 'body load 실패'}
+
+    h_avg = int(round(np.mean([b.shape[0] for b in bodies.values()])))
+    w_avg = int(round(np.mean([b.shape[1] for b in bodies.values()])))
+
+    bnd = admin_geom.bounds
+    W = bnd[2] - bnd[0]
+    H = bnd[3] - bnd[1]
+    cell_w = W / cols
+    cell_h = H / rows
+    # 전역 ps — 축척 OCR 제공 시 그 값, 없으면 그리드-셀 기하로 추정
+    if ps is None:
+        ps = max(cell_w / max(w_avg, 1), cell_h / max(h_avg, 1))
+
+    # --- 1·2) 시트별 그리드 prior → SHP 리파인 ---
+    placed = []     # {(N,i): (body, ox, oy, ps_i)}
+    refined, fell_back, missing = [], [], []
+    for i in range(1, N + 1):
+        if (N, i) not in bodies:
+            missing.append(i)
+            continue
+        body = bodies[(N, i)]
+        bh, bw = body.shape[:2]
+        r = (i - 1) // cols
+        c = (i - 1) % cols
+        init_ox = bnd[0] + c * cell_w
+        init_oy = bnd[3] - r * cell_h          # 좌상단 y (북쪽)
+        ox, oy, ps_i, cost = _refine_sheet_offset(
+            body, shp_gdf, init_ox, init_oy, ps)
+        placed.append(((N, i), (body, ox, oy, ps_i)))
+        if cost is not None and cost <= SHP_REFINE_COST_MAX:
+            refined.append(i)
+            print(f'  [sheet {i}] SHP 정합 cost={cost:.2f}px ps={ps_i:.4f}')
+        else:
+            fell_back.append(i)
+            print(f'  [sheet {i}] 그리드 폴백'
+                  + (f' (cost={cost:.2f}px)' if cost is not None else ' (주황선 부족)'))
+
+    # --- 3) 월드좌표 모자이크 ---
+    out_ps = float(np.median([e[1][3] for e in placed]))   # 시트 ps 중앙값
+    sheet_boxes = []
+    for _k, (body, ox, oy, ps_i) in placed:
+        bh, bw = body.shape[:2]
+        sheet_boxes.append((ox, oy - bh * ps_i, ox + bw * ps_i, oy))  # minx,miny,maxx,maxy
+    minx = min(b[0] for b in sheet_boxes)
+    miny = min(b[1] for b in sheet_boxes)
+    maxx = max(b[2] for b in sheet_boxes)
+    maxy = max(b[3] for b in sheet_boxes)
+    canvas_w = max(1, int(np.ceil((maxx - minx) / out_ps)))
+    canvas_h = max(1, int(np.ceil((maxy - miny) / out_ps)))
+    canvas = np.full((canvas_h, canvas_w, 3), 255, np.uint8)
+
+    for _k, (body, ox, oy, ps_i) in placed:
+        bh, bw = body.shape[:2]
+        dst_w = max(1, int(round(bw * ps_i / out_ps)))
+        dst_h = max(1, int(round(bh * ps_i / out_ps)))
+        body_r = cv2.resize(body, (dst_w, dst_h), interpolation=cv2.INTER_AREA)
+        px = int(round((ox - minx) / out_ps))
+        py = int(round((maxy - oy) / out_ps))
+        # 캔버스 경계로 클립
+        x0, y0 = max(0, px), max(0, py)
+        x1, y1 = min(canvas_w, px + dst_w), min(canvas_h, py + dst_h)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        sx0, sy0 = x0 - px, y0 - py
+        canvas[y0:y1, x0:x1] = body_r[sy0:sy0 + (y1 - y0), sx0:sx0 + (x1 - x0)]
+
+    if flat_layout:
+        sub_out = os.path.join(out_dir, admin_code[:2], admin_code[:5])
+    else:
+        sub_out = os.path.join(out_dir, 'shp_refined',
+                                admin_code[:2], admin_code[:5])
+    os.makedirs(sub_out, exist_ok=True)
+    base = basename or f'{admin_code}_scan_merged'
+    jpg_p = os.path.join(sub_out, f'{base}.jpg')
+    jgw_p = os.path.join(sub_out, f'{base}.jgw')
+    prj_p = os.path.join(sub_out, f'{base}.prj')
+    shp_p = os.path.join(sub_out, f'{base}_bbox.shp')
+
+    _imwrite(jpg_p, canvas, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    write_jgw(jgw_p, JGWParams(
+        pixel_size_x=out_ps, rotation_x=0.0, rotation_y=0.0,
+        pixel_size_y=-out_ps, top_left_x=minx, top_left_y=maxy))
+    with open(prj_p, 'w') as f:
+        f.write(PRJ_5179)
+    _save_canvas_bbox_shp(shp_p, admin_code, 'shp_refined',
+                          (minx, miny, maxx, maxy))
+
+    return {
+        'status': 'OK', 'admin_code': admin_code,
+        'center_mode': 'shp_refined', 'N': N, 'grid': [rows, cols],
+        'placed': sorted(refined + fell_back),
+        'refined': refined, 'fell_back': fell_back, 'missing': missing,
+        'canvas_size': [canvas_w, canvas_h],
+        'pixel_size': [out_ps, out_ps],
+        'world_bbox': [minx, miny, maxx, maxy],
+        'output': jpg_p,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='가상 메인 georef 병합 (PDF-less)')

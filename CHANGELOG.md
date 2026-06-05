@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-06-05 — PDF-less 정합 정밀화 + OK_NO_PDF 자동 경로 복원
+
+PDF 없이 스캔만 있는 읍면의 자동 좌표부여가 (1) `_unmatched/` 고립으로 끊기고
+(2) 가상 그리드 합성이 SHP 경계와 안 맞던 문제 2건.
+
+- **OK_NO_PDF 라우팅** — `stage2_scan_identify` 가 OK_NO_PDF(admin/sheet OCR
+  확보) 스캔을 `_unmatched/`(PDF 전용 수동탭 입력) 대신 **`identified/`**로 복사.
+  [3]지도영역 추출→[5]병합 자동 경로가 다시 흐른다. 4꼭지점 수동입력 불필요.
+  (`_copy_identified_renamed` 헬퍼로 OK 경로와 공유.)
+- **시트별 SHP 정합** — `stage_virtual_merge.merge_admin_shp_refined` 신규.
+  분할을 그리드 합성 후 전역 1-transform 으로 얹던 방식(정밀도 한계)을,
+  ① 그리드(N-i)로 시트별 월드위치 prior → ② 시트마다 이미지 주황선 ↔
+  `bnd_adm_pg` 경계 Powell 리파인(개별 ox/oy/ps) → ③ 리파인된 시트를 공통 ps
+  캔버스에 월드좌표로 모자이크 → 단일 JGW. 주황선 부족/cost 초과 시트는 그리드
+  초기값으로 폴백. `stage4_merge._virtual_merge_admin` 이 이 경로를 우선 호출,
+  실패 시 기존 `merge_admin_virtual` 로 폴백.
+- 검증: 관련 모듈 `py_compile` + import OK. (실제 정합 정확도는 QGIS 실행 검수)
+
 ## 2026-06-04 — 행정리경계 확인 완료여부 체크
 
 행정리 목록 패널에서 비고가 "…경계 확인"(현재 덕소1리·6리, 추후 "행정리경계

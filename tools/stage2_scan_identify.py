@@ -1280,15 +1280,15 @@ def main():
         if not os.path.exists(dst):
             shutil.copy2(scan_path, dst)
 
-    # OK_NO_PDF 는 PDF 가 없어 valid_sheets 교차검증 불가 → OCR 오류 가능성 있음
-    # → identified/ 가 아닌 _unmatched/ 로 보내 2a.미식별보강 탭에서 검수
-    def _copy_unmatched_renamed(scan_path, code, sid):
-        """OCR 결과 admin/sheet 로 rename 해 _unmatched/ 에 복사."""
-        if args.no_unmatched:
+    def _copy_identified_renamed(scan_path, code, sid):
+        """OCR 결과 admin/sheet 로 rename 해 identified/{시도}/{시군구}/ 에 복사.
+        [3] 지도영역 추출이 identified/ 를 입력으로 읽는다."""
+        if args.no_rename:
             return None
-        os.makedirs(unmatched_dir, exist_ok=True)
+        sub_dir = os.path.join(identified_dir, code[:2], code[:5])
+        os.makedirs(sub_dir, exist_ok=True)
         ext = os.path.splitext(scan_path)[1]
-        dst = os.path.join(unmatched_dir, f'{code}_{sid}{ext}')
+        dst = os.path.join(sub_dir, f'{code}_{sid}{ext}')
         if os.path.exists(dst):
             base = os.path.splitext(dst)[0]
             k = 2
@@ -1310,23 +1310,15 @@ def main():
                 continue
             cache.export_sheet_geo(code, sid, cache.sheets_geo_dir)
             # identified/ 복사 (정규 OK 만)
-            if not args.no_rename:
-                sub_dir = os.path.join(identified_dir, code[:2], code[:5])
-                os.makedirs(sub_dir, exist_ok=True)
-                ext = os.path.splitext(scan)[1]
-                renamed = os.path.join(sub_dir, f'{code}_{sid}{ext}')
-                if os.path.exists(renamed):
-                    base = os.path.splitext(renamed)[0]
-                    k = 2
-                    while os.path.exists(f'{base}_{k}{ext}'):
-                        k += 1
-                    renamed = f'{base}_{k}{ext}'
-                shutil.copy2(scan, renamed)
+            renamed = _copy_identified_renamed(scan, code, sid)
+            if renamed:
                 row['renamed_path'] = renamed
         elif row['status'] == 'OK_NO_PDF':
-            # _unmatched/ 로 복사 (OCR 결과 admin/sheet 로 rename) — 2a 검수 대상
-            renamed = _copy_unmatched_renamed(scan, row['admin_code'],
-                                                row['sheet_id'])
+            # OK_NO_PDF 도 admin/sheet 는 OCR 로 확보됨 → identified/ 로 복사해
+            # [3] 지도영역 추출 → [5] 가상병합(SHP+축척OCR) 자동 경로로 흘려보낸다.
+            # (sheets_geo/bbox 는 PDF 가 없어 미생성 — 좌표는 [5] 가상병합이 부여)
+            renamed = _copy_identified_renamed(scan, row['admin_code'],
+                                               row['sheet_id'])
             if renamed:
                 row['renamed_path'] = renamed
         elif row['status'] == 'FAIL':
@@ -1356,8 +1348,9 @@ def main():
     print(f'  CSV: {csv_path}')
     print(f'  bbox: {bbox_path}')
     if n_nopdf:
-        print(f'  [검수 필요] OK_NO_PDF {n_nopdf}장 → {unmatched_dir}')
-        print(f'             2a.미식별보강 탭에서 OCR 결과 확인 후 정정/이동')
+        print(f'  [PDF-less] OK_NO_PDF {n_nopdf}장 → {identified_dir} (admin/sheet OCR 확보)')
+        print(f'             [3]지도영역 추출 → [5]가상병합(SHP+축척OCR)으로 좌표 자동 부여')
+        print(f'             시트 배치/식별이 의심되면 2a.미식별보강에서 확인')
 
 
 if __name__ == '__main__':

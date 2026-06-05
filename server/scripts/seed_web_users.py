@@ -41,9 +41,11 @@ def main():
     # 같은 평문이 많으므로 해시 캐시로 1403 × 100ms 재해싱 회피
     hash_cache: dict[str, str] = {}
 
+    total = len(rows)
+    print(f"시작 — {total}개 담당자 계정 시드 (bcrypt 해싱 중, 수 분 소요)", flush=True)
     with psycopg.connect(conninfo) as conn:
         with conn.cursor() as cur:
-            for r in rows:
+            for i, r in enumerate(rows, 1):
                 cur.execute(
                     """
                     INSERT INTO admin_node (adm_cd, adm_nm, sgg_cd, sgg_nm, sido_cd, sido_nm)
@@ -68,6 +70,8 @@ def main():
                     """,
                     (r["adm_cd"], ph),
                 )
+                if i % 100 == 0 or i == total:
+                    print(f"  {i}/{total} 처리…", flush=True)
 
             # master — 있으면 보존, 없고 env 지정 시에만 생성
             mpw = os.environ.get("MASTER_PASSWORD")

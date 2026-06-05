@@ -38,10 +38,12 @@ def _virtual_merge_admin(admin_code, out_dir, ctx):
     """PDF-less admin → stage_virtual_merge 호출, 결과를 Stage 4 형식으로 정규화."""
     try:
         from .stage_virtual_merge import (
-            discover_bodies, merge_admin_virtual, ocr_scale_from_scan)
+            discover_bodies, merge_admin_virtual, merge_admin_shp_refined,
+            ocr_scale_from_scan)
     except ImportError:
         from gis_scan_tools.tools.stage_virtual_merge import (
-            discover_bodies, merge_admin_virtual, ocr_scale_from_scan)
+            discover_bodies, merge_admin_virtual, merge_admin_shp_refined,
+            ocr_scale_from_scan)
     from shapely.geometry import MultiPolygon
 
     by_admin = discover_bodies(ctx['extract_dir'])
@@ -67,10 +69,21 @@ def _virtual_merge_admin(admin_code, out_dir, ctx):
                 ps = (ctx['paper_w_mm'] / 1000.0) * K / scan_w
                 print(f'  [virtual auto-scale] K=1:{K}, ps={ps:.4f}')
 
-    r = merge_admin_virtual(
-        admin_code, sheets, geom, ctx['center_mode'],
-        out_dir, ps=ps, tile_gap=ctx['tile_gap'],
-        flat_layout=True, basename=f'{admin_code}_scan_merged')
+    # 시트별 SHP 정합(bnd_adm_pg 주황선 매칭) → 월드좌표 모자이크.
+    # 실패 시 기존 가상 그리드 합성으로 폴백.
+    try:
+        r = merge_admin_shp_refined(
+            admin_code, sheets, geom, ctx['shp_gdf'],
+            out_dir, ps=ps, tile_gap=ctx['tile_gap'],
+            flat_layout=True, basename=f'{admin_code}_scan_merged')
+        if r.get('status') != 'OK':
+            raise RuntimeError(r.get('message', 'shp_refined 실패'))
+    except Exception as e:  # noqa: BLE001
+        print(f'  [shp_refined 폴백 → virtual grid] {e}')
+        r = merge_admin_virtual(
+            admin_code, sheets, geom, ctx['center_mode'],
+            out_dir, ps=ps, tile_gap=ctx['tile_gap'],
+            flat_layout=True, basename=f'{admin_code}_scan_merged')
     # Stage 4 csv 호환 필드
     r.setdefault('canvas_size', r.get('canvas_size', [0, 0]))
     r.setdefault('output', r.get('output', ''))
@@ -78,6 +91,10 @@ def _virtual_merge_admin(admin_code, out_dir, ctx):
         r['status'] = 'OK_VIRTUAL'
         r['sheets'] = [{'sheet': str(s), 'status': 'OK'}
                        for s in r.get('placed', [])]
+        if 'refined' in r:
+            r['message'] = (f"SHP정합 {len(r['refined'])}/"
+                            f"{len(r['refined']) + len(r['fell_back'])}장"
+                            + (f", 폴백 {r['fell_back']}" if r['fell_back'] else ''))
     return r
 
 
