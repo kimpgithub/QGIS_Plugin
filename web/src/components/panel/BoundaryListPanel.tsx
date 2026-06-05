@@ -142,8 +142,8 @@ export default function BoundaryListPanel({
                 <tr>
                   <th style={styles.th}>행정리명</th>
                   <th style={{ ...styles.th, width: 56 }}>부호</th>
-                  <th style={{ ...styles.th, width: 44, textAlign: 'center' }}>완료</th>
                   <th style={styles.th}>비고</th>
+                  <th style={{ ...styles.th, width: 44, textAlign: 'center' }}>완료</th>
                 </tr>
               </thead>
               <tbody>
@@ -185,6 +185,11 @@ export default function BoundaryListPanel({
                           <span style={styles.dim}>-</span>
                         )}
                       </td>
+                      <td style={{ ...styles.td, ...styles.tdRemark }}>
+                        {f.properties.remark?.trim() || (
+                          <span style={styles.dim}>-</span>
+                        )}
+                      </td>
                       <td
                         style={{ ...styles.td, textAlign: 'center' }}
                         onDoubleClick={(e) => e.stopPropagation()}
@@ -200,11 +205,6 @@ export default function BoundaryListPanel({
                             style={{ cursor: 'pointer' }}
                           />
                         ) : (
-                          <span style={styles.dim}>-</span>
-                        )}
-                      </td>
-                      <td style={{ ...styles.td, ...styles.tdRemark }}>
-                        {f.properties.remark?.trim() || (
                           <span style={styles.dim}>-</span>
                         )}
                       </td>
