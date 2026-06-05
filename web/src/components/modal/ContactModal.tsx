@@ -1,18 +1,39 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { setContact } from '../../api/auth';
 import { ApiError } from '../../api/client';
 
 type Props = {
   open: boolean;
-  // 등록 성공 시 새 내선번호를 부모로 전달 (user 갱신용)
+  // 'register'(첫 로그인·필수·닫기불가) / 'edit'(상단 바에서 재수정·취소가능)
+  mode?: 'register' | 'edit';
+  // edit 모드에서 입력칸에 채울 기존 내선번호
+  initial?: string | null;
+  // 등록/수정 성공 시 새 내선번호를 부모로 전달 (user 갱신용)
   onRegistered: (contact: string) => void;
+  // edit 모드 취소·닫기
+  onClose?: () => void;
 };
 
-// 첫 로그인 시 1회 — 닫기 불가(필수 등록). 숫자만 입력.
-export default function ContactModal({ open, onRegistered }: Props) {
+// register: 첫 로그인 1회 필수(닫기 불가). edit: 상단 바 클릭으로 언제든 재수정. 숫자만 입력.
+export default function ContactModal({
+  open,
+  mode = 'register',
+  initial,
+  onRegistered,
+  onClose,
+}: Props) {
   const [val, setVal] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const isEdit = mode === 'edit';
+  // 열릴 때 기존값 프리필(edit) / 초기화(register)
+  useEffect(() => {
+    if (open) {
+      setVal((initial ?? '').replace(/\D/g, ''));
+      setErr(null);
+    }
+  }, [open, initial]);
 
   if (!open) return null;
 
@@ -42,7 +63,7 @@ export default function ContactModal({ open, onRegistered }: Props) {
   return (
     <div style={styles.backdrop}>
       <form style={styles.card} onSubmit={onSubmit}>
-        <div style={styles.head}>업무연락처 등록</div>
+        <div style={styles.head}>{isEdit ? '업무연락처 수정' : '업무연락처 등록'}</div>
         <div style={styles.body}>
           <p style={styles.lead}>
             행정리 구축 검수 및 수정요청을 위한 업무연락처 등록입니다.
@@ -65,9 +86,21 @@ export default function ContactModal({ open, onRegistered }: Props) {
             />
           </label>
           {err && <div style={styles.err}>{err}</div>}
-          <button type="submit" style={styles.submit} disabled={busy || !val}>
-            {busy ? '등록 중…' : '등록'}
-          </button>
+          <div style={styles.actions}>
+            {isEdit && onClose && (
+              <button
+                type="button"
+                style={styles.cancel}
+                onClick={onClose}
+                disabled={busy}
+              >
+                취소
+              </button>
+            )}
+            <button type="submit" style={styles.submit} disabled={busy || !val}>
+              {busy ? '저장 중…' : isEdit ? '수정' : '등록'}
+            </button>
+          </div>
         </div>
       </form>
     </div>
@@ -115,8 +148,18 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
   },
   err: { color: '#b91c1c', fontSize: 13 },
+  actions: { marginTop: 4, display: 'flex', gap: 8 },
+  cancel: {
+    padding: '10px 18px',
+    background: '#fff',
+    color: '#374151',
+    border: '1px solid #c9ced6',
+    borderRadius: 4,
+    fontSize: 15,
+    cursor: 'pointer',
+  },
   submit: {
-    marginTop: 4,
+    flex: 1,
     padding: '10px 0',
     background: '#1f6feb',
     color: '#fff',

@@ -10,6 +10,7 @@ type Props = {
   adminLabel?: string;
   userId?: string;
   contact?: string | null;     // 담당자 업무연락처(내선번호)
+  onEditContact?: () => void;  // 내선번호 클릭 시 수정 모달 열기
   onLogout?: () => void;
 };
 
@@ -29,6 +30,7 @@ export default function ToolBar({
   adminLabel,
   userId,
   contact,
+  onEditContact,
   onLogout,
 }: Props) {
   return (
@@ -54,7 +56,18 @@ export default function ToolBar({
         {adminLabel && (
           <span style={styles.adm}>
             {adminLabel}
-            {contact && <span style={styles.contact}>({contact})</span>}
+            {contact &&
+              (onEditContact ? (
+                <span
+                  style={styles.contactBtn}
+                  onClick={onEditContact}
+                  title="내선번호 수정"
+                >
+                  ({contact})
+                </span>
+              ) : (
+                <span style={styles.contact}>({contact})</span>
+              ))}
           </span>
         )}
         {userId && <span style={styles.user}>{userId}</span>}
@@ -104,6 +117,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     color: '#1f6feb',
     fontWeight: 500,
+  },
+  contactBtn: {
+    marginLeft: 4,
+    fontSize: 12,
+    color: '#1f6feb',
+    fontWeight: 500,
+    cursor: 'pointer',
+    textDecoration: 'underline',
   },
   logout: {
     ...baseBtn,

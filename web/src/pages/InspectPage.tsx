@@ -45,6 +45,8 @@ export default function InspectPage() {
   const isMaster = user?.role === 'master';
   // 담당자(user) 가 내선번호 미등록 상태면 첫 로그인 등록 모달(필수)을 띄운다.
   const needContact = user?.role === 'user' && !user.contact;
+  // 상단 바 내선번호 클릭 시 여는 수정 모달
+  const [editContactOpen, setEditContactOpen] = useState(false);
 
   // 현재 선택된 행정읍면 — user 는 본인 코드, master 는 picker 결과
   const [admin, setAdmin] = useState<AdminUnit | null>(null);
@@ -472,6 +474,9 @@ export default function InspectPage() {
         adminLabel={adminLabel}
         userId={user?.id}
         contact={user?.contact}
+        onEditContact={
+          user?.role === 'user' ? () => setEditContactOpen(true) : undefined
+        }
         onLogout={signOut}
       />
       <div style={styles.body}>
@@ -595,6 +600,17 @@ export default function InspectPage() {
       <ContactModal
         open={!!needContact}
         onRegistered={(contact) => user && setUser({ ...user, contact })}
+      />
+      {/* 상단 바 내선번호 클릭 — 재수정(취소 가능) */}
+      <ContactModal
+        open={editContactOpen}
+        mode="edit"
+        initial={user?.contact}
+        onClose={() => setEditContactOpen(false)}
+        onRegistered={(contact) => {
+          if (user) setUser({ ...user, contact });
+          setEditContactOpen(false);
+        }}
       />
       <AdminPickerModal
         open={adminPickerOpen}
