@@ -41,9 +41,9 @@ export default function ContactModal({
     e.preventDefault();
     setErr(null);
     const v = val.trim();
-    // 아무것도 입력하지 않고 등록을 누른 경우 — 안내 창
+    // 아무것도 입력하지 않고 등록을 누른 경우 — 빨간 인라인 알림
     if (!v) {
-      alert('내선번호를 입력해주세요.');
+      setErr('필수 입력 항목입니다.');
       return;
     }
     if (!/^\d+$/.test(v)) {
@@ -80,13 +80,16 @@ export default function ContactModal({
           <label style={styles.row}>
             <span style={styles.label}>담당자 연락처(내선번호)</span>
             <input
-              style={styles.input}
+              style={{ ...styles.input, ...(err ? styles.inputError : {}) }}
               type="text"
               inputMode="numeric"
               autoFocus
               placeholder="숫자만 입력 (예: 0421234567)"
               value={val}
-              onChange={(e) => setVal(e.target.value.replace(/\D/g, ''))}
+              onChange={(e) => {
+                setVal(e.target.value.replace(/\D/g, ''));
+                if (err) setErr(null);
+              }}
               disabled={busy}
             />
           </label>
@@ -152,7 +155,8 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 4,
     fontSize: 14,
   },
-  err: { color: '#b91c1c', fontSize: 13 },
+  err: { color: '#dc2626', fontSize: 13, fontWeight: 600 },
+  inputError: { borderColor: '#f0a4a4', background: '#fff7f7' },
   actions: { marginTop: 4, display: 'flex', gap: 8 },
   cancel: {
     padding: '10px 18px',
