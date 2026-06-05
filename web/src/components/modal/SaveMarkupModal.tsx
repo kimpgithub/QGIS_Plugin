@@ -5,11 +5,9 @@ import type { MarkupKind } from '../../types';
 type Props = {
   open: boolean;
   kind: MarkupKind;
-  // 로그인 계정에 연동된 내선번호(업무연락처) — 모달의 내선번호 칸 기본값으로 채운다.
-  defaultExt?: string | null;
   onCancel: () => void;
   // attr(속성등록)일 때만 attrs 가 채워짐 — 행정리명/부호는 모달 안에서 함께 입력.
-  onSave: (note: string, ext: string, attrs?: { ri_nm: string; ri_cd: string }) => void;
+  onSave: (note: string, attrs?: { ri_nm: string; ri_cd: string }) => void;
 };
 
 const TITLES: Record<MarkupKind, string> = {
@@ -19,27 +17,18 @@ const TITLES: Record<MarkupKind, string> = {
   delete_mark: '삭제표기',
 };
 
-export default function SaveMarkupModal({
-  open,
-  kind,
-  defaultExt,
-  onCancel,
-  onSave,
-}: Props) {
+export default function SaveMarkupModal({ open, kind, onCancel, onSave }: Props) {
   const [note, setNote] = useState('');
-  // 내선번호 — 계정 연동값(defaultExt)을 기본으로 채우되 사용자가 수정 가능.
-  const [ext, setExt] = useState('');
   // 속성등록 전용 — 행정리명/부호 (별도 모달로 나누지 않고 이 모달 위쪽에서 입력)
   const [riNm, setRiNm] = useState('');
   const [riCd, setRiCd] = useState('');
   useEffect(() => {
     if (open) {
       setNote('');
-      setExt(defaultExt?.trim() ?? '');
       setRiNm('');
       setRiCd('');
     }
-  }, [open, defaultExt]);
+  }, [open]);
 
   const isAttr = kind === 'attr';
   // 수정사유는 모든 종류에서 필수. attr 는 행정리명/부호도 필수 — 비어 있으면 저장 비활성
@@ -88,15 +77,6 @@ export default function SaveMarkupModal({
         />
         <span style={styles.reqHint}>* 필수입력항목입니다</span>
       </label>
-      <label style={{ ...styles.row, marginTop: 10 }}>
-        <span style={styles.lbl}>내선번호</span>
-        <input
-          style={styles.input}
-          value={ext}
-          onChange={(e) => setExt(e.target.value)}
-          placeholder="예: 1234"
-        />
-      </label>
       <div style={styles.actions}>
         <button type="button" style={styles.cancel} onClick={onCancel}>
           취소
@@ -108,7 +88,6 @@ export default function SaveMarkupModal({
           onClick={() =>
             onSave(
               note.trim(),
-              ext.trim(),
               isAttr ? { ri_nm: riNm.trim(), ri_cd: riCd.trim() } : undefined
             )
           }

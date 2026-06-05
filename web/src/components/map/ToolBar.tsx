@@ -1,5 +1,4 @@
 import type { MarkupKind } from '../../types';
-import { formatPhone } from '../../lib/phone';
 
 export type ToolId = MarkupKind | null;
 
@@ -10,8 +9,6 @@ type Props = {
   showAdminPicker?: boolean;
   adminLabel?: string;
   userId?: string;
-  contact?: string | null;     // 담당자 업무연락처(내선번호)
-  onEditContact?: () => void;  // 내선번호 클릭 시 수정 모달 열기
   onLogout?: () => void;
 };
 
@@ -30,8 +27,6 @@ export default function ToolBar({
   showAdminPicker,
   adminLabel,
   userId,
-  contact,
-  onEditContact,
   onLogout,
 }: Props) {
   return (
@@ -54,23 +49,7 @@ export default function ToolBar({
         )}
       </div>
       <div style={styles.right}>
-        {adminLabel && (
-          <span style={styles.adm}>
-            <span>{adminLabel}</span>
-            {contact &&
-              (onEditContact ? (
-                <span
-                  style={styles.contactBtn}
-                  onClick={onEditContact}
-                  title="내선번호 수정"
-                >
-                  ({formatPhone(contact)})
-                </span>
-              ) : (
-                <span style={styles.contact}>({formatPhone(contact)})</span>
-              ))}
-          </span>
-        )}
+        {adminLabel && <span style={styles.adm}>{adminLabel}</span>}
         {userId && <span style={styles.user}>{userId}</span>}
         {onLogout && (
           <button type="button" style={styles.logout} onClick={onLogout}>
@@ -113,20 +92,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
   adm: { fontSize: 13, color: '#374151', fontWeight: 500, whiteSpace: 'nowrap' },
   user: { fontSize: 12, color: '#6b7280' },
-  contact: {
-    marginLeft: 4,
-    fontSize: 13,
-    color: '#374151',
-    fontWeight: 500,
-  },
-  contactBtn: {
-    marginLeft: 4,
-    fontSize: 12,
-    color: '#1f6feb',
-    fontWeight: 500,
-    cursor: 'pointer',
-    textDecoration: 'underline',
-  },
   logout: {
     ...baseBtn,
     padding: '4px 10px',

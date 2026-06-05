@@ -94,24 +94,12 @@ curl -X POST $BASE/api/login -H 'Content-Type: application/json' \
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiJ9....",
-  "user": { "id": "21510110", "role": "user", "adm_cd": "21510110", "adm_nm": "기장읍", "contact": null }
+  "user": { "id": "21510110", "role": "user", "adm_cd": "21510110", "adm_nm": "기장읍" }
 }
 ```
-- master 계정이면 `user = {"id":"00000000","role":"master"}` (adm_cd/adm_nm/contact 없음).
-- `contact` = 담당자 업무연락처(내선번호). `null` 이면 프론트가 첫 로그인 등록 모달(필수)을 띄운다.
+- master 계정이면 `user = {"id":"00000000","role":"master"}` (adm_cd/adm_nm 없음).
 - 실패: `401 {"detail":"ID 또는 비밀번호가 올바르지 않습니다"}`.
 - 부수효과: `login_log` 에 ip/user_agent 기록(성공·실패 모두). ip 는 `X-Forwarded-For` 우선.
-
-### 3.1b `PUT /api/me/contact`  (Bearer, 담당자 전용)
-
-첫 로그인 시 담당자 본인이 업무연락처(내선번호)를 등록. 숫자만 허용(공백 불가).
-```bash
-curl -X PUT $BASE/api/me/contact -H "Authorization: Bearer $TOK" \
-  -H 'Content-Type: application/json' -d '{"contact":"0421234567"}'
-```
-- 응답 `200 {"contact":"0421234567"}`.
-- 숫자 외/공백: `400 {"detail":"업무연락처는 숫자만 입력하세요(공백 불가)"}`.
-- plugin/master 토큰: `403`. 내선번호는 개인정보 아님(휴대전화번호 등록 불가 — 프론트 안내).
 
 ### 3.2 `GET /api/health`  (인증 불필요)
 

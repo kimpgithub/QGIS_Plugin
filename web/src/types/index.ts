@@ -35,7 +35,6 @@ export type AuthUser = {
   role: UserRole;
   adm_cd?: string;      // role=user 일 때 본인 담당 읍면
   adm_nm?: string;
-  contact?: string | null;  // 담당자 업무연락처(내선번호) — 미등록 시 첫 로그인 등록 모달
   token: string;
 };
 
@@ -61,7 +60,6 @@ export type Markup = {
     ri_nm?: string;
     ri_cd?: string;
     note?: string;
-    ext?: string;       // 요청자 내선번호(업무연락처) — 저장 시 계정 연동값 기본
   };
   created_by: string;
   created_at: string;

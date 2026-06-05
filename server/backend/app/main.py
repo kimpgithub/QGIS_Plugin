@@ -166,7 +166,7 @@ def health():
 @app.post("/api/login")
 def login(body: LoginBody, request: Request):
     row = fetchone(
-        "SELECT admin_cd, password_hash, role, contact FROM auth WHERE admin_cd = %s",
+        "SELECT admin_cd, password_hash, role FROM auth WHERE admin_cd = %s",
         (body.id,),
     )
     ok = False
@@ -202,26 +202,7 @@ def login(body: LoginBody, request: Request):
         node = fetchone("SELECT adm_nm FROM admin_node WHERE adm_cd = %s", (admin_cd,))
         user_obj["adm_cd"] = admin_cd
         user_obj["adm_nm"] = node["adm_nm"] if node else None
-        # contact 가 비어있으면 프론트가 첫 로그인 내선번호 등록 모달을 띄운다.
-        user_obj["contact"] = (row["contact"] or None)
     return {"token": token, "user": user_obj}
-
-
-class ContactBody(BaseModel):
-    contact: str
-
-
-@app.put("/api/me/contact")
-def set_my_contact(body: ContactBody, user: dict = Depends(get_user)):
-    """담당자 업무연락처(내선번호) 등록 — 첫 로그인 시 1회. 숫자만 허용(공백 불가).
-    내선번호는 개인정보 아님 — 휴대전화번호는 등록 불가(프론트 안내)."""
-    if user["role"] == "plugin" or not user["admin_cd"]:
-        raise HTTPException(status_code=403, detail="담당자 계정만 등록할 수 있습니다")
-    contact = (body.contact or "").strip()
-    if not contact.isdigit():
-        raise HTTPException(status_code=400, detail="업무연락처는 숫자만 입력하세요(공백 불가)")
-    execute("UPDATE auth SET contact = %s WHERE admin_cd = %s", (contact, user["admin_cd"]))
-    return {"contact": contact}
 
 
 # ---------------------------------------------------------------- admins

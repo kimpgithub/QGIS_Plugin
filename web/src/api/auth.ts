@@ -33,12 +33,3 @@ export async function login(id: string, password: string): Promise<AuthUser> {
 export function logout() {
   setToken(null);
 }
-
-// PUT /api/me/contact — 담당자 업무연락처(내선번호) 등록. 숫자만(공백 불가).
-export async function setContact(contact: string): Promise<string> {
-  const r = await api<{ contact: string }>('/api/me/contact', {
-    method: 'PUT',
-    body: { contact },
-  });
-  return r.contact;
-}
