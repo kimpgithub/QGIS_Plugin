@@ -41,6 +41,11 @@ export default function ContactModal({
     e.preventDefault();
     setErr(null);
     const v = val.trim();
+    // 아무것도 입력하지 않고 등록을 누른 경우 — 안내 창
+    if (!v) {
+      alert('내선번호를 입력해주세요.');
+      return;
+    }
     if (!/^\d+$/.test(v)) {
       setErr('업무연락처는 숫자만 입력하세요(공백 없이).');
       return;
@@ -97,7 +102,7 @@ export default function ContactModal({
                 취소
               </button>
             )}
-            <button type="submit" style={styles.submit} disabled={busy || !val}>
+            <button type="submit" style={styles.submit} disabled={busy}>
               {busy ? '저장 중…' : isEdit ? '수정' : '등록'}
             </button>
           </div>
