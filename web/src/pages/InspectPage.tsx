@@ -633,7 +633,7 @@ export default function InspectPage() {
             : ''}
         </div>
         <div style={styles.delNote}>
-          삭제하면 복구할 수 없습니다. 대기·반려 요청만 삭제됩니다(반영된 요청 제외).
+          삭제하면 복구할 수 없습니다. 대기 중인 요청만 삭제됩니다(반영·반려된 요청 제외).
         </div>
         <div style={styles.delActions}>
           <button

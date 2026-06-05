@@ -69,8 +69,8 @@ export default function MarkupCard({
             {STATUS_LABEL[item.status]}
           </span>
         </div>
-        {/* 반영된 요청은 삭제 불가(서버 409) — 버튼 자체를 숨긴다 */}
-        {onDelete && item.status !== 'applied' && (
+        {/* 처리 완료(반영·반려)된 요청은 [요청삭제] 숨김 — 대기 상태에서만 삭제 가능 */}
+        {onDelete && item.status === 'pending' && (
           <button
             type="button"
             style={styles.btnDelete}
