@@ -42,8 +42,9 @@ export default function SaveMarkupModal({
   }, [open, defaultExt]);
 
   const isAttr = kind === 'attr';
-  // attr 는 행정리명/부호가 필수 — 비어 있으면 저장 비활성
-  const canSave = !isAttr || (riNm.trim() !== '' && riCd.trim() !== '');
+  // 수정사유는 모든 종류에서 필수. attr 는 행정리명/부호도 필수 — 비어 있으면 저장 비활성
+  const noteOk = note.trim() !== '';
+  const canSave = noteOk && (!isAttr || (riNm.trim() !== '' && riCd.trim() !== ''));
 
   return (
     // dim=false — 지도(스캔 이미지)의 지명·부호를 보면서 입력해야 하므로
@@ -75,14 +76,17 @@ export default function SaveMarkupModal({
       )}
       <div style={styles.q}>등록한 내용을 저장하시겠습니까?</div>
       <label style={styles.row}>
-        <span style={styles.lbl}>수정사유</span>
+        <span style={styles.lbl}>
+          수정사유 <span style={styles.req}>*</span>
+        </span>
         <textarea
-          style={styles.area}
+          style={{ ...styles.area, ...(noteOk ? {} : styles.areaRequired) }}
           rows={3}
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="요청 사유를 간단히 입력하세요"
         />
+        <span style={styles.reqHint}>* 필수입력항목입니다</span>
       </label>
       <label style={{ ...styles.row, marginTop: 10 }}>
         <span style={styles.lbl}>내선번호</span>
@@ -120,6 +124,9 @@ const styles: Record<string, React.CSSProperties> = {
   q: { fontSize: 13, color: '#1f2937', marginBottom: 10 },
   row: { display: 'flex', flexDirection: 'column', gap: 4 },
   lbl: { fontSize: 12, color: '#374151' },
+  req: { color: '#dc2626', fontWeight: 700 },
+  reqHint: { fontSize: 11, color: '#dc2626' },
+  areaRequired: { borderColor: '#f0a4a4', background: '#fff7f7' },
   attrRow: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 },
   attrLbl: { width: 70, fontSize: 12, color: '#374151' },
   input: {
