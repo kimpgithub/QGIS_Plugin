@@ -1,4 +1,5 @@
 import type { Markup, MarkupKind, MarkupStatus } from '../../types';
+import { formatPhone } from '../../lib/phone';
 
 const KIND_LABEL: Record<MarkupKind, string> = {
   add: '등록',
@@ -86,7 +87,7 @@ export default function MarkupCard({
       <div style={styles.meta}>
         작업자 {item.created_by || '-'} · {fmt(item.created_at)}
       </div>
-      {ext && <div style={styles.meta}>- 내선 {ext}</div>}
+      {ext && <div style={styles.meta}>내선 {formatPhone(ext)}</div>}
       {/* 대기: 작업자(master)가 QGIS 로 경계를 고친 뒤 [반영], 또는 [반려](사유). */}
       {canProcess && item.status === 'pending' && (
         <div style={styles.actions}>

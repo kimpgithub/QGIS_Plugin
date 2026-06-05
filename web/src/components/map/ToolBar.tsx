@@ -1,4 +1,5 @@
 import type { MarkupKind } from '../../types';
+import { formatPhone } from '../../lib/phone';
 
 export type ToolId = MarkupKind | null;
 
@@ -63,10 +64,10 @@ export default function ToolBar({
                   onClick={onEditContact}
                   title="내선번호 수정"
                 >
-                  - {contact}
+                  ({formatPhone(contact)})
                 </span>
               ) : (
-                <span style={styles.contact}>- {contact}</span>
+                <span style={styles.contact}>({formatPhone(contact)})</span>
               ))}
           </span>
         )}
