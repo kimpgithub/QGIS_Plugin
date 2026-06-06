@@ -569,6 +569,22 @@ def _extract_admin_codes(text, valid_codes=None, shp_index=None):
         name_cands_set = set(_extract_korean_admin_names(
             text, shp_index['by_name']))
 
+    # Tier 0: 한글 행정명 바로 뒤 괄호 안 8자리 — 가장 확실한 정답 패턴.
+    #   "경상북도 고령군 우곡면(37570360)" 형식. 괄호·한글명 없는 분할도/도엽번호
+    #   (예: 37570370)를 원천 배제. valid_codes 있으면 교차필터, 없으면 즉시 채택.
+    name_paren = []
+    for m in re.finditer(r'[가-힣][가-힣\s]*\(\s*([\d\s]+?)\s*\)', text):
+        digits = re.sub(r'\s', '', m.group(1))
+        if len(digits) == 8 and digits.isdigit():
+            name_paren.append(digits)
+    if name_paren:
+        if valid_codes is not None:
+            f = [c for c in name_paren if c in valid_codes]
+            if f:
+                return f
+        else:
+            return name_paren
+
     # Tier 1: 괄호 안 정확 8자리 + 한글명 cross-check
     paren_candidates = []
     for m in re.finditer(r'\(\s*([\d\s]+?)\s*\)', text):
@@ -616,6 +632,33 @@ def _extract_admin_codes(text, valid_codes=None, shp_index=None):
                     f = [c for c in cross_list if c in valid_codes]
                     return f if f else cross_list
                 return cross_list
+
+        # Tier 2.5: 한글명 제약 2자리 fuzzy — 헤더 코드가 2자리 동시 오독돼
+        # 다른 valid 코드로 빠진 경우 회수 (예: 37570360→37070370).
+        # 비교 대상을 name_cands(한글 읍/면명이 가리키는 코드)로 한정하므로
+        # 전국 코드여도 false-positive 없음. (8자리 동일 길이 윈도우만 비교)
+        if name_cands:
+            tokens = {re.sub(r'\s', '', m.group(1))
+                      for m in re.finditer(r'\(\s*([\d\s]+?)\s*\)', text)}
+            tokens.update(re.findall(r'\d{7,11}', text))
+            two_sub = set()
+            for tok in tokens:
+                if not (tok.isdigit() and 7 <= len(tok) <= 11):
+                    continue
+                windows = ([tok] if len(tok) == 8
+                           else [tok[i:i + 8] for i in range(len(tok) - 7)])
+                for win in windows:
+                    for nc in name_cands:
+                        if sum(a != b for a, b in zip(win, nc)) <= 2:
+                            two_sub.add(nc)
+            if two_sub:
+                ts = list(two_sub)
+                if valid_codes is not None:
+                    f = [c for c in ts if c in valid_codes]
+                    if f:
+                        return f
+                else:
+                    return ts
 
         # Tier 3: 한글명 단독
         if name_cands:

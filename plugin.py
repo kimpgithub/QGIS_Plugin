@@ -629,7 +629,9 @@ class RecoveryTab(QWidget):
         help_label = QLabel(
             '<i>헤더가 잘렸거나 OCR이 실패/오식별한 스캔을 수동 복구합니다. '
             '파일 선택 → 행정코드·시트번호 지정 → 오른쪽 스캔에서 지도영역 '
-            '<b>4꼭지점(좌상→우상→우하→좌하)</b>을 클릭 → [저장].</i>')
+            '<b>4꼭지점(좌상→우상→우하→좌하)</b>을 클릭 → [저장].<br>'
+            '<b>이름만 틀린 경우</b>(지도영역 정상, OCR 행정코드/시트만 오류)는 '
+            '4꼭지점 없이 [<b>이름만 저장</b>] → [3]지도영역 추출부터 재실행.</i>')
         help_label.setWordWrap(True)
         help_label.setStyleSheet(
             'QLabel { padding: 4px; background: #f0f0f0; border-radius: 3px; }')
@@ -686,10 +688,18 @@ class RecoveryTab(QWidget):
 
         btn_row = QHBoxLayout()
         self.btn_save = QPushButton('저장')
+        self.btn_save.setToolTip('4꼭지점으로 지도영역 크롭 + 좌표 부여 후 저장')
         self.btn_save.clicked.connect(self._on_save)
+        self.btn_save_name = QPushButton('이름만 저장')
+        self.btn_save_name.setToolTip(
+            '지도영역은 정상이고 OCR 행정코드/시트번호만 틀린 경우. '
+            '4꼭지점 없이 identified/ 에 올바른 이름으로 재배치만 합니다 '
+            '([3]지도영역 추출이 크롭 담당).')
+        self.btn_save_name.clicked.connect(self._on_save_name)
         self.btn_skip = QPushButton('건너뜀')
         self.btn_skip.clicked.connect(self._on_skip)
         btn_row.addWidget(self.btn_save)
+        btn_row.addWidget(self.btn_save_name)
         btn_row.addWidget(self.btn_skip)
         right.addLayout(btn_row)
 
@@ -942,6 +952,60 @@ class RecoveryTab(QWidget):
         self.file_list.takeItem(self.file_list.currentRow())
         self.count_label.setText(f'대상: {self.file_list.count()}건')
         self.scan_view.reset_points()
+
+    def _on_save_name(self):
+        """이름만 수정 — 지도영역은 정상이고 admin/sheet OCR만 틀린 케이스.
+
+        4꼭지점·크롭·bbox 없이 identified/{시도}/{시군구}/{code}_{sid}.ext 로
+        올바른 이름 복사만. 이후 [3]지도영역 추출이 크롭, PDF 있으면 [3]매칭,
+        없으면 [5]가상병합이 좌표 부여. 원본은 _recovered/ 로 회수.
+        """
+        item = self.file_list.currentItem()
+        if not item:
+            self.status_label.setText('파일을 선택하세요')
+            return
+        code = self.admin_cb.currentData() or self.admin_cb.currentText().strip()
+        sid = self.sheet_cb.currentText().strip()
+        if not code or len(code) != 8 or not code.isdigit():
+            self.status_label.setText('행정코드(8자리)를 올바르게 지정하세요')
+            return
+        if not sid or '-' not in sid:
+            self.status_label.setText('시트번호를 올바르게 지정하세요 (예: 4-1)')
+            return
+        proj = self.common.project_dir.text()
+        if not proj:
+            self.status_label.setText('프로젝트 폴더를 지정하세요 (공통설정)')
+            return
+        src = item.data(Qt.UserRole)
+        try:
+            dst = self._copy_identified_renamed(src, code, sid, proj)
+        except Exception as e:
+            self.status_label.setText(f'이름만 저장 실패: {e}')
+            return
+        self._retire_src(src, proj)
+        self.file_list.takeItem(self.file_list.currentRow())
+        self.count_label.setText(f'대상: {self.file_list.count()}건')
+        self.scan_view.reset_points()
+        self.status_label.setText(
+            f'이름 재배치 완료 → {dst}\n'
+            '→ [3]지도영역 추출부터 재실행하세요 '
+            '(PDF 있으면 [3]매칭, 없으면 [5]가상병합이 좌표 부여).')
+
+    def _copy_identified_renamed(self, src, code, sid, proj):
+        """src 스캔을 identified/{시도}/{시군구}/{code}_{sid}.ext 로 복사."""
+        import shutil as _sh
+        sub = os.path.join(proj, SUB_SCAN_ID, 'identified', code[:2], code[:5])
+        os.makedirs(sub, exist_ok=True)
+        ext = os.path.splitext(src)[1] or '.jpg'
+        dst = os.path.join(sub, f'{code}_{sid}{ext}')
+        if os.path.exists(dst):
+            base = os.path.splitext(dst)[0]
+            k = 2
+            while os.path.exists(f'{base}_{k}{ext}'):
+                k += 1
+            dst = f'{base}_{k}{ext}'
+        _sh.copy2(src, dst)
+        return dst
 
     def _retire_src(self, src, proj):
         """처리 끝난 원본을 _recovered/ 로 이동. 프로젝트(2_scan_id) 내부
