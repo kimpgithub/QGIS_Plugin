@@ -23,6 +23,7 @@
 import argparse
 import glob
 import os
+import re
 import sys
 import time
 
@@ -64,6 +65,20 @@ def _find_tiles(in_dir):
     return sorted(glob.glob(os.path.join(in_dir, '*.jpg')))
 
 
+def _auto_out_name(tiles):
+    """입력 타일명에서 출력 파일명 자동 생성 → '{행정코드}_scan_merged.jpg'.
+
+    예: 37570360_4-1_modified.tif … → 37570360_scan_merged.jpg
+    8자리 행정코드가 없으면 공통 접두(없으면 'merged')로 폴백.
+    """
+    bases = [os.path.splitext(os.path.basename(t))[0] for t in tiles]
+    m = re.match(r'(\d{8})', bases[0])
+    if m and all(b.startswith(m.group(1)) for b in bases):
+        return f'{m.group(1)}_scan_merged.jpg'
+    prefix = os.path.commonprefix(bases).rstrip('_-')
+    return f'{prefix or "merged"}_scan_merged.jpg'
+
+
 def _tile_meta(path):
     """타일 georef 메타: (minx, miny, maxx, maxy, ps_x, ps_y, w, h)."""
     with rasterio.open(path) as ds:
@@ -73,12 +88,20 @@ def _tile_meta(path):
                 abs(t.a), abs(t.e), ds.width, ds.height)
 
 
-def merge_tiles(in_dir, out_path, ps=None, quality=90, viz=True):
+def merge_tiles(in_dir, out_path=None, ps=None, quality=90, viz=True):
     t0 = time.time()
     tiles = _find_tiles(in_dir)
     if not tiles:
         raise SystemExit(f'입력 타일 없음: {in_dir}')
     print(f'[입력] {len(tiles)}개 타일')
+
+    # 출력 경로 결정 — 미지정/폴더면 입력 타일명에서 파일명 자동 생성
+    if not out_path:
+        out_path = os.path.join(in_dir, _auto_out_name(tiles))
+    elif os.path.isdir(out_path) or not out_path.lower().endswith(
+            ('.jpg', '.jpeg')):
+        out_path = os.path.join(out_path, _auto_out_name(tiles))
+    print(f'[출력] {out_path}')
 
     metas = [_tile_meta(p) for p in tiles]
     minx = min(m[0] for m in metas)
@@ -147,6 +170,16 @@ def merge_tiles(in_dir, out_path, ps=None, quality=90, viz=True):
                 f'{-ps:.13f}\n{minx + ps / 2:.7f}\n{maxy - ps / 2:.7f}\n')
     with open(stem + '.prj', 'w') as f:
         f.write(PRJ_5179)
+    # .aux.xml — GDAL/QGIS 가 EPSG:5179 를 확실히 인식하도록 SRS+GeoTransform 병기
+    # (GeoTransform 원점은 좌상단 픽셀 '모서리' = minx, maxy)
+    wkt = rasterio.crs.CRS.from_epsg(5179).to_wkt()
+    with open(out_path + '.aux.xml', 'w') as f:
+        f.write(
+            '<PAMDataset>\n'
+            f'  <SRS dataAxisToSRSAxisMapping="2,1">{wkt}</SRS>\n'
+            f'  <GeoTransform>{minx:.10f}, {ps:.16f}, 0, '
+            f'{maxy:.10f}, 0, {-ps:.16f}</GeoTransform>\n'
+            '</PAMDataset>\n')
 
     if viz:
         sc = 1600.0 / max(bgr.shape[:2])
@@ -168,7 +201,9 @@ def main():
         description='정합된 분할 타일 → 단일 병합본 (JPG+JGW+PRJ)')
     ap.add_argument('--in', dest='in_dir', required=True,
                     help='정합 타일 폴더 (_modified.tif 우선)')
-    ap.add_argument('--out', required=True, help='출력 JPG 경로')
+    ap.add_argument('--out', default=None,
+                    help='출력 JPG 경로 또는 폴더. 미지정/폴더면 입력 타일명에서 '
+                         '{행정코드}_scan_merged.jpg 자동 생성')
     ap.add_argument('--ps', type=float, default=None,
                     help='출력 픽셀크기(m). 미지정 시 입력 중앙값')
     ap.add_argument('--quality', type=int, default=90, help='JPEG 품질')

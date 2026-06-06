@@ -1277,7 +1277,8 @@ class MergeGeorefTilesTab(StageTab):
     def build_options(self):
         from qgis.PyQt.QtWidgets import QSpinBox
         self.in_dir = PathRow('정합 타일 폴더 (_modified.tif/월드파일 jpg)', 'dir')
-        self.out_file = PathRow('출력 JPG 경로', 'save', 'JPEG (*.jpg)')
+        self.out_file = PathRow(
+            '출력 경로 (비우면 입력폴더, 파일명 자동)', 'save', 'JPEG (*.jpg)')
         self.quality = QSpinBox()
         self.quality.setRange(60, 100); self.quality.setValue(90)
         self.ps = QDoubleSpinBox()
@@ -1290,8 +1291,9 @@ class MergeGeorefTilesTab(StageTab):
         self.opt_layout.addRow('출력 픽셀크기(m, 0=자동):', self.ps)
         help_lbl = QLabel(
             '<i>수동/서버사이드로 이미 정합된 분할 타일을 공통격자에 합성해 '
-            '단일 JPG+JGW+PRJ 를 만듭니다. (SHP 정합 단계 없이 좌표만 보존). '
-            '흰 여백은 자동 투명 처리.</i>')
+            '단일 JPG+JGW+PRJ+aux.xml(EPSG:5179) 을 만듭니다. (SHP 정합 단계 '
+            '없이 좌표만 보존). 흰 여백은 자동 투명 처리. 출력 경로를 비우면 '
+            '입력 타일명에서 {행정코드}_scan_merged.jpg 자동 생성.</i>')
         help_lbl.setWordWrap(True)
         self.opt_layout.addRow(help_lbl)
 
@@ -1301,19 +1303,18 @@ class MergeGeorefTilesTab(StageTab):
 
     def get_out_dir(self):
         out = self.out_file.text()
-        return os.path.dirname(out) if out else ''
+        if out:
+            return out if os.path.isdir(out) else os.path.dirname(out)
+        return self.in_dir.text()
 
     def get_argv(self):
         in_dir = self.in_dir.text()
         out = self.out_file.text()
         if not in_dir or not os.path.isdir(in_dir):
             raise ValueError('정합 타일 폴더를 지정하세요')
-        if not out:
-            raise ValueError('출력 JPG 경로를 지정하세요')
-        if not out.lower().endswith('.jpg'):
-            out += '.jpg'
-        argv = ['--in', in_dir, '--out', out,
-                '--quality', str(self.quality.value())]
+        argv = ['--in', in_dir, '--quality', str(self.quality.value())]
+        if out:   # 비우면 스크립트가 입력폴더에 {행정코드}_scan_merged.jpg 자동 생성
+            argv += ['--out', out]
         if self.ps.value() > 0:
             argv += ['--ps', str(self.ps.value())]
         return argv
