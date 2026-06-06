@@ -123,6 +123,9 @@ class PathRow(QWidget):
     def _browse(self):
         if self.mode == 'dir':
             p = QFileDialog.getExistingDirectory(self, '폴더 선택', self.text())
+        elif self.mode == 'save':
+            p, _ = QFileDialog.getSaveFileName(self, '저장 경로', self.text(),
+                                               self.filter_str)
         else:
             p, _ = QFileDialog.getOpenFileName(self, '파일 선택', self.text(),
                                                 self.filter_str)
@@ -1260,6 +1263,63 @@ class Stage4Tab(StageTab):
 
 
 # ============================================================
+# 정합 타일 병합 (이미 정합된 GeoTIFF/월드파일 → 단일 병합본)
+# ============================================================
+
+class MergeGeorefTilesTab(StageTab):
+    stage_name = '[병합] 정합 타일 병합'
+
+    def __init__(self, common):
+        from .tools import merge_georef_tiles
+        self.stage_module = merge_georef_tiles
+        super().__init__(common)
+
+    def build_options(self):
+        from qgis.PyQt.QtWidgets import QSpinBox
+        self.in_dir = PathRow('정합 타일 폴더 (_modified.tif/월드파일 jpg)', 'dir')
+        self.out_file = PathRow('출력 JPG 경로', 'save', 'JPEG (*.jpg)')
+        self.quality = QSpinBox()
+        self.quality.setRange(60, 100); self.quality.setValue(90)
+        self.ps = QDoubleSpinBox()
+        self.ps.setRange(0.0, 5.0); self.ps.setDecimals(4)
+        self.ps.setValue(0.0); self.ps.setSingleStep(0.01)
+        self.ps.setToolTip('0 = 입력 중앙값 자동')
+        self.opt_layout.addRow(self.in_dir)
+        self.opt_layout.addRow(self.out_file)
+        self.opt_layout.addRow('JPEG 품질:', self.quality)
+        self.opt_layout.addRow('출력 픽셀크기(m, 0=자동):', self.ps)
+        help_lbl = QLabel(
+            '<i>수동/서버사이드로 이미 정합된 분할 타일을 공통격자에 합성해 '
+            '단일 JPG+JGW+PRJ 를 만듭니다. (SHP 정합 단계 없이 좌표만 보존). '
+            '흰 여백은 자동 투명 처리.</i>')
+        help_lbl.setWordWrap(True)
+        self.opt_layout.addRow(help_lbl)
+
+    def io_summary(self):
+        return ([('정합 타일 폴더', self.in_dir.text())],
+                self.get_out_dir())
+
+    def get_out_dir(self):
+        out = self.out_file.text()
+        return os.path.dirname(out) if out else ''
+
+    def get_argv(self):
+        in_dir = self.in_dir.text()
+        out = self.out_file.text()
+        if not in_dir or not os.path.isdir(in_dir):
+            raise ValueError('정합 타일 폴더를 지정하세요')
+        if not out:
+            raise ValueError('출력 JPG 경로를 지정하세요')
+        if not out.lower().endswith('.jpg'):
+            out += '.jpg'
+        argv = ['--in', in_dir, '--out', out,
+                '--quality', str(self.quality.value())]
+        if self.ps.value() > 0:
+            argv += ['--ps', str(self.ps.value())]
+        return argv
+
+
+# ============================================================
 # Stage 5
 # ============================================================
 
@@ -1392,6 +1452,7 @@ class GISScanToolsDialog(QDialog):
         self.tabs.addTab(ExtractMapTab(self.common), '2b. 지도영역 추출')
         self.tabs.addTab(Stage3Tab(self.common), '3. 매칭+워핑')
         self.tabs.addTab(Stage4Tab(self.common), '4. 사분면 병합')
+        self.tabs.addTab(MergeGeorefTilesTab(self.common), '4a. 정합 타일 병합')
         self.tabs.addTab(Stage5Tab(self.common), '5. 경계 검수')
         self.tabs.addTab(Stage6Tab(self.common), '6. COG 게시')
         layout.addWidget(self.tabs, 1)
