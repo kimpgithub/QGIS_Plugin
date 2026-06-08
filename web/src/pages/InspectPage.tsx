@@ -39,7 +39,12 @@ import type {
   MarkupStatus,
 } from '../types';
 
-export default function InspectPage() {
+type InspectPageProps = {
+  // 발주처 총괄(00000000) 일 때만 전달 — 상단바에 '관리 현황' 버튼 노출.
+  onOpenAdmin?: () => void;
+};
+
+export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
   const { user, signOut } = useAuth();
   const isMaster = user?.role === 'master';
 
@@ -467,6 +472,7 @@ export default function InspectPage() {
         adminLabel={adminLabel}
         userId={user?.id}
         onLogout={signOut}
+        onOpenAdmin={onOpenAdmin}
       />
       <div style={styles.body}>
         <LayerControls

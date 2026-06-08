@@ -121,6 +121,17 @@ def check_admin_access(user: dict, adm_cd: str):
         raise HTTPException(status_code=403, detail="본인 adm_cd 외 접근 불가")
 
 
+# 슈퍼관리자(발주처 총괄) 전용 — master 중에서도 00000000 한 계정만.
+# 관리 현황 페이지(지역별 수정요청 현황·데이터 업로드 이력)는 이 계정만 열람.
+SUPERADMIN_CD = "00000000"
+
+
+def require_superadmin(user: dict = Depends(get_user)) -> dict:
+    if user["role"] != "master" or (user.get("admin_cd") or "").strip() != SUPERADMIN_CD:
+        raise HTTPException(status_code=403, detail="관리 현황은 00000000 계정만 열람 가능")
+    return user
+
+
 # ---------------------------------------------------------------- models
 class LoginBody(BaseModel):
     id: str
@@ -701,3 +712,63 @@ def delete_markup(markup_id: int, user: dict = Depends(get_user)):
         )
     execute("DELETE FROM review_markup WHERE id = %s", (markup_id,))
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------- 관리 현황 (00000000 전용)
+@app.get("/api/admin/markup-stats")
+def admin_markup_stats(_: dict = Depends(require_superadmin)):
+    """지역별 수정요청 현황 — 읍면(adm_cd) 단위로 상태별 건수 집계.
+
+    수정요청이 한 건이라도 있는 읍면만 반환. 대기 많은 순 → 총건수 순.
+    """
+    rows = fetchall(
+        """
+        SELECT n.adm_cd, n.adm_nm, n.sgg_nm, n.sido_nm,
+               COUNT(*)                                        AS total,
+               COUNT(*) FILTER (WHERE m.status = 'pending')    AS pending,
+               COUNT(*) FILTER (WHERE m.status = 'applied')    AS applied,
+               COUNT(*) FILTER (WHERE m.status = 'rejected')   AS rejected,
+               MAX(m.created_at)                               AS last_request_at
+        FROM review_markup m
+        JOIN admin_node n ON n.adm_cd = m.adm_cd
+        GROUP BY n.adm_cd, n.adm_nm, n.sgg_nm, n.sido_nm
+        ORDER BY pending DESC, total DESC, n.adm_cd
+        """
+    )
+    return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]
+
+
+@app.get("/api/admin/upload-history")
+def admin_upload_history(_: dict = Depends(require_superadmin)):
+    """데이터 업로드 이력 — 읍면 단위로 항공사진(COG)·경계(boundary) 적재 현황.
+
+    cog_catalog.published_at = 항공사진 업로드 시각,
+    boundary 의 행 수/최종 updated_at = 경계 적재 건수/최종 업로드 시각.
+    둘 중 하나라도 있는 읍면만, 최근 활동 순으로 반환.
+    """
+    rows = fetchall(
+        """
+        SELECT n.adm_cd, n.adm_nm, n.sgg_nm, n.sido_nm,
+               c.published_at        AS cog_published_at,
+               b.feature_count       AS boundary_count,
+               b.boundary_updated_at AS boundary_updated_at,
+               b.last_updated_by     AS boundary_updated_by
+        FROM admin_node n
+        LEFT JOIN cog_catalog c ON c.adm_cd = n.adm_cd
+        LEFT JOIN (
+            SELECT adm_cd,
+                   COUNT(*)            AS feature_count,
+                   MAX(updated_at)     AS boundary_updated_at,
+                   (ARRAY_AGG(updated_by ORDER BY updated_at DESC NULLS LAST))[1]
+                                       AS last_updated_by
+            FROM boundary
+            GROUP BY adm_cd
+        ) b ON b.adm_cd = n.adm_cd
+        WHERE c.adm_cd IS NOT NULL OR b.adm_cd IS NOT NULL
+        ORDER BY GREATEST(
+                   COALESCE(c.published_at, 'epoch'::timestamptz),
+                   COALESCE(b.boundary_updated_at, 'epoch'::timestamptz)
+                 ) DESC, n.adm_cd
+        """
+    )
+    return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]

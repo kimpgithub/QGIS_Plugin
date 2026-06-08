@@ -10,6 +10,8 @@ type Props = {
   adminLabel?: string;
   userId?: string;
   onLogout?: () => void;
+  // 발주처 총괄(00000000) 일 때만 전달 — '관리 현황' 진입 버튼.
+  onOpenAdmin?: () => void;
 };
 
 // '라인삭제'(delete) 툴은 혼동을 일으켜 제거 — 요청 삭제는 수정요청 카드의
@@ -28,6 +30,7 @@ export default function ToolBar({
   adminLabel,
   userId,
   onLogout,
+  onOpenAdmin,
 }: Props) {
   return (
     <div style={styles.bar}>
@@ -49,6 +52,11 @@ export default function ToolBar({
         )}
       </div>
       <div style={styles.right}>
+        {onOpenAdmin && (
+          <button type="button" style={styles.admin} onClick={onOpenAdmin}>
+            관리 현황
+          </button>
+        )}
         {adminLabel && <span style={styles.adm}>{adminLabel}</span>}
         {userId && <span style={styles.user}>{userId}</span>}
         {onLogout && (
@@ -89,6 +97,15 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#1f6feb',
     color: '#fff',
     borderColor: '#1f6feb',
+  },
+  admin: {
+    ...baseBtn,
+    padding: '4px 12px',
+    fontSize: 12,
+    background: '#1f2937',
+    color: '#fff',
+    borderColor: '#1f2937',
+    fontWeight: 600,
   },
   adm: { fontSize: 13, color: '#374151', fontWeight: 500, whiteSpace: 'nowrap' },
   user: { fontSize: 12, color: '#6b7280' },
