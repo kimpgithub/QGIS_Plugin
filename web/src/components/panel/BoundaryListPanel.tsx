@@ -96,7 +96,7 @@ export default function BoundaryListPanel({
     <div style={styles.panel}>
       <div style={styles.head}>
         <b style={styles.title}>
-          행정리 목록 ({showAll ? total : `비고 ${remarkCount}`})
+          행정리 목록 ({showAll ? total : `보완사항 ${remarkCount}`})
         </b>
         <button type="button" style={styles.close} onClick={onClose}>
           ✕
@@ -118,7 +118,7 @@ export default function BoundaryListPanel({
               style={showAll ? styles.filterBtn : styles.filterBtnActive}
               onClick={() => setShowAll(false)}
             >
-              비고 있음 ({remarkCount})
+              보완사항 있음 ({remarkCount})
             </button>
             <button
               type="button"
@@ -132,7 +132,7 @@ export default function BoundaryListPanel({
             style={styles.search}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="행정리명 · 부호 · 비고 검색"
+            placeholder="행정리명 · 부호 · 보완사항 검색"
           />
           <div style={styles.hint}>행을 더블클릭하면 해당 위치로 이동합니다</div>
           <div style={styles.tableWrap}>
@@ -141,7 +141,7 @@ export default function BoundaryListPanel({
                 <tr>
                   <th style={styles.th}>행정리명</th>
                   <th style={{ ...styles.th, width: 56 }}>부호</th>
-                  <th style={styles.th}>비고</th>
+                  <th style={styles.th}>보완사항</th>
                   <th style={{ ...styles.th, width: 44, textAlign: 'center' }}>완료</th>
                 </tr>
               </thead>
@@ -153,7 +153,7 @@ export default function BoundaryListPanel({
                         '검색 결과가 없습니다'
                       ) : (
                         <>
-                          비고가 있는 행정리가 없습니다
+                          보완사항이 있는 행정리가 없습니다
                           <br />
                           <button
                             type="button"
