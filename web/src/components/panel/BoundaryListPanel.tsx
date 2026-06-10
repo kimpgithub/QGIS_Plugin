@@ -16,11 +16,9 @@ type Props = {
 const hasRemark = (f: GjFeature<BoundaryProps>) =>
   Boolean(f.properties.remark?.trim());
 
-// 완료여부 체크 대상 — 비고(remark)가 있고 부호(ri_cd)가 있는 행정리.
-// 작업자가 임의 작업한 경계의 검토 완료 체크용. 부호가 없으면 저장 키를 만들 수
-// 없어 제외(비고만 있고 부호 없는 행은 체크박스 미표시).
-const isConfirmTarget = (f: GjFeature<BoundaryProps>) =>
-  hasRemark(f) && Boolean(f.properties.ri_cd?.trim());
+// 완료여부 체크 대상 — 보완사항(remark)이 있는 행정리. 부호 유무와 무관.
+// 부호 없는 행은 일련번호(gid)를 저장 키로 사용하므로 체크 상태가 로그인 간 유지됨.
+const isConfirmTarget = (f: GjFeature<BoundaryProps>) => hasRemark(f);
 
 export default function BoundaryListPanel({
   open,
@@ -35,8 +33,8 @@ export default function BoundaryListPanel({
   const [confirmOverride, setConfirmOverride] = useState<Record<string, boolean>>({});
   const [confirmBusy, setConfirmBusy] = useState<Record<string, boolean>>({});
 
-  const confirmKey = (f: GjFeature<BoundaryProps>) =>
-    `${f.properties.adm_cd}/${f.properties.ri_cd?.trim() ?? ''}`;
+  // 클라이언트 낙관적 갱신용 키 — 행마다 유일한 gid 사용(부호 없는 행도 충돌 없음).
+  const confirmKey = (f: GjFeature<BoundaryProps>) => String(f.properties.gid);
   const isConfirmed = (f: GjFeature<BoundaryProps>) => {
     const k = confirmKey(f);
     return k in confirmOverride ? confirmOverride[k] : Boolean(f.properties.confirmed);
@@ -45,13 +43,14 @@ export default function BoundaryListPanel({
   async function toggleConfirm(f: GjFeature<BoundaryProps>) {
     const adm_cd = f.properties.adm_cd;
     const ri_cd = f.properties.ri_cd?.trim() ?? '';
+    const gid = f.properties.gid;
     const k = confirmKey(f);
     if (confirmBusy[k]) return;
     const next = !isConfirmed(f);
     setConfirmOverride((s) => ({ ...s, [k]: next }));
     setConfirmBusy((s) => ({ ...s, [k]: true }));
     try {
-      await setBoundaryConfirm(adm_cd, ri_cd, next);
+      await setBoundaryConfirm(adm_cd, ri_cd, gid, next);
     } catch {
       // 실패 시 롤백
       setConfirmOverride((s) => ({ ...s, [k]: !next }));

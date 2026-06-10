@@ -315,7 +315,8 @@ def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
         ) AS fc
         FROM boundary b
         LEFT JOIN boundary_confirm c
-          ON c.adm_cd = b.adm_cd AND c.ri_cd = b.ri_cd
+          ON c.adm_cd = b.adm_cd
+         AND c.ri_cd = COALESCE(NULLIF(btrim(b.ri_cd), ''), 'gid:' || b.gid)
         WHERE b.adm_cd = %s
         """,
         (adm_cd,),
@@ -325,18 +326,24 @@ def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
 
 class ConfirmBody(BaseModel):
     adm_cd: str
-    ri_cd: str
+    ri_cd: str = ""
+    gid: int | None = None
     confirmed: bool
 
 
 @app.put("/api/boundary/confirm")
 def set_boundary_confirm(body: ConfirmBody, user: dict = Depends(get_user)):
-    """행정리경계 확인 완료여부 토글. 행 존재=완료. (adm_cd, ri_cd) 키.
-    부호(ri_cd)가 있는 행정리만 대상 — 빈 부호는 키가 안 잡혀 거부."""
+    """행정리경계 확인 완료여부 토글. 행 존재=완료.
+
+    저장 키(ri_cd 컬럼): 부호가 있으면 부호, 없으면 'gid:<gid>'.
+      · 부호 키: 재업로드(경계 재제출) 후에도 유지.
+      · gid 키: 로그인 간 유지되나 해당 읍면 재업로드 시 초기화(허용).
+    부호도 gid 도 없으면 키를 못 만들어 거부."""
     check_admin_access(user, body.adm_cd)
     ri_cd = (body.ri_cd or "").strip()
-    if not ri_cd:
-        raise HTTPException(status_code=400, detail="부호(ri_cd)가 있는 행정리만 완료 체크 가능")
+    key = ri_cd if ri_cd else (f"gid:{body.gid}" if body.gid is not None else "")
+    if not key:
+        raise HTTPException(status_code=400, detail="부호 또는 gid 가 있어야 완료 체크 가능")
     if body.confirmed:
         execute(
             """
@@ -345,14 +352,14 @@ def set_boundary_confirm(body: ConfirmBody, user: dict = Depends(get_user)):
             ON CONFLICT (adm_cd, ri_cd) DO UPDATE
               SET confirmed_by = EXCLUDED.confirmed_by, confirmed_at = now()
             """,
-            (body.adm_cd, ri_cd, user["admin_cd"]),
+            (body.adm_cd, key, user["admin_cd"]),
         )
     else:
         execute(
             "DELETE FROM boundary_confirm WHERE adm_cd = %s AND ri_cd = %s",
-            (body.adm_cd, ri_cd),
+            (body.adm_cd, key),
         )
-    return {"adm_cd": body.adm_cd, "ri_cd": ri_cd, "confirmed": body.confirmed}
+    return {"adm_cd": body.adm_cd, "key": key, "confirmed": body.confirmed}
 
 
 @app.put("/api/boundary")

@@ -8,15 +8,17 @@ export function getBoundary(
   return api<BoundaryCollection>('/api/boundary', { query: { adm_cd } });
 }
 
-// PUT /api/boundary/confirm — 행정리경계 확인 완료여부 토글 ((adm_cd, ri_cd) 키)
+// PUT /api/boundary/confirm — 행정리경계 확인 완료여부 토글.
+// 저장 키: 부호(ri_cd) 있으면 부호, 없으면 일련번호(gid). 둘 다 보내고 서버가 선택.
 export function setBoundaryConfirm(
   adm_cd: string,
   ri_cd: string,
+  gid: number,
   confirmed: boolean
-): Promise<{ adm_cd: string; ri_cd: string; confirmed: boolean }> {
+): Promise<{ adm_cd: string; key: string; confirmed: boolean }> {
   return api('/api/boundary/confirm', {
     method: 'PUT',
-    body: { adm_cd, ri_cd, confirmed },
+    body: { adm_cd, ri_cd, gid, confirmed },
   });
 }
 

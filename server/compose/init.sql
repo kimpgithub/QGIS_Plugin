@@ -41,9 +41,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS boundary_adm_ri_uniq
 -- ---------------------------------------------------------------- boundary_confirm
 -- 행정리경계 확인 완료여부 — 작업자가 임의로 작업한 경계의 검토 완료 체크.
 -- (adm_cd, ri_cd) 키 — 플러그인 재제출로 gid 가 바뀌어도 유지. 행 존재 = 완료.
+-- ri_cd 컬럼은 "완료여부 저장 키" — 부호 있으면 ri_cd, 없으면 'gid:<gid>' 를 담는다
+-- (부호 없는 행도 일련번호로 체크 저장 가능. 재업로드 시 gid 키는 초기화됨).
 CREATE TABLE IF NOT EXISTS boundary_confirm (
     adm_cd       CHAR(8)     NOT NULL,
-    ri_cd        VARCHAR(10) NOT NULL,
+    ri_cd        VARCHAR(40) NOT NULL,
     confirmed_by CHAR(8),
     confirmed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (adm_cd, ri_cd)
