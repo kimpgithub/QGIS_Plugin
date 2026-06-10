@@ -22,6 +22,14 @@ const BTNS: { id: Exclude<ToolId, null>; label: string }[] = [
   { id: 'attr', label: '속성등록' },
 ];
 
+// 속성등록 옆 자료 다운로드 — web/public/ 루트의 PDF (Vite 가 dist 로 복사해 서빙).
+// href 는 한글·공백·괄호가 있어 encodeURI 로 인코딩. download 속성(값 없음)은
+// 리소스 원래 파일명(한글)으로 저장되게 한다.
+const DOCS: { label: string; file: string }[] = [
+  { label: '지역조사표', file: '2025 농림어업총조사(지역조사표).pdf' },
+  { label: '사용자 메뉴얼', file: '사용자 메뉴얼.pdf' },
+];
+
 export default function ToolBar({
   active,
   onChange,
@@ -44,6 +52,18 @@ export default function ToolBar({
           >
             {b.label}
           </button>
+        ))}
+        <span style={styles.divider} />
+        {DOCS.map((d) => (
+          <a
+            key={d.file}
+            href={encodeURI(`/${d.file}`)}
+            download
+            style={styles.download}
+            title={`${d.file} 다운로드`}
+          >
+            <span style={styles.dlIcon}>⤓</span> {d.label}
+          </a>
         ))}
         {showAdminPicker && (
           <button type="button" style={styles.btn} onClick={onOpenAdminPicker}>
@@ -89,7 +109,25 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     padding: '0 12px',
   },
-  left: { display: 'flex', gap: 6 },
+  left: { display: 'flex', gap: 6, alignItems: 'center' },
+  divider: {
+    width: 1,
+    height: 22,
+    background: '#d0d3da',
+    margin: '0 4px',
+  },
+  download: {
+    ...baseBtn,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    textDecoration: 'none',
+    color: '#0f766e',
+    borderColor: '#99c7c1',
+    background: '#f0fbf9',
+    whiteSpace: 'nowrap',
+  },
+  dlIcon: { fontSize: 14, fontWeight: 700, lineHeight: 1 },
   right: { display: 'flex', gap: 12, alignItems: 'center' },
   btn: baseBtn,
   btnActive: {
