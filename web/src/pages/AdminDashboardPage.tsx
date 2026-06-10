@@ -7,6 +7,7 @@ import {
   type UploadHistory,
 } from '../api/admin';
 import { ApiError } from '../api/client';
+import { formatKST } from '../lib/datetime';
 
 type Tab = 'markup' | 'upload';
 
@@ -246,25 +247,8 @@ function emph(n: number, color: string): React.CSSProperties {
   return n > 0 ? { color, fontWeight: 700 } : {};
 }
 
-// DB 는 시각을 UTC(TIMESTAMPTZ)로 응답 → 한국시간(KST, UTC+9)으로 변환해 표시.
-// en-CA 로케일은 "2026-06-05, 15:45" 형태라 콤마만 제거하면 "YYYY-MM-DD HH:mm".
-const KST_FMT = new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'Asia/Seoul',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-});
-
-function fmt(s?: string | null): string {
-  if (!s) return '-';
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return s.replace('T', ' ').slice(0, 16);
-  // hour12:false 가 자정을 '24:00' 으로 내는 quirk 보정(날짜는 이미 올바름).
-  return KST_FMT.format(d).replace(',', '').replace(' 24:', ' 00:');
-}
+// 시각은 한국시간(KST)으로 표시 — 공용 formatKST 사용. 값 없으면 '-'.
+const fmt = (s?: string | null) => formatKST(s, '-');
 
 const styles: Record<string, React.CSSProperties> = {
   page: {

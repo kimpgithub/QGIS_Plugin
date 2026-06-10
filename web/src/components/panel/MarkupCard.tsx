@@ -1,4 +1,5 @@
 import type { Markup, MarkupKind, MarkupStatus } from '../../types';
+import { formatKST } from '../../lib/datetime';
 
 const KIND_LABEL: Record<MarkupKind, string> = {
   add: '등록',
@@ -137,11 +138,8 @@ function defaultNote(k: MarkupKind) {
   }
 }
 
-function fmt(s?: string | null): string {
-  if (!s) return '';
-  // ISO → "YYYY-MM-DD HH:mm"
-  return s.replace('T', ' ').slice(0, 16);
-}
+// 시각은 한국시간(KST)으로 표시 — 공용 formatKST 사용.
+const fmt = (s?: string | null) => formatKST(s);
 
 const styles: Record<string, React.CSSProperties> = {
   card: {

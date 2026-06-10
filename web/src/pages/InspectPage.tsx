@@ -26,6 +26,7 @@ import {
   type AdminOutlineCollection,
 } from '../api/admin_outline';
 import { attachTool, type ActiveTool } from '../components/map/tools';
+import { formatKST } from '../lib/datetime';
 import type {
   AdminUnit,
   BoundaryCollection,
@@ -555,7 +556,7 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
               )}
               <div style={styles.infoMeta}>
                 수정 {boundaryInfo.updated_by || '-'} ·{' '}
-                {(boundaryInfo.updated_at || '').replace('T', ' ').slice(0, 16)}
+                {formatKST(boundaryInfo.updated_at)}
               </div>
             </div>
           )}
