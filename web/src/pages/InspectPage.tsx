@@ -159,6 +159,17 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
       .finally(() => setLoading(false));
   }, [admin]);
 
+  // 지자체 담당자(role=user)는 읍면 하나만 보므로, 본인 경계 데이터가 처음
+  // 로드되면 행정리 목록을 자동으로 펼친다(빈 화면 깜빡임 방지 위해 데이터 도착 후).
+  // 한 번만 자동 오픈 — 사용자가 닫으면 다시 강제로 열지 않음. 마스터는 제외.
+  const autoOpenedRiList = useRef(false);
+  useEffect(() => {
+    if (!isMaster && boundary && !autoOpenedRiList.current) {
+      autoOpenedRiList.current = true;
+      setRiListOpen(true);
+    }
+  }, [isMaster, boundary]);
+
   // markup 을 FC 형태로 MapView 에 전달.
   // properties 에 geometry 가 들어있으면 ol/format/GeoJSON.readFeatures 가
   // setProperties 단계에서 OL Geometry slot 을 raw GeoJSON 으로 덮어써
