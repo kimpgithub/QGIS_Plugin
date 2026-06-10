@@ -622,9 +622,18 @@ class WorkListTab(QWidget):
     # --- 행정리 선택 → 자동부여 준비 ---
 
     def _on_row_selected(self, row):
-        if row < 0 or row >= len(self._roster):
+        if row < 0 or row >= self.table.rowCount():
             return
-        r = self._roster[row]
+        # 정렬 시 화면 행번호 ≠ _roster 인덱스 → 셀의 코드로 레코드를 조회한다.
+        it_adm = self.table.item(row, 0)
+        it_ri = self.table.item(row, 2)
+        adm_cd = it_adm.text().strip() if it_adm else ''
+        ri_cd = it_ri.text().strip() if it_ri else ''
+        r = next((x for x in self._roster
+                  if (x.get('adm_cd', '') or '').strip() == adm_cd
+                  and (x.get('ri_cd', '') or '').strip() == ri_cd), None)
+        if r is None:
+            return
         self._current_admin = r.get('adm_cd', '')
         self._current_admin_nm = r.get('adm_nm', '')
         layer_control.set_current_ri(
@@ -842,10 +851,20 @@ class WorkListTab(QWidget):
             QMessageBox.warning(self, '경고', '작업데이터 레이어가 없습니다.')
             return
         row = self.table.currentRow()
-        if row < 0 or row >= len(self._roster):
+        if row < 0 or row >= self.table.rowCount():
             QMessageBox.warning(self, '경고', '명부에서 부여할 행정리 행을 먼저 선택하세요.')
             return
-        rec = self._roster[row]
+        # 정렬 시 화면 행번호 ≠ _roster 인덱스 → 셀의 코드로 레코드를 조회한다.
+        it_adm = self.table.item(row, 0)
+        it_ri = self.table.item(row, 2)
+        adm_cd = it_adm.text().strip() if it_adm else ''
+        ri_cd = it_ri.text().strip() if it_ri else ''
+        rec = next((x for x in self._roster
+                    if (x.get('adm_cd', '') or '').strip() == adm_cd
+                    and (x.get('ri_cd', '') or '').strip() == ri_cd), None)
+        if rec is None:
+            QMessageBox.warning(self, '경고', '명부에서 부여할 행정리 행을 먼저 선택하세요.')
+            return
         fids = list(work.selectedFeatureIds())
         if not fids:
             QMessageBox.warning(
