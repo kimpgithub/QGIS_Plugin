@@ -53,6 +53,11 @@ export default function ToolBar({
             {b.label}
           </button>
         ))}
+        {showAdminPicker && (
+          <button type="button" style={styles.btn} onClick={onOpenAdminPicker}>
+            행정읍면 선택
+          </button>
+        )}
         <span style={styles.divider} />
         {DOCS.map((d) => (
           <a
@@ -65,11 +70,6 @@ export default function ToolBar({
             <span style={styles.dlIcon}>⤓</span> {d.label}
           </a>
         ))}
-        {showAdminPicker && (
-          <button type="button" style={styles.btn} onClick={onOpenAdminPicker}>
-            행정읍면 선택
-          </button>
-        )}
       </div>
       <div style={styles.right}>
         {onOpenAdmin && (
