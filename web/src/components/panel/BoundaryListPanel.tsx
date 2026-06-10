@@ -118,7 +118,7 @@ export default function BoundaryListPanel({
               style={showAll ? styles.filterBtn : styles.filterBtnActive}
               onClick={() => setShowAll(false)}
             >
-              보완사항 있음 ({remarkCount})
+              보완사항 ({remarkCount})
             </button>
             <button
               type="button"
