@@ -35,3 +35,29 @@ export type UploadHistory = {
 export function listUploadHistory(): Promise<UploadHistory[]> {
   return api<UploadHistory[]>('/api/admin/upload-history');
 }
+
+// GET /api/admin/markup-list — 개별 수정요청 전체 목록(전국·모든 상태)
+export type MarkupItem = {
+  id: number;
+  adm_cd: string;
+  adm_nm: string | null;
+  kind: 'add' | 'delete' | 'attr' | 'delete_mark';
+  status: 'pending' | 'applied' | 'rejected';
+  note: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+export function listMarkupItems(): Promise<MarkupItem[]> {
+  return api<MarkupItem[]>('/api/admin/markup-list');
+}
+
+// DELETE /api/admin/markup/{id} — 개별 수정요청 삭제(상태 무관, 복구 불가)
+export function deleteMarkupItem(id: number): Promise<{ deleted: number }> {
+  return api(`/api/admin/markup/${id}`, { method: 'DELETE' });
+}
+
+// DELETE /api/admin/markup — 전국 모든 수정요청 일괄 삭제(복구 불가)
+export function deleteAllMarkup(): Promise<{ deleted: number }> {
+  return api('/api/admin/markup', { method: 'DELETE' });
+}

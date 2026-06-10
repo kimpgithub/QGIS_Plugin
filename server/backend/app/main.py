@@ -779,3 +779,43 @@ def admin_upload_history(_: dict = Depends(require_superadmin)):
         """
     )
     return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]
+
+
+@app.get("/api/admin/markup-list")
+def admin_markup_list(_: dict = Depends(require_superadmin)):
+    """개별 수정요청 전체 목록(전국·모든 상태) — 총괄(00000000) 관리용.
+    읍면별로 모아 보고 개별 삭제하기 위함. 최신(id 큰 것)이 먼저."""
+    rows = fetchall(
+        """
+        SELECT m.id, m.adm_cd, n.adm_nm, m.kind, m.status,
+               m.attrs->>'note' AS note,
+               m.created_by, m.created_at
+        FROM review_markup m
+        LEFT JOIN admin_node n ON n.adm_cd = m.adm_cd
+        ORDER BY m.adm_cd, m.id DESC
+        """
+    )
+    return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]
+
+
+@app.delete("/api/admin/markup/{markup_id}")
+def admin_delete_markup(markup_id: int, _: dict = Depends(require_superadmin)):
+    """개별 수정요청 삭제 — 총괄(00000000) 전용. 상태 무관(반영 이력 포함) 삭제.
+    일반 DELETE /api/markup/{id} 의 '반영 보존' 규칙을 우회한다. 복구 불가.
+    markup_event 는 FK ON DELETE CASCADE 로 함께 삭제."""
+    row = execute(
+        "DELETE FROM review_markup WHERE id = %s RETURNING id", (markup_id,)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
+    return {"deleted": row["id"]}
+
+
+@app.delete("/api/admin/markup")
+def admin_delete_all_markup(_: dict = Depends(require_superadmin)):
+    """전국 모든 수정요청 일괄 삭제 — 총괄(00000000) 전용. 상태 무관. 복구 불가.
+    삭제 건수를 반환(프론트 확인 표시용)."""
+    row = execute(
+        "WITH d AS (DELETE FROM review_markup RETURNING 1) SELECT count(*) AS n FROM d"
+    )
+    return {"deleted": row["n"] if row else 0}
