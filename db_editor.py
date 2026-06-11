@@ -835,12 +835,16 @@ class WorkListTab(QWidget):
         if not self._feature_added_slot:
             return
         layer, added, changed = self._feature_added_slot
-        for sig, slot in ((layer.featureAdded, added),
-                          (layer.geometryChanged, changed)):
-            try:
-                sig.disconnect(slot)
-            except (TypeError, RuntimeError):
-                pass
+        # 신호 속성 접근 자체가 스테일 레이어면 RuntimeError(C++ deleted) →
+        # try 안에서 평가해야 한다.
+        try:
+            layer.featureAdded.disconnect(added)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            layer.geometryChanged.disconnect(changed)
+        except (TypeError, RuntimeError):
+            pass
         self._feature_added_slot = None
 
     # --- 선택 폴리곤 ← 명부 행 RI 부여 ---
