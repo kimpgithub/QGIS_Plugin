@@ -16,14 +16,9 @@ type Props = {
 const hasRemark = (f: GjFeature<BoundaryProps>) =>
   Boolean(f.properties.remark?.trim());
 
-// 폴리곤 미부여(명부에만 있는 행정리) — 서버가 mapped=false 로 내려준다.
-const isUnmapped = (f: GjFeature<BoundaryProps>) => f.properties.mapped === false;
-
 // 완료여부 체크 대상 — 보완사항(remark)이 있는 행정리. 부호 유무와 무관.
 // 부호 없는 행은 일련번호(gid)를 저장 키로 사용하므로 체크 상태가 로그인 간 유지됨.
-// 미부여 행정리는 경계 자체가 없으므로 완료 체크 대상이 아니다.
-const isConfirmTarget = (f: GjFeature<BoundaryProps>) =>
-  hasRemark(f) && !isUnmapped(f);
+const isConfirmTarget = (f: GjFeature<BoundaryProps>) => hasRemark(f);
 
 export default function BoundaryListPanel({
   open,
@@ -32,8 +27,8 @@ export default function BoundaryListPanel({
   onZoomTo,
 }: Props) {
   const [query, setQuery] = useState('');
-  // 목록 필터: 'remark'(기본)=보완사항 / 'unmapped'=폴리곤 미부여 / 'all'=전체
-  const [filter, setFilter] = useState<'remark' | 'unmapped' | 'all'>('remark');
+  // false(기본) = 비고(remark) 있는 행정리만 / true = 전체
+  const [showAll, setShowAll] = useState(false);
   // 완료여부 낙관적 갱신 — `${adm_cd}/${ri_cd}` → confirmed. 서버 값(props) 위에 덮어씀.
   const [confirmOverride, setConfirmOverride] = useState<Record<string, boolean>>({});
   const [confirmBusy, setConfirmBusy] = useState<Record<string, boolean>>({});
@@ -70,16 +65,10 @@ export default function BoundaryListPanel({
 
   const feats = boundary?.features ?? [];
   const remarkCount = useMemo(() => feats.filter(hasRemark).length, [feats]);
-  const unmappedCount = useMemo(() => feats.filter(isUnmapped).length, [feats]);
 
-  // 필터 → 검색 → ri_cd 오름차순(없는 건 뒤로) → ri_nm 순 정렬
+  // 비고 필터 → 검색 → ri_cd 오름차순(없는 건 뒤로) → ri_nm 순 정렬
   const rows = useMemo(() => {
-    const base =
-      filter === 'all'
-        ? feats
-        : filter === 'unmapped'
-          ? feats.filter(isUnmapped)
-          : feats.filter(hasRemark);
+    const base = showAll ? feats : feats.filter(hasRemark);
     const filtered = query.trim()
       ? base.filter((f) => {
           const q = query.trim();
@@ -96,7 +85,7 @@ export default function BoundaryListPanel({
       if (ac !== bc) return ac < bc ? -1 : 1;
       return (a.properties.ri_nm ?? '').localeCompare(b.properties.ri_nm ?? '');
     });
-  }, [feats, query, filter]);
+  }, [feats, query, showAll]);
 
   if (!open) return null;
 
@@ -106,13 +95,7 @@ export default function BoundaryListPanel({
     <div style={styles.panel}>
       <div style={styles.head}>
         <b style={styles.title}>
-          행정리 목록 (
-          {filter === 'all'
-            ? total
-            : filter === 'unmapped'
-              ? `미부여 ${unmappedCount}`
-              : `보완사항 ${remarkCount}`}
-          )
+          행정리 목록 ({showAll ? total : `보완사항 ${remarkCount}`})
         </b>
         <button type="button" style={styles.close} onClick={onClose}>
           ✕
@@ -127,26 +110,19 @@ export default function BoundaryListPanel({
         </div>
       ) : (
         <>
-          {/* 보완사항(기본) / 미부여 / 전체 필터 */}
+          {/* 비고 있음(기본) / 전체 토글 */}
           <div style={styles.filterRow}>
             <button
               type="button"
-              style={filter === 'remark' ? styles.filterBtnActive : styles.filterBtn}
-              onClick={() => setFilter('remark')}
+              style={showAll ? styles.filterBtn : styles.filterBtnActive}
+              onClick={() => setShowAll(false)}
             >
               보완사항 ({remarkCount})
             </button>
             <button
               type="button"
-              style={filter === 'unmapped' ? styles.filterBtnActive : styles.filterBtn}
-              onClick={() => setFilter('unmapped')}
-            >
-              미부여 ({unmappedCount})
-            </button>
-            <button
-              type="button"
-              style={filter === 'all' ? styles.filterBtnActive : styles.filterBtn}
-              onClick={() => setFilter('all')}
+              style={showAll ? styles.filterBtnActive : styles.filterBtn}
+              onClick={() => setShowAll(true)}
             >
               전체 ({total})
             </button>
@@ -174,18 +150,14 @@ export default function BoundaryListPanel({
                     <td colSpan={4} style={styles.noMatch}>
                       {query.trim() ? (
                         '검색 결과가 없습니다'
-                      ) : filter === 'unmapped' ? (
-                        '폴리곤 미부여 행정리가 없습니다 (모두 작업 완료)'
                       ) : (
                         <>
-                          {filter === 'remark'
-                            ? '보완사항이 있는 행정리가 없습니다'
-                            : '행정리가 없습니다'}
+                          보완사항이 있는 행정리가 없습니다
                           <br />
                           <button
                             type="button"
                             style={styles.showAllLink}
-                            onClick={() => setFilter('all')}
+                            onClick={() => setShowAll(true)}
                           >
                             전체 행정리 보기 ({total})
                           </button>
@@ -194,23 +166,17 @@ export default function BoundaryListPanel({
                     </td>
                   </tr>
                 ) : (
-                  rows.map((f) => {
-                    const unmapped = isUnmapped(f);
-                    return (
+                  rows.map((f) => (
                     <tr
-                      key={
-                        f.properties.gid ??
-                        `u:${f.properties.adm_cd}/${f.properties.ri_cd}`
-                      }
-                      style={unmapped ? { ...styles.tr, ...styles.trUnmapped } : styles.tr}
-                      onDoubleClick={() => !unmapped && onZoomTo(f)}
-                      title={unmapped ? '폴리곤 미부여 — 지도 이동 불가' : '더블클릭: 위치로 이동'}
+                      key={f.properties.gid}
+                      style={styles.tr}
+                      onDoubleClick={() => onZoomTo(f)}
+                      title="더블클릭: 위치로 이동"
                     >
                       <td style={styles.td}>
                         {f.properties.ri_nm?.trim() || (
                           <span style={styles.dim}>(이름 없음)</span>
                         )}
-                        {unmapped && <span style={styles.badge}>미부여</span>}
                       </td>
                       <td style={styles.td}>
                         {f.properties.ri_cd?.trim() || (
@@ -241,8 +207,7 @@ export default function BoundaryListPanel({
                         )}
                       </td>
                     </tr>
-                    );
-                  })
+                  ))
                 )}
               </tbody>
             </table>
@@ -356,19 +321,6 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
   },
   tr: { cursor: 'pointer' },
-  // 폴리곤 미부여 행 — 옅은 적색 배경 + 기본 커서(지도 이동 불가)
-  trUnmapped: { cursor: 'default', background: '#fef2f2' },
-  badge: {
-    marginLeft: 6,
-    padding: '1px 5px',
-    fontSize: 10,
-    fontWeight: 700,
-    color: '#b91c1c',
-    background: '#fee2e2',
-    border: '1px solid #fecaca',
-    borderRadius: 4,
-    verticalAlign: 'middle',
-  },
   td: {
     padding: '6px 10px',
     borderBottom: '1px solid #f3f4f6',
