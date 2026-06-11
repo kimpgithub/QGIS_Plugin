@@ -373,7 +373,7 @@ function UploadTable({ rows }: { rows: UploadHistory[] }) {
           <th style={styles.th}>시군구</th>
           <th style={styles.th}>읍면</th>
           <th style={styles.th}>행정코드</th>
-          <th style={styles.th}>항공사진 업로드</th>
+          <th style={styles.th}>지도데이터 업로드</th>
           <th style={styles.thNum}>경계 건수</th>
           <th style={styles.th}>경계 최종 업로드</th>
           <th style={styles.th}>경계 작업자</th>
