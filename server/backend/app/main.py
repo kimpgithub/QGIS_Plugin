@@ -390,10 +390,8 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
     key_counts: Counter = Counter()
     rows = []
     for feat in body["features"]:
-        geom = feat.get("geometry")
+        geom = feat.get("geometry")   # None=경계 미매핑 행정리(명부만 제출)
         props = feat.get("properties") or {}
-        if not geom:
-            continue
         adm_cd = props.get("adm_cd")
         if not adm_cd:
             raise HTTPException(status_code=400, detail="각 feature는 properties.adm_cd 필요")
@@ -434,8 +432,13 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
                            string_agg(DISTINCT s.remark, ' / '),
                            max(s.updated_by)
                     FROM (
-                      SELECT ST_Transform(ST_SetSRID(
-                               ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179) AS geom,
+                      SELECT CASE
+                               WHEN f->'geometry' IS NULL
+                                 OR jsonb_typeof(f->'geometry') = 'null'
+                               THEN NULL
+                               ELSE ST_Transform(ST_SetSRID(
+                                 ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179)
+                             END AS geom,
                              f->>'adm_cd' AS adm_cd, f->>'adm_nm' AS adm_nm,
                              f->>'ri_cd'  AS ri_cd,  f->>'ri_nm'  AS ri_nm,
                              f->>'status' AS status, f->>'remark' AS remark,

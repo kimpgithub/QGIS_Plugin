@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-06-11 — 미매핑 행정리도 명부 정보로 제출 (geom=null)
+
+지도(스캔) 문제로 폴리곤을 그리지 못한 행정리가 웹에 전혀 노출되지 않던 문제.
+경계(geom) 있는 피처만 업로드되어, 웹 발주자는 누락인지 미작업인지 알 수 없었다.
+
+- **플러그인** — `_on_submit` 이 `_unmapped_roster_features` 로 폴리곤 없는
+  명부 행을 `geometry=null` Feature 로 함께 제출. 명부(행정리현황 엑셀) 기준 —
+  폴리곤 부여된 행정리는 부여대로, **부여 안 된 행은 전부 이름만** 제출
+  (플래그 불요). 대상: 작업 읍면 범위 안 미매핑 행 전체. 제출 확인창에
+  `경계 N건 + 미매핑 행정리 M건` 표기.
+- **서버** — `PUT /api/boundary` 가 geom-null 피처를 건너뛰지 않고 INSERT
+  (CASE 로 `geometry=null`→NULL 처리, `boundary.geom` 은 본래 nullable).
+- **웹** — `extentOf(null)` 가드 추가. geom-null 행정리는 목록에 "경계 없음"
+  으로 표시·줌 무시. OL `readFeatures` 는 null geometry 를 그대로 수용(무렌더).
+- 검증: `py_compile` OK, `tsc --noEmit` OK.
+
 ## 2026-06-05 — PDF-less 시트 정합 4-DoF+TPS 로 정밀화 (오차 ~1m)
 
 직전 시트별 SHP 정합(3-DoF: 스케일+이동)이 주황선과 SHP 경계가 군데군데

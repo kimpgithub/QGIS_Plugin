@@ -955,18 +955,26 @@ class WorkListTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, '오류', f'GeoJSON 추출 실패: {e}')
             return
-        n = len(geojson.get('features', []))
+        feats = geojson.setdefault('features', [])
+        # 지도 문제로 폴리곤을 그리지 못한 행정리도 명부 정보(geom=null)로 함께
+        # 제출 — 웹에서 "경계 없음" 으로 표시되도록.
+        unmapped = self._unmapped_roster_features(feats)
+        feats.extend(unmapped)
+        n_geom = len(feats) - len(unmapped)
+        n = len(feats)
         if n == 0:
-            QMessageBox.warning(self, '경고', '제출할 경계(geom)가 없습니다.')
+            QMessageBox.warning(self, '경고', '제출할 내용이 없습니다.')
             return
         # 부호(ri_cd)가 빈 폴리곤은 빈 채로 제출한다 — 서버가 읍면 단위 전체
         # 교체로 저장하므로 키 충돌이 없고, 빈 부호는 웹에서 발주자가
         # 속성등록 요청으로 채운다. (가짜 일련번호 자동부여 제거)
         # 단, *실제 부호*가 같은 읍면 안에서 중복이면 서버가 400 으로 거부한다.
         # 수정요청(마크업) 처리는 웹에서 — 여기서는 경계 데이터만 제출한다.
+        extra = (f' + 미매핑 행정리 {len(unmapped)}건(경계 없음)'
+                 if unmapped else '')
         if QMessageBox.question(
                 self, '제출 확인',
-                f'경계 {n}건을 서버에 제출합니다.\n계속할까요?',
+                f'경계 {n_geom}건{extra}을 서버에 제출합니다.\n계속할까요?',
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         cfg = self._get_config()
@@ -983,6 +991,47 @@ class WorkListTab(QWidget):
             return
         self.status.setText(f'✅ 제출 완료 — {msg}')
         QMessageBox.information(self, '제출 완료', msg)
+
+    def _unmapped_roster_features(self, mapped_feats):
+        """폴리곤이 부여되지 않은 명부 행정리 → geom=null Feature 리스트.
+
+        명부(행정리현황 엑셀)를 기준으로, 폴리곤이 부여된 행정리는 부여대로
+        제출되고(geom 경로), 부여되지 않은 행정리는 이름만(geom=null) 제출해
+        웹에 "경계 없음"으로 노출한다. 작업완료/비고 플래그는 따지지 않는다
+        — 명부에 있는데 폴리곤이 없으면 곧 미매핑.
+        대상: 작업 범위(읍면) 안 + 명부의 모든 미매핑 행 (명부는 adm_cd/ri_cd/
+        ri_nm 필수라 행마다 보장됨).
+        """
+        # 이미 폴리곤이 부여된 (adm_cd, ri_cd) — 중복 제출 방지
+        mapped = set()
+        admins_in_geo = set()
+        for f in mapped_feats:
+            p = f.get('properties', {}) or {}
+            a = (p.get('adm_cd') or '').strip()
+            r = (p.get('ri_cd') or '').strip()
+            if a:
+                admins_in_geo.add(a)
+            if a and r:
+                mapped.add((a, r))
+        scope = {str(c).strip() for c in (self._merged_codes or [])} \
+            or admins_in_geo
+        out = []
+        for rec in (self._roster or []):
+            a = (rec.get('adm_cd', '') or '').strip()
+            r = (rec.get('ri_cd', '') or '').strip()
+            if not a or not r or a not in scope or (a, r) in mapped:
+                continue
+            remark = (rec.get('remark', '') or '').strip()
+            out.append({
+                'type': 'Feature',
+                'geometry': None,
+                'properties': {
+                    'adm_cd': a, 'adm_nm': rec.get('adm_nm', '') or '',
+                    'ri_cd': r, 'ri_nm': rec.get('ri_nm', '') or '',
+                    'remark': remark,
+                },
+            })
+        return out
 
 
 # ============================================================

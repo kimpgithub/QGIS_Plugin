@@ -668,7 +668,8 @@ function downloadJson(obj: unknown, filename: string) {
 }
 
 // Geometry → bbox [minX,minY,maxX,maxY] (lon/lat 좌표 기준)
-function extentOf(g: GjGeometry): [number, number, number, number] | null {
+function extentOf(g: GjGeometry | null): [number, number, number, number] | null {
+  if (!g) return null;   // 경계 미매핑(geom=null) 행정리 — 줌 대상 없음
   let xmin = Infinity, ymin = Infinity, xmax = -Infinity, ymax = -Infinity;
   const visit = (c: number[]) => {
     if (c.length < 2) return;
