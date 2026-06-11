@@ -1,25 +1,20 @@
 # Changelog
 
-## 2026-06-11 — 미매핑 행정리도 명부 정보로 제출 (geom=null)
+## 2026-06-11 — geom-null 행정리 수용 (서버·웹) — 플러그인 제출은 보류
 
-지도(스캔) 문제로 폴리곤을 그리지 못한 행정리가 웹에 전혀 노출되지 않던 문제.
-경계(geom) 있는 피처만 업로드되어, 웹 발주자는 누락인지 미작업인지 알 수 없었다.
+미매핑 행정리(폴리곤 없이 명부 이름만)를 웹에 "경계 없음"으로 노출하기 위한
+서버·웹 인프라. 명부→geom-null 제출 자체는 별도 설계(명부 테이블 ⟕ boundary)
+재검토로 **플러그인 제출 부분은 되돌림**(아래 revert 참조).
 
-- **플러그인 ([2.행정리 작업] 제출)** — `_on_submit` 이 폴리곤 없는 명부 행을
-  `geometry=null` Feature 로 함께 제출. 명부(행정리현황 엑셀) 기준 — 폴리곤
-  부여된 행정리는 부여대로, **부여 안 된 행은 전부 이름만** 제출(플래그 불요).
-  대상: 작업 읍면 범위 안 미매핑 행 전체. 제출 확인창에
-  `경계 N건 + 미매핑 행정리 M건` 표기.
-- **플러그인 ([3.완료 데이터 업로드])** — 명부(xlsx) 선택 입력 추가. 폴더의
-  `*_bnd_job_pg.shp` 부호와 명부를 SHP 단위로 대조해 미매핑 행정리를 geom=null
-  로 함께 일괄 제출. 공용 헬퍼 `unmapped_roster_features(roster, feats, scope)`
-  로 두 경로 공유(완료 업로드는 SHP 의 읍면만 scope). 명부는 SHP 읍면 범위만
-  조기 컷 로드.
 - **서버** — `PUT /api/boundary` 가 geom-null 피처를 건너뛰지 않고 INSERT
-  (CASE 로 `geometry=null`→NULL 처리, `boundary.geom` 은 본래 nullable).
+  (CASE 로 `geometry=null`→NULL 처리, `boundary.geom` 은 본래 nullable). 보낸
+  쪽이 없으면 무동작이라 무해.
 - **웹** — `extentOf(null)` 가드 추가. geom-null 행정리는 목록에 "경계 없음"
   으로 표시·줌 무시. OL `readFeatures` 는 null geometry 를 그대로 수용(무렌더).
-- 검증: `py_compile` OK, `tsc --noEmit` OK.
+- **revert(플러그인)** — `db_editor.py` 의 미매핑 명부→geom-null 제출
+  ([2.행정리 작업] `_on_submit`, [3.완료 데이터 업로드] 명부 입력, 공용 헬퍼
+  `unmapped_roster_features`)를 기능 도입 이전 상태로 되돌림.
+- 검증: `py_compile` OK.
 
 ## 2026-06-05 — PDF-less 시트 정합 4-DoF+TPS 로 정밀화 (오차 ~1m)
 

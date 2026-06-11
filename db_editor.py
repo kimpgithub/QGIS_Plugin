@@ -955,26 +955,18 @@ class WorkListTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, '오류', f'GeoJSON 추출 실패: {e}')
             return
-        feats = geojson.setdefault('features', [])
-        # 지도 문제로 폴리곤을 그리지 못한 행정리도 명부 정보(geom=null)로 함께
-        # 제출 — 웹에서 "경계 없음" 으로 표시되도록.
-        unmapped = self._unmapped_roster_features(feats)
-        feats.extend(unmapped)
-        n_geom = len(feats) - len(unmapped)
-        n = len(feats)
+        n = len(geojson.get('features', []))
         if n == 0:
-            QMessageBox.warning(self, '경고', '제출할 내용이 없습니다.')
+            QMessageBox.warning(self, '경고', '제출할 경계(geom)가 없습니다.')
             return
         # 부호(ri_cd)가 빈 폴리곤은 빈 채로 제출한다 — 서버가 읍면 단위 전체
         # 교체로 저장하므로 키 충돌이 없고, 빈 부호는 웹에서 발주자가
         # 속성등록 요청으로 채운다. (가짜 일련번호 자동부여 제거)
         # 단, *실제 부호*가 같은 읍면 안에서 중복이면 서버가 400 으로 거부한다.
         # 수정요청(마크업) 처리는 웹에서 — 여기서는 경계 데이터만 제출한다.
-        extra = (f' + 미매핑 행정리 {len(unmapped)}건(경계 없음)'
-                 if unmapped else '')
         if QMessageBox.question(
                 self, '제출 확인',
-                f'경계 {n_geom}건{extra}을 서버에 제출합니다.\n계속할까요?',
+                f'경계 {n}건을 서버에 제출합니다.\n계속할까요?',
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         cfg = self._get_config()
@@ -991,11 +983,6 @@ class WorkListTab(QWidget):
             return
         self.status.setText(f'✅ 제출 완료 — {msg}')
         QMessageBox.information(self, '제출 완료', msg)
-
-    def _unmapped_roster_features(self, mapped_feats):
-        """작업 세션 명부(self._roster) 기준 미매핑 행정리 → geom=null Feature."""
-        return unmapped_roster_features(
-            self._roster, mapped_feats, self._merged_codes)
 
 
 # ============================================================
@@ -1054,47 +1041,6 @@ def _img_adm_code(jpg_path):
     import re
     m = re.match(r'(\d{8})', os.path.basename(jpg_path))
     return m.group(1) if m else ''
-
-
-def unmapped_roster_features(roster, mapped_feats, scope_admins=None):
-    """폴리곤이 부여되지 않은 명부 행정리 → geom=null Feature 리스트.
-
-    명부(행정리현황 엑셀) 기준 — 폴리곤이 부여된 행정리는 부여대로(geom 경로),
-    부여되지 않은 행정리는 이름만(geom=null) 제출해 웹에 "경계 없음"으로 노출.
-    명부에 있는데 폴리곤이 없으면 곧 미매핑(작업완료/비고 플래그 무관).
-
-    scope_admins: 미매핑을 채울 읍면(adm_cd) 범위. None 이면 mapped_feats 의
-    adm_cd 집합을 사용 — 완료데이터 업로드처럼 SHP 단위로 호출하면 그 SHP 의
-    읍면만 대상이 된다. 명부는 adm_cd/ri_cd/ri_nm 필수라 행마다 보장됨.
-    """
-    mapped = set()           # 이미 폴리곤이 부여된 (adm_cd, ri_cd)
-    admins_in_geo = set()
-    for f in mapped_feats:
-        p = f.get('properties', {}) or {}
-        a = (p.get('adm_cd') or '').strip()
-        r = (p.get('ri_cd') or '').strip()
-        if a:
-            admins_in_geo.add(a)
-        if a and r:
-            mapped.add((a, r))
-    scope = ({str(c).strip() for c in scope_admins} if scope_admins
-             else admins_in_geo)
-    out = []
-    for rec in (roster or []):
-        a = (rec.get('adm_cd', '') or '').strip()
-        r = (rec.get('ri_cd', '') or '').strip()
-        if not a or not r or a not in scope or (a, r) in mapped:
-            continue
-        out.append({
-            'type': 'Feature',
-            'geometry': None,
-            'properties': {
-                'adm_cd': a, 'adm_nm': rec.get('adm_nm', '') or '',
-                'ri_cd': r, 'ri_nm': rec.get('ri_nm', '') or '',
-                'remark': (rec.get('remark', '') or '').strip(),
-            },
-        })
-    return out
 
 
 class CompletedUploadWorker(QThread):
@@ -1203,8 +1149,6 @@ class CompletedUploadTab(QWidget):
             '<i>작업 완료 데이터 폴더를 물려 일괄 업로드합니다. 폴더 구조:'
             '<br><code>02_행정리경계/{시도}/{시도}_bnd_job_pg.shp</code> (경계)'
             '<br><code>03_스캔이미지/{시도}/{시군구}/{adm}_scan_merged.jpg</code> (이미지)'
-            '<br>명부(행정리현황.xlsx)를 주면 폴리곤 없는 행정리도 "경계 없음"'
-            '으로 함께 제출됩니다.'
             '<br>서버 설정은 [1. 서버 연결] 탭 값을 사용합니다.</i>')
         help_label.setWordWrap(True)
         help_label.setStyleSheet(
@@ -1224,18 +1168,6 @@ class CompletedUploadTab(QWidget):
         btn_detect.clicked.connect(self._detect)
         row.addWidget(btn_detect)
         layout.addLayout(row)
-
-        # 명부(행정리현황.xlsx) — 선택. 주면 폴리곤 없는 행정리도 이름만 제출.
-        rrow = QHBoxLayout()
-        rrow.addWidget(QLabel('명부 (선택):'))
-        self.roster_edit = QLineEdit()
-        self.roster_edit.setPlaceholderText(
-            '행정리현황.xlsx — 폴리곤 없는 행정리를 "경계 없음"으로 함께 제출')
-        rrow.addWidget(self.roster_edit, 1)
-        btn_roster = QPushButton('찾아보기')
-        btn_roster.clicked.connect(self._browse_roster)
-        rrow.addWidget(btn_roster)
-        layout.addLayout(rrow)
 
         # 옵션 체크박스
         opt_row = QHBoxLayout()
@@ -1283,13 +1215,6 @@ class CompletedUploadTab(QWidget):
             self.folder_edit.setText(d)
             self._detect()
 
-    def _browse_roster(self):
-        f, _ = QFileDialog.getOpenFileName(
-            self, '명부(행정리현황) 엑셀 선택', self.roster_edit.text(),
-            'Excel (*.xlsx *.xls)')
-        if f:
-            self.roster_edit.setText(f)
-
     def _detect(self):
         root = self.folder_edit.text().strip()
         if not root or not os.path.isdir(root):
@@ -1335,20 +1260,10 @@ class CompletedUploadTab(QWidget):
                 self, '경고', '[1. 서버 연결] 탭에서 서버 URL/토큰을 먼저 저장하세요.')
             return
 
-        # 명부(선택) — 주면 폴리곤 없는 행정리를 geom=null 로 함께 제출.
-        roster_path = self.roster_edit.text().strip()
-        if roster_path and not os.path.isfile(roster_path):
-            QMessageBox.warning(self, '경고', '명부 엑셀 경로가 유효하지 않습니다.')
-            return
-        self.log.clear()   # 빌드 중 로그(명부 로드 등)가 보존되도록 여기서 비움
-
         # 경계 geojson 은 메인스레드에서 추출 (QGIS 객체)
         boundary_tasks = []
-        n_unmapped = 0
         if do_boundary:
             from qgis.core import QgsVectorLayer
-            geojsons = []
-            bnd_codes = set()
             for shp in self._scan['boundary_shps']:
                 lyr = QgsVectorLayer(shp, os.path.basename(shp), 'ogr')
                 if not lyr.isValid():
@@ -1357,48 +1272,24 @@ class CompletedUploadTab(QWidget):
                 gj = layer_control.boundary_to_geojson(lyr)
                 # 빈 부호(ri_cd)는 빈 채로 업로드 — 서버가 읍면 단위 전체
                 # 교체로 저장하므로 자동부여 불필요. 실제 부호 중복만 서버가 거부.
-                for f in gj.get('features', []):
-                    a = ((f.get('properties') or {}).get('adm_cd') or '').strip()
-                    if a:
-                        bnd_codes.add(a)
-                geojsons.append((os.path.basename(shp), gj))
-
-            # 명부 로드 — SHP 의 읍면 범위만 (38K 행 중 대상만 조기 컷)
-            roster_rows = []
-            if roster_path and bnd_codes:
-                try:
-                    _h, roster_rows, _m, _miss = excel_loader.read_excel(
-                        roster_path, adm_codes=bnd_codes)
-                    self.log.append(
-                        f'명부 로드: {len(roster_rows)}개 행정리 (대상 읍면 '
-                        f'{len(bnd_codes)}개)')
-                except Exception as e:
-                    QMessageBox.critical(self, '오류', f'명부 엑셀 읽기 실패: {e}')
-                    return
-
-            for label, gj in geojsons:
-                feats = gj.setdefault('features', [])
-                # SHP 단위로 호출 → 그 SHP 의 읍면만 미매핑 대상
-                extra = unmapped_roster_features(roster_rows, feats)
-                feats.extend(extra)
-                n_unmapped += len(extra)
-                if feats:
-                    boundary_tasks.append((label, gj, len(feats)))
+                n = len(gj.get('features', []))
+                if n:
+                    boundary_tasks.append((os.path.basename(shp), gj, n))
 
         n_total = (len(boundary_tasks) if do_boundary else 0) + \
                   (len(self._scan['images']) if do_cog else 0)
         if n_total == 0:
             QMessageBox.warning(self, '경고', '업로드할 항목이 없습니다.')
             return
-        extra_msg = f' (미매핑 행정리 {n_unmapped}건 포함)' if n_unmapped else ''
         if QMessageBox.question(
                 self, '업로드 확인',
-                f'경계 {len(boundary_tasks)}건{extra_msg} + 이미지 '
+                f'경계 {len(boundary_tasks)}건 + 이미지 '
                 f'{len(self._scan["images"]) if do_cog else 0}장을 '
                 f'서버에 업로드합니다. 계속할까요?',
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
 
+        self.log.clear()
         self.log.append('=== 업로드 시작 ===')
         self.btn_upload.setEnabled(False)
         self._worker = CompletedUploadWorker(
