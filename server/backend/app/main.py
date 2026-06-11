@@ -296,30 +296,62 @@ def admin_outline(
 # ---------------------------------------------------------------- boundary
 @app.get("/api/boundary")
 def get_boundary(adm_cd: str, user: dict = Depends(get_user)):
-    """해당 admin 행정리 경계 → GeoJSON FC (EPSG:4326). 없으면 빈 FC."""
+    """해당 admin 행정리 경계 → GeoJSON FC (EPSG:4326). 없으면 빈 FC.
+
+    geom 있는 boundary 행에 더해, 명부(ri_roster)에는 있으나 아직 폴리곤이
+    부여되지 않은 행정리를 geometry=null·mapped=false feature 로 합쳐 내려준다.
+    담당자가 자기 읍면에서 '아직 작업 안 된 행정리'를 목록에서 바로 확인하도록.
+    """
     check_admin_access(user, adm_cd)
     # confirmed = boundary_confirm 에 (adm_cd, ri_cd) 행이 있으면 true(완료).
+    # 1부: 실제 경계(geom 있음, mapped=true)
+    # 2부: 명부에만 있는 미부여 행정리(geom 없음, mapped=false) — boundary 에 같은
+    #      (adm_cd, ri_cd) 가 이미 있으면 제외.
     row = fetchone(
         """
-        SELECT json_build_object(
-          'type', 'FeatureCollection',
-          'features', COALESCE(json_agg(json_build_object(
+        WITH mapped AS (
+          SELECT json_build_object(
             'type', 'Feature', 'id', b.gid,
             'geometry', ST_AsGeoJSON(ST_Transform(b.geom, 4326))::json,
             'properties', json_build_object(
               'gid', b.gid, 'adm_cd', b.adm_cd, 'adm_nm', b.adm_nm,
               'ri_cd', b.ri_cd, 'ri_nm', b.ri_nm, 'status', b.status,
               'remark', b.remark, 'confirmed', (c.ri_cd IS NOT NULL),
+              'mapped', true,
               'updated_at', b.updated_at, 'updated_by', b.updated_by)
-          )) FILTER (WHERE b.gid IS NOT NULL), '[]'::json)
+          ) AS feat
+          FROM boundary b
+          LEFT JOIN boundary_confirm c
+            ON c.adm_cd = b.adm_cd
+           AND c.ri_cd = COALESCE(NULLIF(btrim(b.ri_cd), ''), 'gid:' || b.gid)
+          WHERE b.adm_cd = %(adm_cd)s
+        ),
+        unmapped AS (
+          SELECT json_build_object(
+            'type', 'Feature', 'id', NULL,
+            'geometry', NULL,
+            'properties', json_build_object(
+              'gid', NULL, 'adm_cd', r.emd_cd, 'adm_nm', r.emd_nm,
+              'ri_cd', r.li_cd, 'ri_nm', r.li_nm, 'status', NULL,
+              'remark', r.remark, 'confirmed', false,
+              'mapped', false,
+              'updated_at', NULL, 'updated_by', NULL)
+          ) AS feat
+          FROM ri_roster r
+          WHERE r.emd_cd = %(adm_cd)s
+            AND NOT EXISTS (
+              SELECT 1 FROM boundary b2
+              WHERE b2.adm_cd = r.emd_cd
+                AND btrim(b2.ri_cd) = r.li_cd
+            )
+        )
+        SELECT json_build_object(
+          'type', 'FeatureCollection',
+          'features', COALESCE(json_agg(feat), '[]'::json)
         ) AS fc
-        FROM boundary b
-        LEFT JOIN boundary_confirm c
-          ON c.adm_cd = b.adm_cd
-         AND c.ri_cd = COALESCE(NULLIF(btrim(b.ri_cd), ''), 'gid:' || b.gid)
-        WHERE b.adm_cd = %s
+        FROM (SELECT feat FROM mapped UNION ALL SELECT feat FROM unmapped) u
         """,
-        (adm_cd,),
+        {"adm_cd": adm_cd},
     )
     return row["fc"]
 

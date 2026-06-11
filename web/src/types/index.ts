@@ -80,6 +80,7 @@ export type BoundaryProps = {
   status?: string | null;
   remark?: string | null;     // QGIS 작업자 비고
   confirmed?: boolean;        // 행정리경계 확인 완료여부 (boundary_confirm)
+  mapped?: boolean;           // 폴리곤 부여 여부 — false=명부에만 있는 미부여 행정리(geom 없음)
   updated_at?: string | null;
   updated_by?: string | null;
 };
