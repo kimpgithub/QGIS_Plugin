@@ -47,7 +47,7 @@ export default function SaveMarkupModal({ open, kind, onCancel, onSave }: Props)
               행정리명 <span style={styles.req}>*</span>
             </label>
             <input
-              style={styles.input}
+              style={{ ...styles.input, ...(riNm.trim() ? {} : styles.areaRequired) }}
               value={riNm}
               onChange={(e) => setRiNm(e.target.value)}
               placeholder="예: 서양리"
