@@ -2,10 +2,16 @@ import { useState, type FormEvent } from 'react';
 import { login } from '../api/auth';
 import { useAuth } from '../store/AuthContext';
 
+// 아이디 저장 — 브라우저 localStorage 에 '아이디만' 보관(비밀번호는 저장 안 함).
+const SAVED_ID_KEY = 'saved_login_id';
+
 export default function LoginPage() {
   const { setUser } = useAuth();
-  const [id, setId] = useState('');
+  const [id, setId] = useState(() => localStorage.getItem(SAVED_ID_KEY) ?? '');
   const [pw, setPw] = useState('');
+  const [remember, setRemember] = useState(
+    () => localStorage.getItem(SAVED_ID_KEY) != null
+  );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -19,6 +25,9 @@ export default function LoginPage() {
     setBusy(true);
     try {
       const u = await login(id.trim(), pw);
+      // 로그인 성공 시에만 저장 상태 반영 — 체크 시 아이디 보관, 해제 시 삭제.
+      if (remember) localStorage.setItem(SAVED_ID_KEY, id.trim());
+      else localStorage.removeItem(SAVED_ID_KEY);
       setUser(u);
     } catch {
       setErr('로그인 실패 — ID/비밀번호를 확인하세요.');
@@ -59,6 +68,15 @@ export default function LoginPage() {
             onChange={(e) => setPw(e.target.value)}
             disabled={busy}
           />
+        </label>
+        <label style={styles.remember}>
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+            disabled={busy}
+          />
+          <span>아이디 저장</span>
         </label>
         {err && <div style={styles.err}>{err}</div>}
         <button type="submit" style={styles.submit} disabled={busy}>
@@ -118,6 +136,15 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #cbd5e0',
     borderRadius: 4,
     fontSize: 14,
+  },
+  remember: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: 13,
+    color: '#374151',
+    cursor: 'pointer',
+    userSelect: 'none',
   },
   err: {
     color: '#b91c1c',
