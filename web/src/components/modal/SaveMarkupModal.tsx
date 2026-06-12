@@ -31,9 +31,9 @@ export default function SaveMarkupModal({ open, kind, onCancel, onSave }: Props)
   }, [open]);
 
   const isAttr = kind === 'attr';
-  // 수정사유는 모든 종류에서 필수. attr 는 행정리명/부호도 필수 — 비어 있으면 저장 비활성
+  // 수정사유는 모든 종류에서 필수. attr 는 행정리명도 필수(부호는 선택) — 비어 있으면 저장 비활성
   const noteOk = note.trim() !== '';
-  const canSave = noteOk && (!isAttr || (riNm.trim() !== '' && riCd.trim() !== ''));
+  const canSave = noteOk && (!isAttr || riNm.trim() !== '');
 
   return (
     // dim=false — 지도(스캔 이미지)의 지명·부호를 보면서 입력해야 하므로
@@ -43,7 +43,9 @@ export default function SaveMarkupModal({ open, kind, onCancel, onSave }: Props)
         <>
           <div style={styles.q}>행정리 명칭 및 부호를 입력하세요.</div>
           <div style={styles.attrRow}>
-            <label style={styles.attrLbl}>행정리명</label>
+            <label style={styles.attrLbl}>
+              행정리명 <span style={styles.req}>*</span>
+            </label>
             <input
               style={styles.input}
               value={riNm}
