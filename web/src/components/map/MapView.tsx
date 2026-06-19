@@ -476,7 +476,7 @@ function styleBoundary(
   });
 }
 
-// kind 별 스타일 (라인등록=파랑, 라인삭제=빨강, 속성등록=파란점, 삭제표기=빨간X).
+// kind 별 스타일 (라인등록=파랑, 라인삭제=빨강, 속성등록=파란점, 삭제표기=파란X).
 // highlightId 와 feature 의 id 가 일치하면 노란 강조 헤일로를 밑에 깔아 선택 표시.
 function styleMarkup(
   feature: { getProperties: () => Record<string, unknown>; get: (k: string) => unknown },
@@ -523,7 +523,7 @@ function baseMarkupStyle(kind: string, props?: Record<string, unknown>): Style {
       });
     }
     case 'delete_mark':
-      // 경계선 삭제표기 — 빨간 선 + 선 위에 ✕ 를 일정 간격으로(작업자에게 "여기 삭제" 전달).
+      // 경계선 삭제표기 — 파란 선 + 선 위에 ✕ 를 일정 간격으로(작업자에게 "여기 삭제" 전달).
       // 캔버스 renderer 로 직접 그려 픽셀 간격/크기를 정밀 제어(✕ 는 흰 헤일로로 항상 가독).
       return DELETE_MARK_STYLE;
     case 'add':
@@ -561,8 +561,8 @@ const DELETE_MARK_STYLE = new Style({
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // 1) 기본 빨간 선
-    ctx.strokeStyle = '#dc2626';
+    // 1) 기본 파란 선 (라인등록과 동일한 파랑)
+    ctx.strokeStyle = '#1d4ed8';
     ctx.lineWidth = 3 * pr;
     ctx.beginPath();
     flat.forEach((c, i) => (i === 0 ? ctx.moveTo(c[0], c[1]) : ctx.lineTo(c[0], c[1])));
@@ -595,11 +595,11 @@ const DELETE_MARK_STYLE = new Style({
       }
       ctx.stroke();
     };
-    // 흰 헤일로 → 빨간 ✕
+    // 흰 헤일로 → 파란 ✕ (라인등록과 동일한 파랑)
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 5 * pr;
     strokeXs();
-    ctx.strokeStyle = '#dc2626';
+    ctx.strokeStyle = '#1d4ed8';
     ctx.lineWidth = 2.5 * pr;
     strokeXs();
 
