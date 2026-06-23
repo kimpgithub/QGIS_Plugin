@@ -174,11 +174,14 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
   // properties 에 geometry 가 들어있으면 ol/format/GeoJSON.readFeatures 가
   // setProperties 단계에서 OL Geometry slot 을 raw GeoJSON 으로 덮어써
   // 다음 addFeaturesInternal 에서 getExtent is not a function 으로 터짐.
+  // 반려(rejected)된 수정요청은 지도에서 숨긴다 — 대응하는 선/점 등이
+  // 보이지 않게. (카드 목록에는 남아 이력·반려사유 확인 가능.)
   const markupFC = useMemo<MarkupCollection | null>(() => {
-    if (!items.length) return null;
+    const visible = items.filter((i) => i.status !== 'rejected');
+    if (!visible.length) return null;
     return {
       type: 'FeatureCollection',
-      features: items.map(({ geometry, ...rest }) => ({
+      features: visible.map(({ geometry, ...rest }) => ({
         type: 'Feature',
         geometry,
         properties: rest,
