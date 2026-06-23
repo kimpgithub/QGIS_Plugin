@@ -588,7 +588,8 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
             setSelectedId(id);
             setDeleteTargetId(id);
           }}
-          onDownload={onDownloadMarkup}
+          // 공간정보(GeoJSON) 다운로드는 관리자(master)에게만 노출
+          onDownload={isMaster ? onDownloadMarkup : undefined}
           canProcess={isMaster}
           loading={loading}
         />
