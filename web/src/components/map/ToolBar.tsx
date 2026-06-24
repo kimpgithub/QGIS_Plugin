@@ -27,7 +27,7 @@ const BTNS: { id: Exclude<ToolId, null>; label: string }[] = [
 // 리소스 원래 파일명(한글)으로 저장되게 한다.
 const DOCS: { label: string; file: string }[] = [
   { label: '지역조사표', file: '2025 농림어업총조사(지역조사표).pdf' },
-  { label: '사용자 매뉴얼', file: '사용자 메뉴얼.pdf' },
+  { label: '사용자 매뉴얼', file: '행정리 경계 검수 웹시스템 사용자 매뉴얼.pdf' },
 ];
 
 export default function ToolBar({
