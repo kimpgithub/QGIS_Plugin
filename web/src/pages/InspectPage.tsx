@@ -613,6 +613,8 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
         onSelect={(a) => {
           setAdmin(a);
           setAdminPickerOpen(false);
+          // 행정읍면 선택 시 해당 지역으로 이동하면서 행정리 목록도 함께 연다.
+          setRiListOpen(true);
         }}
       />
 
