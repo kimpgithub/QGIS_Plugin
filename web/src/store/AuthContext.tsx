@@ -130,11 +130,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // user.id(로그인 주체) 기준으로만 재바인딩 — 토큰 갱신으로 user 객체가 바뀌어도
   // 효과가 재실행되지 않아 미사용 타이머가 리셋되지 않는다(현재 토큰은 getToken()).
   const loggedInId = user?.id ?? null;
-  // ⚠ 임시 테스트: 00000000 계정만 1분 미사용 경고 → 2분 미사용 로그아웃.
-  //    동작 확인용이며, 검증 후 제거 예정. 그 외 계정은 기존 55/60분 유지.
-  const isTestIdle = loggedInId === '00000000';
-  const sessionMs = isTestIdle ? 2 * 60 * 1000 : SESSION_MS;
-  const warnAtMs = isTestIdle ? 1 * 60 * 1000 : WARN_AT_MS;
   useEffect(() => {
     if (!loggedInId) return;
     lastActivityRef.current = Date.now();
@@ -153,11 +148,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const now = Date.now();
       const idle = now - lastActivityRef.current;
 
-      if (idle >= sessionMs) {
+      if (idle >= SESSION_MS) {
         signOut();
         return;
       }
-      if (idle >= warnAtMs) {
+      if (idle >= WARN_AT_MS) {
         if (!warnOpenRef.current) {
           warnOpenRef.current = true; // 활동 연장 일시중지
           setWarnOpen(true);
@@ -183,7 +178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onActivity));
       window.clearInterval(tick);
     };
-  }, [loggedInId, signOut, applyNewToken, sessionMs, warnAtMs]);
+  }, [loggedInId, signOut, applyNewToken]);
 
   const value = useMemo(
     () => ({ user, setUser, signOut }),
