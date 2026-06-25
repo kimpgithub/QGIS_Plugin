@@ -30,6 +30,15 @@ export async function login(id: string, password: string): Promise<AuthUser> {
   }
 }
 
+// POST /api/auth/refresh — 유효한 토큰으로 만료시각이 갱신된 새 토큰을 받는다.
+// (미사용 경고의 [연장] 및 작업 중 자동 갱신용. 토큰 적용은 호출부가 담당.)
+export async function refreshSession(): Promise<string> {
+  const r = await api<{ token: string }>('/api/auth/refresh', {
+    method: 'POST',
+  });
+  return r.token;
+}
+
 export function logout() {
   setToken(null);
 }

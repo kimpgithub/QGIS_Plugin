@@ -4,18 +4,38 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 import type { AuthUser } from '../types';
-import { logout as apiLogout } from '../api/auth';
+import { logout as apiLogout, refreshSession } from '../api/auth';
 import { getToken, setToken } from '../api/client';
 
 const USER_KEY = 'auth_user';
 
-// JWT payload 의 exp(만료, 초 단위)를 ms 로 변환 — 자동 로그아웃 타이머용.
-// 디코드 실패 시 null → 타이머를 걸지 않음(기존 동작 유지).
-function jwtExpMs(token: string): number | null {
+// ── 미사용(idle) 세션 정책 ───────────────────────────────────────────────
+// 마우스/키보드/스크롤/휠/터치 활동이 일정 시간 없으면 자동 로그아웃.
+// 만료 5분 전(=55분 미사용)에 경고 다이얼로그를 띄워 [연장]을 받는다.
+// 서버 토큰 TTL(JWT_EXPIRES_MIN)은 SESSION_MS 보다 충분히 길게(120분) 잡아,
+// 60분 idle 카운트다운 내내 토큰이 유효 → [연장] 갱신이 항상 성공한다.
+const SESSION_MS = 60 * 60 * 1000; // 미사용 허용 1시간
+const WARN_BEFORE_MS = 5 * 60 * 1000; // 만료 5분 전(=55분 미사용) 경고
+const WARN_AT_MS = SESSION_MS - WARN_BEFORE_MS;
+const REFRESH_AHEAD_MS = 60 * 60 * 1000; // 활동 중 토큰 잔여수명이 이보다 적으면 갱신
+const TICK_MS = 15 * 1000; // 점검 주기
+const ACTIVITY_EVENTS = [
+  'mousemove',
+  'mousedown',
+  'keydown',
+  'scroll',
+  'wheel',
+  'touchstart',
+] as const;
+
+// JWT payload 의 exp(만료, 초 단위)를 ms 로 변환. 디코드 실패 시 null.
+function jwtExpMs(token: string | null): number | null {
+  if (!token) return null;
   try {
     const payload = token.split('.')[1];
     const json = JSON.parse(
@@ -50,6 +70,11 @@ function loadUser(): AuthUser | null {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUserState] = useState<AuthUser | null>(() => loadUser());
+  const [warnOpen, setWarnOpen] = useState(false);
+
+  const lastActivityRef = useRef<number>(Date.now());
+  const warnOpenRef = useRef(false); // true 면 활동으로 세션을 연장하지 않음(경고 표시 중)
+  const refreshingRef = useRef(false);
 
   const setUser = useCallback((u: AuthUser | null) => {
     setUserState(u);
@@ -62,30 +87,189 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(null);
     setUserState(null);
     localStorage.removeItem(USER_KEY);
+    warnOpenRef.current = false;
+    setWarnOpen(false);
   }, []);
 
-  // 자동 로그아웃 — 토큰 만료(JWT exp, 서버 JWT_EXPIRES_MIN=60분) 시각에
-  // signOut 하여 로그인 화면으로 복귀. 새로고침 후에도 남은 시간만큼 재설정됨.
-  useEffect(() => {
-    if (!user?.token) return;
-    const expMs = jwtExpMs(user.token);
-    if (expMs == null) return;
-    const remain = expMs - Date.now();
-    if (remain <= 0) {
-      signOut();
-      return;
+  // 새 토큰으로 교체 — localStorage(auth_token) + auth_user + state 동기화.
+  const applyNewToken = useCallback((t: string) => {
+    setToken(t);
+    setUserState((u) => {
+      if (!u) return u;
+      const nu = { ...u, token: t };
+      localStorage.setItem(USER_KEY, JSON.stringify(nu));
+      return nu;
+    });
+  }, []);
+
+  // [연장] — 서버 토큰 갱신 + 미사용 타이머 리셋 + 경고 닫기 (+1시간).
+  const extendSession = useCallback(async () => {
+    try {
+      const t = await refreshSession();
+      applyNewToken(t);
+    } catch {
+      // 갱신 실패(만료 등) 시: 타이머 리셋만 하고, 끊기면 다음 API 401 로 드러남.
+    } finally {
+      lastActivityRef.current = Date.now();
+      warnOpenRef.current = false;
+      setWarnOpen(false);
     }
-    const id = window.setTimeout(() => signOut(), remain);
-    return () => window.clearTimeout(id);
-  }, [user, signOut]);
+  }, [applyNewToken]);
+
+  // [닫기] — 기능 없음. 다이얼로그만 닫고 기존 미사용 로직 유지.
+  // 닫는 클릭 자체가 활동으로 잡혀 타이머가 리셋되는 것을 막기 위해
+  // 잠깐(0.8초) 활동 무시를 유지한 뒤 재개한다.
+  const dismissWarn = useCallback(() => {
+    setWarnOpen(false);
+    window.setTimeout(() => {
+      warnOpenRef.current = false;
+    }, 800);
+  }, []);
+
+  // 활동 감지 + 미사용 점검 + 작업 중 토큰 자동 갱신.
+  // user.id(로그인 주체) 기준으로만 재바인딩 — 토큰 갱신으로 user 객체가 바뀌어도
+  // 효과가 재실행되지 않아 미사용 타이머가 리셋되지 않는다(현재 토큰은 getToken()).
+  const loggedInId = user?.id ?? null;
+  useEffect(() => {
+    if (!loggedInId) return;
+    lastActivityRef.current = Date.now();
+    warnOpenRef.current = false;
+    setWarnOpen(false);
+
+    const onActivity = () => {
+      if (warnOpenRef.current) return; // 경고 표시 중에는 활동으로 연장하지 않음
+      lastActivityRef.current = Date.now();
+    };
+    ACTIVITY_EVENTS.forEach((e) =>
+      window.addEventListener(e, onActivity, { passive: true })
+    );
+
+    const tick = window.setInterval(() => {
+      const now = Date.now();
+      const idle = now - lastActivityRef.current;
+
+      if (idle >= SESSION_MS) {
+        signOut();
+        return;
+      }
+      if (idle >= WARN_AT_MS) {
+        if (!warnOpenRef.current) {
+          warnOpenRef.current = true; // 활동 연장 일시중지
+          setWarnOpen(true);
+        }
+        return;
+      }
+      // 활동 중 — 토큰이 곧(잔여<60분) 만료되면 조용히 갱신해 API 끊김 방지.
+      if (!refreshingRef.current) {
+        const exp = jwtExpMs(getToken());
+        if (exp != null && exp - now < REFRESH_AHEAD_MS) {
+          refreshingRef.current = true;
+          refreshSession()
+            .then(applyNewToken)
+            .catch(() => {})
+            .finally(() => {
+              refreshingRef.current = false;
+            });
+        }
+      }
+    }, TICK_MS);
+
+    return () => {
+      ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onActivity));
+      window.clearInterval(tick);
+    };
+  }, [loggedInId, signOut, applyNewToken]);
 
   const value = useMemo(
     () => ({ user, setUser, signOut }),
     [user, setUser, signOut]
   );
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={value}>
+      {children}
+      {warnOpen && (
+        <SessionWarnDialog onExtend={extendSession} onClose={dismissWarn} />
+      )}
+    </Ctx.Provider>
+  );
 }
+
+// 미사용 만료 경고 — 55분 미사용 시 표시. [연장]=+1시간, [닫기]=기능 없음.
+function SessionWarnDialog({
+  onExtend,
+  onClose,
+}: {
+  onExtend: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div style={dlgStyles.overlay}>
+      <div style={dlgStyles.box}>
+        <div style={dlgStyles.msg}>
+          로그인 유지 시간이 5분 후 만료됩니다.
+          <br />
+          로그인을 연장하시겠습니까?
+        </div>
+        <div style={dlgStyles.btns}>
+          <button type="button" style={dlgStyles.extend} onClick={onExtend}>
+            연장
+          </button>
+          <button type="button" style={dlgStyles.close} onClick={onClose}>
+            닫기
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const dlgStyles: Record<string, React.CSSProperties> = {
+  overlay: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.45)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10000,
+  },
+  box: {
+    width: 360,
+    background: '#fff',
+    borderRadius: 8,
+    padding: '24px 22px 18px',
+    boxShadow: '0 8px 30px rgba(0,0,0,0.25)',
+  },
+  msg: {
+    fontSize: 14,
+    color: '#1f2937',
+    lineHeight: 1.7,
+    textAlign: 'center',
+    marginBottom: 18,
+  },
+  btns: { display: 'flex', gap: 8, justifyContent: 'center' },
+  extend: {
+    minWidth: 96,
+    padding: '9px 0',
+    background: '#1f6feb',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    fontSize: 14,
+    cursor: 'pointer',
+  },
+  close: {
+    minWidth: 96,
+    padding: '9px 0',
+    background: '#fff',
+    color: '#374151',
+    border: '1px solid #c9ced6',
+    borderRadius: 4,
+    fontSize: 14,
+    cursor: 'pointer',
+  },
+};
 
 export function useAuth() {
   const c = useContext(Ctx);

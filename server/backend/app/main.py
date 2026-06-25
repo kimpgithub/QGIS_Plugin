@@ -216,6 +216,23 @@ def login(body: LoginBody, request: Request):
     return {"token": token, "user": user_obj}
 
 
+# ---------------------------------------------------------------- token refresh (세션 연장)
+@app.post("/api/auth/refresh")
+def refresh_token(user: dict = Depends(get_user)):
+    """활성 사용자 세션 연장 — 유효한 토큰을 받아 동일 사용자로 만료시각만 갱신한
+    새 토큰을 발급. (미사용 타임아웃 경고의 [연장] 및 작업 중 자동 갱신에 사용)
+    plugin 토큰은 갱신 대상이 아니다."""
+    if user["role"] not in ("normal", "master"):
+        raise HTTPException(status_code=403, detail="세션 연장 대상이 아닙니다")
+    admin_cd = (user.get("admin_cd") or "").strip()
+    now = int(time.time())
+    token = jwt.encode(
+        {"sub": admin_cd, "role": user["role"], "iat": now, "exp": now + JWT_EXPIRES_MIN * 60},
+        JWT_SECRET, algorithm=JWT_ALGO,
+    )
+    return {"token": token}
+
+
 # ---------------------------------------------------------------- admins
 @app.get("/api/admins")
 def list_admins(_: dict = Depends(get_user)):
