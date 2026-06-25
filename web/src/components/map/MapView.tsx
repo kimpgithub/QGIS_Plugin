@@ -540,6 +540,9 @@ function highlightHalo(kind: string): Style {
         radius: 13,
         fill: new Fill({ color: 'rgba(250,204,21,0.35)' }),
         stroke: new Stroke({ color: '#facc15', width: 3 }),
+        // 레이어 declutter 대상에서 제외 — 헤일로가 장애물로 작용해 base 의
+        // 속성 라벨(텍스트)을 밀어내 사라지던 문제 방지. 헤일로는 항상 그려짐.
+        declutterMode: 'none',
       }),
     });
   }
