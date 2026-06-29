@@ -6,7 +6,7 @@ import { useAuth } from '../store/AuthContext';
 const SAVED_ID_KEY = 'saved_login_id';
 
 export default function LoginPage() {
-  const { setUser } = useAuth();
+  const { setUser, logoutNotice, clearLogoutNotice } = useAuth();
   const [id, setId] = useState(() => localStorage.getItem(SAVED_ID_KEY) ?? '');
   const [pw, setPw] = useState('');
   const [remember, setRemember] = useState(
@@ -40,6 +40,19 @@ export default function LoginPage() {
     <div style={styles.wrap}>
       <form style={styles.card} onSubmit={onSubmit}>
         <h1 style={styles.title}>행정리경계 검수</h1>
+        {logoutNotice && (
+          <div style={styles.notice}>
+            <span>⏱ {logoutNotice}</span>
+            <button
+              type="button"
+              style={styles.noticeClose}
+              onClick={clearLogoutNotice}
+              aria-label="알림 닫기"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         <p style={styles.lead}>
           행정리 공간정보 검수 및 수정요청 페이지 입니다.
           <br />
@@ -119,6 +132,27 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#6b7280',
     textAlign: 'center',
     lineHeight: 1.6,
+  },
+  notice: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    padding: '9px 12px',
+    background: '#fef3c7',
+    border: '1px solid #fcd34d',
+    borderRadius: 4,
+    color: '#92400e',
+    fontSize: 13,
+  },
+  noticeClose: {
+    border: 'none',
+    background: 'none',
+    color: '#92400e',
+    fontSize: 13,
+    cursor: 'pointer',
+    padding: 0,
+    lineHeight: 1,
   },
   row: {
     display: 'flex',

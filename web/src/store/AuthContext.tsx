@@ -51,7 +51,12 @@ type AuthCtx = {
   user: AuthUser | null;
   setUser: (u: AuthUser | null) => void;
   signOut: () => void;
+  // 미사용 자동 로그아웃 시 로그인 화면에 띄울 안내 문구(수동 로그아웃 시 null).
+  logoutNotice: string | null;
+  clearLogoutNotice: () => void;
 };
+
+const IDLE_LOGOUT_NOTICE = '1시간 미사용으로 자동 로그아웃되었습니다.';
 
 const Ctx = createContext<AuthCtx | null>(null);
 
@@ -71,6 +76,7 @@ function loadUser(): AuthUser | null {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUserState] = useState<AuthUser | null>(() => loadUser());
   const [warnOpen, setWarnOpen] = useState(false);
+  const [logoutNotice, setLogoutNotice] = useState<string | null>(null);
 
   const lastActivityRef = useRef<number>(Date.now());
   const warnOpenRef = useRef(false); // true 면 활동으로 세션을 연장하지 않음(경고 표시 중)
@@ -78,18 +84,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setUser = useCallback((u: AuthUser | null) => {
     setUserState(u);
-    if (u) localStorage.setItem(USER_KEY, JSON.stringify(u));
-    else localStorage.removeItem(USER_KEY);
+    if (u) {
+      localStorage.setItem(USER_KEY, JSON.stringify(u));
+      setLogoutNotice(null); // 로그인하면 이전 미사용 안내 제거
+    } else localStorage.removeItem(USER_KEY);
   }, []);
 
-  const signOut = useCallback(() => {
+  const clearLogoutNotice = useCallback(() => setLogoutNotice(null), []);
+
+  // reason==='idle' 이면 미사용 자동 로그아웃 → 로그인 화면에 안내 문구 표시.
+  // 수동 [로그아웃] 버튼은 reason 없이 호출되어 안내를 띄우지 않는다.
+  const doSignOut = useCallback((reason?: 'idle') => {
     apiLogout();
     setToken(null);
     setUserState(null);
     localStorage.removeItem(USER_KEY);
     warnOpenRef.current = false;
     setWarnOpen(false);
+    setLogoutNotice(reason === 'idle' ? IDLE_LOGOUT_NOTICE : null);
   }, []);
+
+  // 공개 signOut — 수동 로그아웃용(인자 없음). onClick 핸들러로도 안전.
+  const signOut = useCallback(() => doSignOut(), [doSignOut]);
 
   // 새 토큰으로 교체 — localStorage(auth_token) + auth_user + state 동기화.
   const applyNewToken = useCallback((t: string) => {
@@ -149,7 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const idle = now - lastActivityRef.current;
 
       if (idle >= SESSION_MS) {
-        signOut();
+        doSignOut('idle');
         return;
       }
       if (idle >= WARN_AT_MS) {
@@ -178,11 +194,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, onActivity));
       window.clearInterval(tick);
     };
-  }, [loggedInId, signOut, applyNewToken]);
+  }, [loggedInId, doSignOut, applyNewToken]);
 
   const value = useMemo(
-    () => ({ user, setUser, signOut }),
-    [user, setUser, signOut]
+    () => ({ user, setUser, signOut, logoutNotice, clearLogoutNotice }),
+    [user, setUser, signOut, logoutNotice, clearLogoutNotice]
   );
 
   return (
