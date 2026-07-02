@@ -8,6 +8,7 @@ import BoundaryListPanel from '../components/panel/BoundaryListPanel';
 import SaveMarkupModal from '../components/modal/SaveMarkupModal';
 import RejectReasonModal from '../components/modal/RejectReasonModal';
 import AdminPickerModal from '../components/modal/AdminPickerModal';
+import MarkupExportModal from '../components/modal/MarkupExportModal';
 import DrawHint from '../components/map/DrawHint';
 import {
   listMarkup,
@@ -416,46 +417,8 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
 
   // 공간정보 다운로드 — 라인등록/삭제표기/속성등록 수정요청을 종류별 GeoJSON 파일로
   // 저장(QGIS 에 드래그하면 바로 열림). 현재 패널 필터(상태)에 보이는 것만 대상.
-  function onDownloadMarkup() {
-    if (!admin) return;
-    const targets: Array<{ kind: MarkupKind; label: string }> = [
-      { kind: 'add', label: '라인등록' },
-      { kind: 'delete_mark', label: '삭제표기' },
-      { kind: 'attr', label: '속성등록' },
-    ];
-    const visibleItems = items.filter((i) => filter[i.status]);
-    let fileCount = 0;
-    targets.forEach(({ kind, label }, idx) => {
-      const feats = visibleItems.filter((i) => i.kind === kind);
-      if (!feats.length) return;
-      const fc = {
-        type: 'FeatureCollection',
-        // QGIS 속성 테이블에서 바로 읽히도록 attrs 를 평탄화해서 담는다.
-        features: feats.map((i) => ({
-          type: 'Feature',
-          geometry: i.geometry,
-          properties: {
-            id: i.id,
-            kind: i.kind,
-            status: i.status,
-            ri_nm: (i.attrs?.ri_nm as string | undefined) ?? null,
-            ri_cd: (i.attrs?.ri_cd as string | undefined) ?? null,
-            note: (i.attrs?.note as string | undefined) ?? null,
-            created_by: i.created_by,
-            created_at: i.created_at,
-          },
-        })),
-      };
-      // 브라우저가 연속 다운로드를 막지 않도록 파일 간 약간의 시차를 둔다.
-      window.setTimeout(() => {
-        downloadJson(fc, `수정요청_${label}_${admin.adm_cd}.geojson`);
-      }, idx * 300);
-      fileCount++;
-    });
-    if (fileCount === 0) {
-      alert('다운로드할 수정요청이 없습니다 (라인등록/삭제표기/속성등록).');
-    }
-  }
+  // 공간정보 다운로드 — 전국/시도별 GeoJSON(ZIP). 선택 읍면과 무관하게 동작.
+  const [exportOpen, setExportOpen] = useState(false);
 
   // 행정리 목록 행 더블클릭 → 해당 행정리 영역으로 화면 이동 후 노란 펄스 플래시
   function onZoomToBoundary(f: GjFeature<BoundaryProps>) {
@@ -589,7 +552,7 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
             setDeleteTargetId(id);
           }}
           // 공간정보(GeoJSON) 다운로드는 관리자(master)에게만 노출
-          onDownload={isMaster ? onDownloadMarkup : undefined}
+          onDownload={isMaster ? () => setExportOpen(true) : undefined}
           canProcess={isMaster}
           loading={loading}
         />
@@ -617,6 +580,9 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
           setRiListOpen(true);
         }}
       />
+
+      {/* 공간정보 다운로드(전국/시도, master 전용) */}
+      <MarkupExportModal open={exportOpen} onClose={() => setExportOpen(false)} />
 
       {/* [요청삭제] 확인 모달 — 바로 지우지 않고 한 번 더 확인받는다 */}
       <Modal
@@ -657,21 +623,6 @@ const KIND_LABEL: Record<MarkupKind, string> = {
   attr: '속성등록',
   delete_mark: '삭제표기',
 };
-
-// GeoJSON 객체 → 파일 다운로드 (브라우저 메모리에서 생성, 서버 요청 없음)
-function downloadJson(obj: unknown, filename: string) {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], {
-    type: 'application/geo+json',
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
 
 // Geometry → bbox [minX,minY,maxX,maxY] (lon/lat 좌표 기준)
 function extentOf(g: GjGeometry | null): [number, number, number, number] | null {

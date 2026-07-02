@@ -10,9 +10,11 @@ GIS 검수 API — FastAPI.
 프론트엔드 contract: web/src/api/*.ts, web/src/types/index.ts.
 """
 import hmac as _hmac
+import io
 import json
 import os
 import time
+import zipfile
 from collections import Counter
 from contextlib import asynccontextmanager
 from urllib.parse import quote
@@ -129,6 +131,13 @@ SUPERADMIN_CD = "00000000"
 def require_superadmin(user: dict = Depends(get_user)) -> dict:
     if user["role"] != "master" or (user.get("admin_cd") or "").strip() != SUPERADMIN_CD:
         raise HTTPException(status_code=403, detail="관리 현황은 00000000 계정만 열람 가능")
+    return user
+
+
+def require_master(user: dict = Depends(get_user)) -> dict:
+    """master 계정 전용(발주처/작업자 총괄). 전국 공간정보 내보내기 등에 사용."""
+    if user["role"] != "master":
+        raise HTTPException(status_code=403, detail="관리자(master) 전용 기능입니다")
     return user
 
 
@@ -839,3 +848,135 @@ def admin_delete_all_markup(_: dict = Depends(require_superadmin)):
         "WITH d AS (DELETE FROM review_markup RETURNING 1) SELECT count(*) AS n FROM d"
     )
     return {"deleted": row["n"] if row else 0}
+
+
+# ---------------------------------------------------------------- 공간정보 내보내기 (전국/시도)
+# kind → 파일명 라벨. (라인등록/삭제표기/속성등록만 대상)
+_EXPORT_KINDS = [("add", "라인등록"), ("delete_mark", "삭제표기"), ("attr", "속성등록")]
+_EXPORT_KIND_SET = {k for k, _ in _EXPORT_KINDS}
+
+
+def _parse_status(status: str) -> list[str]:
+    """status 쿼리(콤마구분)를 화이트리스트로 검증. 기본 pending."""
+    allowed = {"pending", "applied", "rejected"}
+    vals = [s.strip() for s in (status or "").split(",") if s.strip()]
+    picked = [s for s in vals if s in allowed]
+    return picked or ["pending"]
+
+
+@app.get("/api/admin/markup-sido-summary")
+def markup_sido_summary(status: str = "pending", _: dict = Depends(require_master)):
+    """시도별 수정요청 건수 요약 — 체크리스트 UI 구성용. 데이터 있는 시도만 반환.
+    status(콤마구분, 기본 pending)로 상태 필터. '전국' 합계도 함께 준다."""
+    statuses = _parse_status(status)
+    rows = fetchall(
+        """
+        SELECT n.sido_cd, n.sido_nm, m.kind, count(*) AS c
+        FROM review_markup m
+        JOIN admin_node n ON n.adm_cd = m.adm_cd
+        WHERE m.status = ANY(%s) AND m.kind = ANY(%s)
+        GROUP BY n.sido_cd, n.sido_nm, m.kind
+        ORDER BY n.sido_cd
+        """,
+        (statuses, list(_EXPORT_KIND_SET)),
+    )
+    by_sido: dict[str, dict] = {}
+    nation = {"add": 0, "delete_mark": 0, "attr": 0, "total": 0}
+    for r in rows:
+        s = by_sido.setdefault(
+            r["sido_cd"],
+            {"sido_cd": r["sido_cd"], "sido_nm": r["sido_nm"],
+             "add": 0, "delete_mark": 0, "attr": 0, "total": 0},
+        )
+        s[r["kind"]] += r["c"]
+        s["total"] += r["c"]
+        nation[r["kind"]] += r["c"]
+        nation["total"] += r["c"]
+    return {"nation": nation, "sido": list(by_sido.values())}
+
+
+@app.get("/api/admin/markup-export")
+def markup_export(
+    scopes: str,
+    status: str = "pending",
+    user: dict = Depends(require_master),
+):
+    """선택한 범위(scopes)의 수정요청 공간정보를 kind별 GeoJSON 으로 만들어 ZIP 반환.
+    scopes: 콤마구분. 'all'=전국(전체 집계), 그 외 값=시도코드(2자리).
+    파일명: {전국|시도명}_수정요청_{kind라벨}_{관리자ID}.geojson (데이터 있는 kind만)."""
+    statuses = _parse_status(status)
+    scope_list = [s.strip() for s in scopes.split(",") if s.strip()]
+    if not scope_list:
+        raise HTTPException(status_code=400, detail="scopes 가 비어 있습니다")
+    admin_id = (user.get("admin_cd") or "00000000").strip()
+
+    rows = fetchall(
+        """
+        SELECT m.id, m.adm_cd, n.adm_nm, n.sido_cd, n.sido_nm,
+               m.kind, m.status, m.attrs, m.created_by, m.created_at,
+               ST_AsGeoJSON(ST_Transform(m.geom, 4326))::json AS geometry
+        FROM review_markup m
+        JOIN admin_node n ON n.adm_cd = m.adm_cd
+        WHERE m.status = ANY(%s) AND m.kind = ANY(%s)
+        ORDER BY m.adm_cd, m.id
+        """,
+        (statuses, list(_EXPORT_KIND_SET)),
+    )
+
+    def to_feature(r: dict) -> dict:
+        attrs = r.get("attrs") or {}
+        return {
+            "type": "Feature",
+            "geometry": r["geometry"],
+            "properties": {
+                "id": r["id"],
+                "adm_cd": r["adm_cd"].strip(),
+                "adm_nm": r["adm_nm"],
+                "kind": r["kind"],
+                "status": r["status"],
+                "ri_nm": attrs.get("ri_nm"),
+                "ri_cd": attrs.get("ri_cd"),
+                "note": attrs.get("note"),
+                "created_by": r["created_by"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            },
+        }
+
+    # scope 라벨 결정 + 해당 scope 에 포함되는 행 선별
+    def scope_label(sc: str) -> str | None:
+        if sc == "all":
+            return "전국"
+        for r in rows:
+            if r["sido_cd"] == sc:
+                return r["sido_nm"]
+        return None  # 데이터 없는 시도코드
+
+    buf = io.BytesIO()
+    file_count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for sc in scope_list:
+            label = scope_label(sc)
+            if label is None:
+                continue
+            subset = rows if sc == "all" else [r for r in rows if r["sido_cd"] == sc]
+            for kind, klabel in _EXPORT_KINDS:
+                feats = [to_feature(r) for r in subset if r["kind"] == kind]
+                if not feats:
+                    continue
+                fc = {"type": "FeatureCollection", "features": feats}
+                fname = f"{label}_수정요청_{klabel}_{admin_id}.geojson"
+                z.writestr(fname, json.dumps(fc, ensure_ascii=False))
+                file_count += 1
+
+    if file_count == 0:
+        raise HTTPException(status_code=404, detail="선택한 범위에 내보낼 수정요청이 없습니다")
+
+    buf.seek(0)
+    zipname = f"수정요청_공간정보_{admin_id}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(zipname)}"
+        },
+    )
