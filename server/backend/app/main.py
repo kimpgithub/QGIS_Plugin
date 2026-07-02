@@ -899,16 +899,18 @@ def markup_sido_summary(status: str = "pending", _: dict = Depends(require_maste
 def markup_export(
     scopes: str,
     status: str = "pending",
-    user: dict = Depends(require_master),
+    _: dict = Depends(require_master),
 ):
     """선택한 범위(scopes)의 수정요청 공간정보를 kind별 GeoJSON 으로 만들어 ZIP 반환.
     scopes: 콤마구분. 'all'=전국(전체 집계), 그 외 값=시도코드(2자리).
-    파일명: {전국|시도명}_수정요청_{kind라벨}_{관리자ID}.geojson (데이터 있는 kind만)."""
+    파일명: {전국|시도명}_수정요청_{kind라벨}_{지역코드}_{날짜}.geojson (데이터 있는 kind만).
+    지역코드: 전국=00000000, 시도=시도코드(2자리). 날짜=다운로드 시점 한국날짜(YYYYMMDD)."""
     statuses = _parse_status(status)
     scope_list = [s.strip() for s in scopes.split(",") if s.strip()]
     if not scope_list:
         raise HTTPException(status_code=400, detail="scopes 가 비어 있습니다")
-    admin_id = (user.get("admin_cd") or "00000000").strip()
+    # 다운로드 시점 한국날짜(KST=UTC+9). 파일명 접미로 사용.
+    date_str = time.strftime("%Y%m%d", time.gmtime(time.time() + 9 * 3600))
 
     rows = fetchall(
         """
@@ -959,12 +961,13 @@ def markup_export(
             if label is None:
                 continue
             subset = rows if sc == "all" else [r for r in rows if r["sido_cd"] == sc]
+            region_code = "00000000" if sc == "all" else sc
             for kind, klabel in _EXPORT_KINDS:
                 feats = [to_feature(r) for r in subset if r["kind"] == kind]
                 if not feats:
                     continue
                 fc = {"type": "FeatureCollection", "features": feats}
-                fname = f"{label}_수정요청_{klabel}_{admin_id}.geojson"
+                fname = f"{label}_수정요청_{klabel}_{region_code}_{date_str}.geojson"
                 z.writestr(fname, json.dumps(fc, ensure_ascii=False))
                 file_count += 1
 
@@ -972,7 +975,7 @@ def markup_export(
         raise HTTPException(status_code=404, detail="선택한 범위에 내보낼 수정요청이 없습니다")
 
     buf.seek(0)
-    zipname = f"수정요청_공간정보_{admin_id}.zip"
+    zipname = f"수정요청_공간정보_{date_str}.zip"
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
