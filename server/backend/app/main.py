@@ -903,8 +903,9 @@ def markup_export(
 ):
     """선택한 범위(scopes)의 수정요청 공간정보를 kind별 GeoJSON 으로 만들어 ZIP 반환.
     scopes: 콤마구분. 'all'=전국(전체 집계), 그 외 값=시도코드(2자리).
-    파일명: {전국|시도명}_수정요청_{kind라벨}_{지역코드}_{날짜}.geojson (데이터 있는 kind만).
-    지역코드: 전국=00000000, 시도=시도코드(2자리). 날짜=다운로드 시점 한국날짜(YYYYMMDD)."""
+    파일명: 전국=전국_수정요청_{kind라벨}_{날짜}.geojson,
+           시도=시도명_수정요청_{kind라벨}_{시도코드2자리}_{날짜}.geojson (데이터 있는 kind만).
+    날짜=다운로드 시점 한국날짜(YYYYMMDD)."""
     statuses = _parse_status(status)
     scope_list = [s.strip() for s in scopes.split(",") if s.strip()]
     if not scope_list:
@@ -961,13 +962,14 @@ def markup_export(
             if label is None:
                 continue
             subset = rows if sc == "all" else [r for r in rows if r["sido_cd"] == sc]
-            region_code = "00000000" if sc == "all" else sc
+            # 전국은 지역코드 생략, 시도는 시도코드(2자리)를 접미로.
+            code_part = "" if sc == "all" else f"_{sc}"
             for kind, klabel in _EXPORT_KINDS:
                 feats = [to_feature(r) for r in subset if r["kind"] == kind]
                 if not feats:
                     continue
                 fc = {"type": "FeatureCollection", "features": feats}
-                fname = f"{label}_수정요청_{klabel}_{region_code}_{date_str}.geojson"
+                fname = f"{label}_수정요청_{klabel}{code_part}_{date_str}.geojson"
                 z.writestr(fname, json.dumps(fc, ensure_ascii=False))
                 file_count += 1
 
