@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { login } from '../api/auth';
+import { ApiError } from '../api/client';
 import { useAuth } from '../store/AuthContext';
 
 // 아이디 저장 — 브라우저 localStorage 에 '아이디만' 보관(비밀번호는 저장 안 함).
@@ -29,8 +30,17 @@ export default function LoginPage() {
       if (remember) localStorage.setItem(SAVED_ID_KEY, id.trim());
       else localStorage.removeItem(SAVED_ID_KEY);
       setUser(u);
-    } catch {
-      setErr('로그인 실패 — ID/비밀번호를 확인하세요.');
+    } catch (e) {
+      // 접근회수(403) 등 서버가 사유를 준 경우 그 메시지를 그대로 노출.
+      // 그 외(401 등)는 자격 확인 안내로 통일(계정 존재 여부 노출 방지).
+      const detail =
+        e instanceof ApiError &&
+        e.status === 403 &&
+        e.body &&
+        typeof e.body === 'object'
+          ? (e.body as { detail?: string }).detail
+          : null;
+      setErr(detail || '로그인 실패 — ID/비밀번호를 확인하세요.');
     } finally {
       setBusy(false);
     }
