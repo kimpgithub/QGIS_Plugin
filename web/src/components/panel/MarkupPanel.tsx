@@ -51,9 +51,9 @@ export default function MarkupPanel({
   return (
     <div style={styles.box}>
       <div style={styles.head}>
-        <div style={styles.titleRow}>
-          <div style={styles.title}>수정요청</div>
-          <div style={styles.dlGroup}>
+        <div style={styles.title}>수정요청</div>
+        {(onDownloadThis || onDownloadBulk) && (
+          <div style={styles.dlRow}>
             {onDownloadThis && (
               <button
                 type="button"
@@ -61,7 +61,7 @@ export default function MarkupPanel({
                 onClick={onDownloadThis}
                 title="현재 선택한 읍면의 수정요청을 GeoJSON 파일로 저장 (QGIS에서 바로 열림)"
               >
-                ⬇ 현재 읍면
+                ⬇ 현재 읍면 공간정보
               </button>
             )}
             {onDownloadBulk && (
@@ -71,11 +71,11 @@ export default function MarkupPanel({
                 onClick={onDownloadBulk}
                 title="전국/시도 범위를 골라 수정요청 공간정보를 ZIP 으로 저장"
               >
-                ⬇ 전국·시도
+                ⬇ 전국·시도 공간정보
               </button>
             )}
           </div>
-        </div>
+        )}
         <div style={styles.filters}>
           {FILTER_ROWS.map((r) => (
             <label key={r.key} style={styles.flbl}>
@@ -130,15 +130,12 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: 8,
   },
-  titleRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
   title: { fontSize: 13, fontWeight: 600, color: '#1f2937' },
-  dlGroup: { display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' },
+  // 다운로드 버튼 전용 줄 — 제목 아래, 패널 폭 전체를 반반 나눔.
+  dlRow: { display: 'flex', gap: 6 },
   dlBtn: {
-    padding: '3px 10px',
+    flex: 1,
+    padding: '5px 6px',
     border: '1px solid #c9ced6',
     background: '#fff',
     borderRadius: 4,
