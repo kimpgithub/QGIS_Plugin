@@ -67,7 +67,8 @@ export default function Modal({
         ref={cardRef}
         style={{
           ...styles.card,
-          width,
+          // 좁은 화면(태블릿/가로)에서 넘치지 않게 — 지정폭과 화면폭 중 작은 값.
+          width: `min(${width}px, 94vw)`,
           ...(pos ? { position: 'fixed' as const, left: pos.x, top: pos.y } : {}),
         }}
         onClick={(e) => e.stopPropagation()}
@@ -115,6 +116,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     pointerEvents: 'auto',
+    // 세로가 짧은 가로 화면에서 넘치면 본문 스크롤.
+    maxHeight: '90vh',
   },
   head: {
     padding: '10px 14px',
@@ -128,7 +131,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'move',          // 제목줄 드래그로 모달 이동
     userSelect: 'none',
   },
-  body: { padding: 14 },
+  body: { padding: 14, overflowY: 'auto' },
   close: {
     background: 'transparent',
     border: 'none',

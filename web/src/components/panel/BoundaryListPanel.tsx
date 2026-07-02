@@ -224,8 +224,10 @@ export default function BoundaryListPanel({
 const styles: Record<string, React.CSSProperties> = {
   // 지도 옆에 도킹되는 사이드 패널 — 지도를 가리지 않고 레이아웃을 나눠 씀.
   panel: {
-    width: 320,
-    minWidth: 320,
+    // 태블릿/가로 화면 대응 — 화면 폭에 따라 유동(미디어쿼리 없이 clamp).
+    width: 'clamp(240px, 24vw, 320px)',
+    minWidth: 0,
+    flexShrink: 0,
     background: '#fff',
     borderRight: '1px solid #d0d3da',
     display: 'flex',

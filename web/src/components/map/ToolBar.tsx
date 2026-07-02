@@ -104,16 +104,18 @@ const baseBtn: React.CSSProperties = {
 
 const styles: Record<string, React.CSSProperties> = {
   bar: {
-    height: 44,
     minHeight: 44,
     background: '#f1f3f7',
     borderBottom: '1px solid #d0d3da',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '0 12px',
+    // 좁은 화면(태블릿/가로)에서 버튼이 넘치면 줄바꿈 — 잘림 방지.
+    flexWrap: 'wrap',
+    gap: 6,
+    padding: '4px 12px',
   },
-  left: { display: 'flex', gap: 6, alignItems: 'center' },
+  left: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },
   divider: {
     width: 1,
     height: 22,
@@ -132,7 +134,7 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
   },
   dlIcon: { fontSize: 14, fontWeight: 700, lineHeight: 1 },
-  right: { display: 'flex', gap: 12, alignItems: 'center' },
+  right: { display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' },
   btn: baseBtn,
   btnActive: {
     ...baseBtn,

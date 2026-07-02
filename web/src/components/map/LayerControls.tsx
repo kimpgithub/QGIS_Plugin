@@ -63,8 +63,10 @@ export default function LayerControls({
 
 const styles: Record<string, React.CSSProperties> = {
   box: {
-    width: 200,
-    minWidth: 200,
+    // 태블릿/가로 화면 대응 — 화면이 좁아지면 함께 줄어듦(미디어쿼리 없이 clamp).
+    width: 'clamp(168px, 16vw, 200px)',
+    minWidth: 0,
+    flexShrink: 0,
     borderRight: '1px solid #d0d3da',
     background: '#fafbfc',
     padding: '12px 14px',

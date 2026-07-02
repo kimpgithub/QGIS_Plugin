@@ -115,8 +115,10 @@ export default function MarkupPanel({
 
 const styles: Record<string, React.CSSProperties> = {
   box: {
-    width: 320,
-    minWidth: 320,
+    // 태블릿/가로 화면 대응 — 화면 폭에 따라 유동(미디어쿼리 없이 clamp).
+    width: 'clamp(240px, 24vw, 320px)',
+    minWidth: 0,
+    flexShrink: 0,
     borderLeft: '1px solid #d0d3da',
     background: '#fafbfc',
     display: 'flex',
