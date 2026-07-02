@@ -106,7 +106,28 @@ def get_user(creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> di
     role = payload.get("role")
     if role not in ("normal", "master"):
         raise HTTPException(status_code=401, detail="토큰 페이로드가 유효하지 않습니다")
-    return {"role": role, "admin_cd": payload.get("sub")}
+    admin_cd = payload.get("sub")
+    user = {"role": role, "admin_cd": admin_cd}
+    if role == "normal":
+        # 권한 변경 시 기존 세션 무효화 — 변경시각(perm_updated_at) 이후 발급 토큰만 유효.
+        # 마스터가 권한을 바꾸면 대상 계정의 다음 요청에서 401 → 프론트 자동 로그아웃.
+        row = fetchone(
+            "SELECT perm_level, extract(epoch FROM perm_updated_at) AS upd "
+            "FROM auth WHERE admin_cd = %s",
+            (admin_cd,),
+        )
+        if row:
+            upd = row.get("upd")
+            iat = payload.get("iat") or 0
+            # iat 는 초 단위로 내림되므로 upd 도 초 단위(int)로 맞춰 비교 —
+            # 변경과 같은 초에 재로그인해도 방금 받은 토큰이 무효가 되지 않도록.
+            if upd is not None and iat < int(upd):
+                raise HTTPException(
+                    status_code=401,
+                    detail="권한이 변경되어 다시 로그인해야 합니다.",
+                )
+            user["perm_level"] = row.get("perm_level") or 1
+    return user
 
 
 def require_plugin(user: dict = Depends(get_user)) -> dict:
@@ -124,15 +145,11 @@ def check_admin_access(user: dict, adm_cd: str):
 
 
 def assert_can_edit(user: dict):
-    """편집(수정요청 생성/완료체크/요청취소) 권한 확인 — normal 계정의 perm_level 을
-    DB 에서 실시간 조회해 2 이상(편집회수)이면 차단. master/plugin 은 항상 허용.
-    실시간 조회라 마스터가 권한을 바꾸면 재로그인 없이 즉시 반영된다."""
+    """편집(수정요청 생성/완료체크/요청취소) 권한 확인 — normal 계정의 perm_level(get_user
+    에서 부착)이 2 이상(편집회수)이면 차단. master/plugin 은 항상 허용."""
     if user["role"] != "normal":
         return
-    row = fetchone(
-        "SELECT perm_level FROM auth WHERE admin_cd = %s", (user.get("admin_cd"),)
-    )
-    if row and (row.get("perm_level") or 1) >= 2:
+    if (user.get("perm_level") or 1) >= 2:
         raise HTTPException(
             status_code=403, detail="편집 권한이 회수된 계정입니다 (열람 전용)."
         )
@@ -295,14 +312,20 @@ def set_account_perm(adm_cd: str, body: PermBody, _: dict = Depends(require_mast
     1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가). master 계정은 변경 불가."""
     if body.level not in (1, 2, 3):
         raise HTTPException(status_code=400, detail="level 은 1/2/3")
-    target = fetchone("SELECT role FROM auth WHERE admin_cd = %s", (adm_cd,))
+    target = fetchone(
+        "SELECT role, perm_level FROM auth WHERE admin_cd = %s", (adm_cd,)
+    )
     if not target:
         raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다")
     if target["role"] == "master":
         raise HTTPException(status_code=400, detail="master 계정은 권한을 변경할 수 없습니다")
-    execute(
-        "UPDATE auth SET perm_level = %s WHERE admin_cd = %s", (body.level, adm_cd)
-    )
+    # 실제 변경이 있을 때만 perm_updated_at 갱신 → 그 계정의 기존 토큰(로그인 세션)을
+    # 무효화해 재로그인 강제(get_user 에서 iat < perm_updated_at 이면 401).
+    if (target.get("perm_level") or 1) != body.level:
+        execute(
+            "UPDATE auth SET perm_level = %s, perm_updated_at = now() WHERE admin_cd = %s",
+            (body.level, adm_cd),
+        )
     return {"adm_cd": adm_cd.strip(), "perm_level": body.level}
 
 

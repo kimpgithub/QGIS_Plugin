@@ -12,6 +12,13 @@ export function setToken(token: string | null) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+// 전역 401 처리 — 로그인된 상태에서 토큰이 무효(만료·권한변경 등)해지면
+// AuthContext 가 등록한 핸들러를 호출해 자동 로그아웃시킨다.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  onUnauthorized = fn;
+}
+
 export class ApiError extends Error {
   status: number;
   body: unknown;
@@ -55,6 +62,10 @@ export async function api<T = unknown>(
       detail = await r.json();
     } catch {
       // ignore
+    }
+    // 로그인 요청이 아닌데 401 이고 토큰이 있으면 → 세션 무효(만료·권한변경) → 자동 로그아웃.
+    if (r.status === 401 && path !== '/api/login' && getToken()) {
+      onUnauthorized?.();
     }
     throw new ApiError(r.status, `HTTP ${r.status}`, detail);
   }

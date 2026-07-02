@@ -41,6 +41,12 @@ export default function AdminPickerModal({
   async function changePerm(a: AdminUnit, level: PermLevel) {
     const cd = a.adm_cd;
     if (permBusy[cd] || levelOf(a) === level) return;
+    const label = PERM_OPTS.find((p) => p.level === level)?.label ?? '';
+    const ok = window.confirm(
+      `'${a.adm_nm}'(${cd}) 계정의 권한을 '${label}'(으)로 변경하시겠습니까?\n` +
+        `\n변경하면 해당 계정이 로그인 중인 경우 자동으로 로그아웃됩니다.`
+    );
+    if (!ok) return;
     const prev = levelOf(a);
     setPermBusy((s) => ({ ...s, [cd]: true }));
     setPermOverride((s) => ({ ...s, [cd]: level }));

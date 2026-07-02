@@ -13,3 +13,8 @@ END $$;
 
 COMMENT ON COLUMN auth.perm_level IS
   '권한: 1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가). master는 무시.';
+
+-- 권한 변경 시각 — 이 시각 이전 발급 토큰은 무효(재로그인 강제). 권한 변경 시 자동 로그아웃용.
+ALTER TABLE auth ADD COLUMN IF NOT EXISTS perm_updated_at TIMESTAMPTZ;
+COMMENT ON COLUMN auth.perm_updated_at IS
+  '권한(perm_level) 마지막 변경 시각. 이 시각 이전 발급 토큰은 무효(재로그인 강제).';

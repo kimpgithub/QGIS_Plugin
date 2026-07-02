@@ -10,7 +10,7 @@ import {
 } from 'react';
 import type { AuthUser } from '../types';
 import { logout as apiLogout, refreshSession } from '../api/auth';
-import { getToken, setToken } from '../api/client';
+import { getToken, setToken, setUnauthorizedHandler } from '../api/client';
 
 const USER_KEY = 'auth_user';
 
@@ -57,6 +57,9 @@ type AuthCtx = {
 };
 
 const IDLE_LOGOUT_NOTICE = '1시간 미사용으로 자동 로그아웃되었습니다.';
+// 세션 무효(토큰 만료 또는 관리자에 의한 권한 변경)로 자동 로그아웃된 경우.
+const SESSION_LOGOUT_NOTICE =
+  '세션이 만료되었거나 권한이 변경되어 로그아웃되었습니다. 다시 로그인해 주세요.';
 
 const Ctx = createContext<AuthCtx | null>(null);
 
@@ -92,20 +95,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const clearLogoutNotice = useCallback(() => setLogoutNotice(null), []);
 
-  // reason==='idle' 이면 미사용 자동 로그아웃 → 로그인 화면에 안내 문구 표시.
+  // reason 별 로그인 화면 안내: 'idle'=미사용, 'session'=토큰만료/권한변경.
   // 수동 [로그아웃] 버튼은 reason 없이 호출되어 안내를 띄우지 않는다.
-  const doSignOut = useCallback((reason?: 'idle') => {
+  const doSignOut = useCallback((reason?: 'idle' | 'session') => {
     apiLogout();
     setToken(null);
     setUserState(null);
     localStorage.removeItem(USER_KEY);
     warnOpenRef.current = false;
     setWarnOpen(false);
-    setLogoutNotice(reason === 'idle' ? IDLE_LOGOUT_NOTICE : null);
+    setLogoutNotice(
+      reason === 'idle'
+        ? IDLE_LOGOUT_NOTICE
+        : reason === 'session'
+          ? SESSION_LOGOUT_NOTICE
+          : null
+    );
   }, []);
 
   // 공개 signOut — 수동 로그아웃용(인자 없음). onClick 핸들러로도 안전.
   const signOut = useCallback(() => doSignOut(), [doSignOut]);
+
+  // 전역 401 → 자동 로그아웃(세션 만료·권한 변경). api 클라이언트가 호출.
+  useEffect(() => {
+    setUnauthorizedHandler(() => doSignOut('session'));
+    return () => setUnauthorizedHandler(null);
+  }, [doSignOut]);
 
   // 새 토큰으로 교체 — localStorage(auth_token) + auth_user + state 동기화.
   const applyNewToken = useCallback((t: string) => {

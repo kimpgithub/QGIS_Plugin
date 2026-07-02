@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS auth (
     -- 권한 레벨(마스터가 지역 계정 제어): 1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가).
     -- master 계정에는 적용되지 않음(항상 전권).
     perm_level    SMALLINT NOT NULL DEFAULT 1 CHECK (perm_level BETWEEN 1 AND 3),
+    -- 권한 마지막 변경 시각. 이 시각 이전 발급된 토큰은 무효(재로그인 강제).
+    perm_updated_at TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
