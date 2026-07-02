@@ -12,28 +12,48 @@ type Props = {
 };
 
 // 전국/시도별 수정요청 공간정보를 GeoJSON(kind별) ZIP 으로 내려받는 모달.
+// - 상태(처리대기/반영됨) 다중선택 — 선택에 따라 건수/다운로드 대상이 바뀜.
 // - '전국 전체' 선택 시 개별 시도 선택은 비활성(전국이 전부 포함).
-// - 데이터(미처리 수정요청) 있는 시도만 목록에 노출, 건수 표시.
+// - 데이터 있는 시도만 목록에 노출, 건수 표시.
 export default function MarkupExportModal({ open, onClose }: Props) {
   const [summary, setSummary] = useState<MarkupExportSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [stPending, setStPending] = useState(true); // 처리대기(pending)
+  const [stApplied, setStApplied] = useState(false); // 반영됨(applied)
   const [nation, setNation] = useState(false); // 전국 전체 선택
   const [sel, setSel] = useState<Set<string>>(new Set()); // 선택된 시도코드
   const [busy, setBusy] = useState(false);
 
-  // 열릴 때마다 요약 로드 + 선택 초기화
+  const statusParam = [stPending && 'pending', stApplied && 'applied']
+    .filter(Boolean)
+    .join(',');
+
+  // 열릴 때 지역 선택만 초기화(상태 선택은 직전 값 유지)
   useEffect(() => {
     if (!open) return;
     setNation(false);
     setSel(new Set());
     setErr(null);
+  }, [open]);
+
+  // 열림 + 상태선택 변경 시 건수 요약 재로드. 목록에서 사라진 시도는 선택 해제.
+  useEffect(() => {
+    if (!open) return;
+    if (!statusParam) {
+      setSummary(null);
+      return;
+    }
     setLoading(true);
-    getMarkupExportSummary('pending')
-      .then(setSummary)
+    getMarkupExportSummary(statusParam)
+      .then((s) => {
+        setSummary(s);
+        const codes = new Set(s.sido.map((x) => x.sido_cd));
+        setSel((prev) => new Set([...prev].filter((c) => codes.has(c))));
+      })
       .catch(() => setErr('현황을 불러오지 못했습니다.'))
       .finally(() => setLoading(false));
-  }, [open]);
+  }, [open, statusParam]);
 
   const sidoList = summary?.sido ?? [];
   const nationTotal = summary?.nation.total ?? 0;
@@ -45,7 +65,8 @@ export default function MarkupExportModal({ open, onClose }: Props) {
       .reduce((a, s) => a + s.total, 0);
   }, [nation, sel, sidoList, nationTotal]);
 
-  const canDownload = !busy && (nation ? nationTotal > 0 : sel.size > 0);
+  const canDownload =
+    !busy && !!statusParam && (nation ? nationTotal > 0 : sel.size > 0);
 
   function toggleSido(cd: string) {
     setSel((prev) => {
@@ -58,11 +79,11 @@ export default function MarkupExportModal({ open, onClose }: Props) {
 
   async function onDownload() {
     const scopes = nation ? ['all'] : Array.from(sel);
-    if (!scopes.length) return;
+    if (!scopes.length || !statusParam) return;
     setBusy(true);
     setErr(null);
     try {
-      await downloadMarkupExport(scopes, 'pending');
+      await downloadMarkupExport(scopes, statusParam);
       onClose();
     } catch (e) {
       setErr(e instanceof Error ? e.message : '다운로드에 실패했습니다.');
@@ -74,13 +95,36 @@ export default function MarkupExportModal({ open, onClose }: Props) {
   return (
     <Modal open={open} title="공간정보 다운로드 (전국/시도)" onClose={onClose} width={480}>
       <div style={styles.note}>
-        미처리 수정요청을 라인등록·삭제표기·속성등록 GeoJSON 으로 묶어 ZIP 으로 내려받습니다.
+        선택한 상태의 수정요청을 라인등록·삭제표기·속성등록 GeoJSON 으로 묶어 ZIP 으로 내려받습니다.
       </div>
 
-      {loading ? (
+      {/* 상태 선택 */}
+      <div style={styles.statusRow}>
+        <span style={styles.statusLabel}>상태</span>
+        <label style={styles.stChk}>
+          <input
+            type="checkbox"
+            checked={stPending}
+            onChange={(e) => setStPending(e.target.checked)}
+          />
+          <span>처리대기</span>
+        </label>
+        <label style={styles.stChk}>
+          <input
+            type="checkbox"
+            checked={stApplied}
+            onChange={(e) => setStApplied(e.target.checked)}
+          />
+          <span>반영됨</span>
+        </label>
+      </div>
+
+      {!statusParam ? (
+        <div style={styles.empty}>상태를 하나 이상 선택하세요.</div>
+      ) : loading ? (
         <div style={styles.empty}>불러오는 중…</div>
       ) : nationTotal === 0 ? (
-        <div style={styles.empty}>내보낼 미처리 수정요청이 없습니다.</div>
+        <div style={styles.empty}>선택한 상태의 수정요청이 없습니다.</div>
       ) : (
         <>
           {/* 전국 전체 */}
@@ -139,6 +183,25 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#6b7280',
     lineHeight: 1.6,
     marginBottom: 12,
+  },
+  statusRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 14,
+    padding: '8px 10px',
+    background: '#f9fafb',
+    border: '1px solid #eef0f3',
+    borderRadius: 4,
+    marginBottom: 12,
+  },
+  statusLabel: { fontSize: 13, fontWeight: 600, color: '#374151' },
+  stChk: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    fontSize: 13,
+    color: '#374151',
+    cursor: 'pointer',
   },
   empty: {
     textAlign: 'center',
