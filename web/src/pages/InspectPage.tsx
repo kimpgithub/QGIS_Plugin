@@ -49,6 +49,8 @@ type InspectPageProps = {
 export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
   const { user, signOut } = useAuth();
   const isMaster = user?.role === 'master';
+  // 열람전용(편집회수, perm_level=2) — 지역 담당자의 편집 UI를 모두 숨긴다.
+  const readOnly = !isMaster && user?.perm_level === 2;
 
   // 현재 선택된 행정읍면 — user 는 본인 코드, master 는 picker 결과
   const [admin, setAdmin] = useState<AdminUnit | null>(null);
@@ -451,7 +453,14 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
         userId={user?.id}
         onLogout={signOut}
         onOpenAdmin={onOpenAdmin}
+        canEdit={!readOnly}
       />
+      {readOnly && (
+        <div style={styles.readonlyBar}>
+          🔒 편집 권한이 회수되어 <b>열람 전용</b> 상태입니다 — 등록·완료체크·요청취소는
+          할 수 없습니다.
+        </div>
+      )}
       <div style={styles.body}>
         <LayerControls
           visible={visible}
@@ -467,6 +476,7 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
           boundary={boundary}
           onClose={() => setRiListOpen(false)}
           onZoomTo={onZoomToBoundary}
+          canConfirm={!readOnly}
         />
         <div style={styles.mapWrap}>
           <MapView
@@ -554,6 +564,7 @@ export default function InspectPage({ onOpenAdmin }: InspectPageProps = {}) {
           // 공간정보(GeoJSON) 다운로드는 관리자(master)에게만 노출
           onDownload={isMaster ? () => setExportOpen(true) : undefined}
           canProcess={isMaster}
+          readOnly={readOnly}
           loading={loading}
         />
       </div>
@@ -664,6 +675,13 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     background: '#fff',
+  },
+  readonlyBar: {
+    padding: '7px 14px',
+    background: '#fef3c7',
+    borderBottom: '1px solid #fcd34d',
+    color: '#92400e',
+    fontSize: 13,
   },
   body: { flex: 1, display: 'flex', minHeight: 0 },
   mapWrap: { flex: 1, position: 'relative', minWidth: 0 },

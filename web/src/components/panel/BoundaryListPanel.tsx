@@ -11,6 +11,8 @@ type Props = {
   boundary: BoundaryCollection | null;
   onClose: () => void;
   onZoomTo: (feature: GjFeature<BoundaryProps>) => void;
+  // false 면 완료 체크박스 숨김 — 열람전용(perm_level=2) 계정.
+  canConfirm?: boolean;
 };
 
 const hasRemark = (f: GjFeature<BoundaryProps>) =>
@@ -25,6 +27,7 @@ export default function BoundaryListPanel({
   boundary,
   onClose,
   onZoomTo,
+  canConfirm = true,
 }: Props) {
   const [query, setQuery] = useState('');
   // false(기본) = 비고(remark) 있는 행정리만 / true = 전체
@@ -192,7 +195,7 @@ export default function BoundaryListPanel({
                         style={{ ...styles.td, textAlign: 'center' }}
                         onDoubleClick={(e) => e.stopPropagation()}
                       >
-                        {isConfirmTarget(f) ? (
+                        {isConfirmTarget(f) && canConfirm ? (
                           <input
                             type="checkbox"
                             checked={isConfirmed(f)}

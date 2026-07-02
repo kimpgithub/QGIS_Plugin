@@ -123,6 +123,21 @@ def check_admin_access(user: dict, adm_cd: str):
         raise HTTPException(status_code=403, detail="본인 adm_cd 외 접근 불가")
 
 
+def assert_can_edit(user: dict):
+    """편집(수정요청 생성/완료체크/요청취소) 권한 확인 — normal 계정의 perm_level 을
+    DB 에서 실시간 조회해 2 이상(편집회수)이면 차단. master/plugin 은 항상 허용.
+    실시간 조회라 마스터가 권한을 바꾸면 재로그인 없이 즉시 반영된다."""
+    if user["role"] != "normal":
+        return
+    row = fetchone(
+        "SELECT perm_level FROM auth WHERE admin_cd = %s", (user.get("admin_cd"),)
+    )
+    if row and (row.get("perm_level") or 1) >= 2:
+        raise HTTPException(
+            status_code=403, detail="편집 권한이 회수된 계정입니다 (열람 전용)."
+        )
+
+
 # 슈퍼관리자(발주처 총괄) 전용 — master 중에서도 00000000 한 계정만.
 # 관리 현황 페이지(지역별 수정요청 현황·데이터 업로드 이력)는 이 계정만 열람.
 SUPERADMIN_CD = "00000000"
@@ -186,7 +201,7 @@ def health():
 @app.post("/api/login")
 def login(body: LoginBody, request: Request):
     row = fetchone(
-        "SELECT admin_cd, password_hash, role FROM auth WHERE admin_cd = %s",
+        "SELECT admin_cd, password_hash, role, perm_level FROM auth WHERE admin_cd = %s",
         (body.id,),
     )
     ok = False
@@ -211,6 +226,12 @@ def login(body: LoginBody, request: Request):
         raise HTTPException(status_code=401, detail="ID 또는 비밀번호가 올바르지 않습니다")
     admin_cd = row["admin_cd"].strip()
     db_role = row["role"]                                    # normal | master
+    perm_level = row.get("perm_level") or 1
+    # 접근권한 회수(레벨3) — master 는 예외. 로그인 차단.
+    if db_role != "master" and perm_level >= 3:
+        raise HTTPException(
+            status_code=403, detail="관리자에 의해 접근 권한이 회수된 계정입니다."
+        )
     fe_role = "master" if db_role == "master" else "user"    # 프론트 UserRole
     now = int(time.time())
     token = jwt.encode(
@@ -222,6 +243,7 @@ def login(body: LoginBody, request: Request):
         node = fetchone("SELECT adm_nm FROM admin_node WHERE adm_cd = %s", (admin_cd,))
         user_obj["adm_cd"] = admin_cd
         user_obj["adm_nm"] = node["adm_nm"] if node else None
+        user_obj["perm_level"] = perm_level    # 프론트 편집 UI 게이팅용(레벨2=열람전용)
     return {"token": token, "user": user_obj}
 
 
@@ -252,13 +274,36 @@ def list_admins(_: dict = Depends(get_user)):
         """
         SELECT n.adm_cd, n.adm_nm,
                n.sgg_cd AS sigungu_cd, n.sgg_nm AS sigungu_nm,
-               n.sido_cd, n.sido_nm
+               n.sido_cd, n.sido_nm,
+               COALESCE(a.perm_level, 1) AS perm_level
         FROM admin_node n
         JOIN cog_catalog c ON c.adm_cd = n.adm_cd
+        LEFT JOIN auth a ON a.admin_cd = n.adm_cd
         ORDER BY n.sido_cd, n.sgg_cd, n.adm_cd
         """
     )
     return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]
+
+
+class PermBody(BaseModel):
+    level: int   # 1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가)
+
+
+@app.patch("/api/admin/account/{adm_cd}/perm")
+def set_account_perm(adm_cd: str, body: PermBody, _: dict = Depends(require_master)):
+    """행정읍면 계정 권한 레벨 변경 — master 전용.
+    1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가). master 계정은 변경 불가."""
+    if body.level not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="level 은 1/2/3")
+    target = fetchone("SELECT role FROM auth WHERE admin_cd = %s", (adm_cd,))
+    if not target:
+        raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다")
+    if target["role"] == "master":
+        raise HTTPException(status_code=400, detail="master 계정은 권한을 변경할 수 없습니다")
+    execute(
+        "UPDATE auth SET perm_level = %s WHERE admin_cd = %s", (body.level, adm_cd)
+    )
+    return {"adm_cd": adm_cd.strip(), "perm_level": body.level}
 
 
 # ---------------------------------------------------------------- admin outline (행정읍면 외곽)
@@ -366,6 +411,7 @@ def set_boundary_confirm(body: ConfirmBody, user: dict = Depends(get_user)):
       · gid 키: 로그인 간 유지되나 해당 읍면 재업로드 시 초기화(허용).
     부호도 gid 도 없으면 키를 못 만들어 거부."""
     check_admin_access(user, body.adm_cd)
+    assert_can_edit(user)
     ri_cd = (body.ri_cd or "").strip()
     key = ri_cd if ri_cd else (f"gid:{body.gid}" if body.gid is not None else "")
     if not key:
@@ -604,6 +650,7 @@ def create_markup(body: MarkupCreate, user: dict = Depends(get_user)):
     if len(body.adm_cd) != 8:
         raise HTTPException(status_code=400, detail="adm_cd는 8자")
     check_admin_access(user, body.adm_cd)
+    assert_can_edit(user)
     if body.kind not in _KIND_GEOM:
         raise HTTPException(status_code=400, detail="kind는 add/delete/attr/delete_mark 중 하나")
     gtype = body.geometry.get("type")
@@ -742,6 +789,7 @@ def delete_markup(markup_id: int, user: dict = Depends(get_user)):
     if not cur:
         raise HTTPException(status_code=404, detail="마크업을 찾을 수 없습니다")
     check_admin_access(user, cur["adm_cd"].strip())
+    assert_can_edit(user)
     if cur["status"] == "applied":
         raise HTTPException(
             status_code=409, detail="반영된 요청은 이력 보존을 위해 삭제할 수 없습니다"

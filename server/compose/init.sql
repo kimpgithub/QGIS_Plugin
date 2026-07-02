@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS auth (
     role          TEXT    NOT NULL DEFAULT 'normal'
                           CHECK (role IN ('normal', 'master')),
     contact       VARCHAR(20),               -- 담당자 업무연락처(내선번호) — 첫 로그인 시 등록
+    -- 권한 레벨(마스터가 지역 계정 제어): 1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가).
+    -- master 계정에는 적용되지 않음(항상 전권).
+    perm_level    SMALLINT NOT NULL DEFAULT 1 CHECK (perm_level BETWEEN 1 AND 3),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

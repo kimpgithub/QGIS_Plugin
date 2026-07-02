@@ -1,6 +1,19 @@
 import { useMemo, useState } from 'react';
 import Modal from '../common/Modal';
-import type { AdminUnit } from '../../types';
+import { setAccountPerm } from '../../api/admin';
+import type { AdminUnit, PermLevel } from '../../types';
+
+// 권한 3단계 — 세그먼트 버튼. 색상으로 상태 구분.
+const PERM_OPTS: { level: PermLevel; label: string; title: string }[] = [
+  { level: 1, label: '정상', title: '정상 이용(기본)' },
+  { level: 2, label: '편집회수', title: '열람 전용 — 등록/체크/요청취소 차단' },
+  { level: 3, label: '접근회수', title: '로그인 불가' },
+];
+const PERM_ACTIVE: Record<PermLevel, React.CSSProperties> = {
+  1: { background: '#dcfce7', borderColor: '#16a34a', color: '#15803d', fontWeight: 600 },
+  2: { background: '#fef3c7', borderColor: '#d97706', color: '#b45309', fontWeight: 600 },
+  3: { background: '#fee2e2', borderColor: '#dc2626', color: '#b91c1c', fontWeight: 600 },
+};
 
 type Props = {
   open: boolean;
@@ -18,6 +31,31 @@ export default function AdminPickerModal({
   const [q, setQ] = useState('');
   const [sido, setSido] = useState('');
   const [sgg, setSgg] = useState('');
+  // 권한 변경 낙관적 갱신 — adm_cd → level. 서버 값(admins) 위에 덮어씀.
+  const [permOverride, setPermOverride] = useState<Record<string, PermLevel>>({});
+  const [permBusy, setPermBusy] = useState<Record<string, boolean>>({});
+
+  const levelOf = (a: AdminUnit): PermLevel =>
+    permOverride[a.adm_cd] ?? a.perm_level ?? 1;
+
+  async function changePerm(a: AdminUnit, level: PermLevel) {
+    const cd = a.adm_cd;
+    if (permBusy[cd] || levelOf(a) === level) return;
+    const prev = levelOf(a);
+    setPermBusy((s) => ({ ...s, [cd]: true }));
+    setPermOverride((s) => ({ ...s, [cd]: level }));
+    try {
+      await setAccountPerm(cd, level);
+    } catch {
+      setPermOverride((s) => ({ ...s, [cd]: prev }));
+      alert('권한 변경에 실패했습니다.');
+    } finally {
+      setPermBusy((s) => {
+        const { [cd]: _drop, ...rest } = s;
+        return rest;
+      });
+    }
+  }
 
   const sidoOpts = useMemo(
     () =>
@@ -91,17 +129,39 @@ export default function AdminPickerModal({
       <div style={styles.list}>
         {rows.length === 0 && <div style={styles.empty}>일치하는 항목 없음</div>}
         {rows.map((a) => (
-          <button
-            key={a.adm_cd}
-            type="button"
-            style={styles.row}
-            onClick={() => onSelect(a)}
-          >
-            <span style={styles.code}>{a.adm_cd}</span>
-            <span style={styles.nm}>
-              {a.sido_nm} {a.sigungu_nm} {a.adm_nm}
-            </span>
-          </button>
+          <div key={a.adm_cd} style={styles.row}>
+            <button
+              type="button"
+              style={styles.rowMain}
+              onClick={() => onSelect(a)}
+              title="클릭: 이 읍면 열기"
+            >
+              <span style={styles.code}>{a.adm_cd}</span>
+              <span style={styles.nm}>
+                {a.sido_nm} {a.sigungu_nm} {a.adm_nm}
+              </span>
+            </button>
+            <div style={styles.perm}>
+              {PERM_OPTS.map((p) => {
+                const active = levelOf(a) === p.level;
+                return (
+                  <button
+                    key={p.level}
+                    type="button"
+                    disabled={permBusy[a.adm_cd]}
+                    onClick={() => changePerm(a, p.level)}
+                    title={p.title}
+                    style={{
+                      ...styles.permBtn,
+                      ...(active ? PERM_ACTIVE[p.level] : {}),
+                    }}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         ))}
       </div>
     </Modal>
@@ -144,22 +204,46 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 4,
   },
   row: {
-    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '5px 10px',
+    borderBottom: '1px solid #f1f3f7',
+  },
+  rowMain: {
+    flex: 1,
+    minWidth: 0,
     display: 'flex',
     gap: 12,
-    padding: '6px 10px',
-    background: '#fff',
+    alignItems: 'center',
+    background: 'none',
     border: 'none',
-    borderBottom: '1px solid #f1f3f7',
     cursor: 'pointer',
     textAlign: 'left',
     fontSize: 13,
+    padding: '4px 0',
   },
   code: {
     fontFamily: 'ui-monospace, Consolas, monospace',
     color: '#1f6feb',
     minWidth: 80,
   },
-  nm: { color: '#1f2937' },
+  nm: {
+    color: '#1f2937',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  perm: { display: 'flex', gap: 3, flexShrink: 0 },
+  permBtn: {
+    fontSize: 11,
+    padding: '3px 7px',
+    border: '1px solid #d0d3da',
+    background: '#fff',
+    color: '#6b7280',
+    borderRadius: 3,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
   empty: { textAlign: 'center', padding: 16, color: '#9ca3af', fontSize: 12 },
 };

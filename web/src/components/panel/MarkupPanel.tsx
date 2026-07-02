@@ -16,6 +16,8 @@ type Props = {
   // 라인등록/삭제표기/속성등록 공간정보를 GeoJSON 으로 다운로드 (QGIS 작업용)
   onDownload?: () => void;
   canProcess?: boolean;
+  // true 면 요청취소 버튼 숨김 — 열람전용(perm_level=2) 계정.
+  readOnly?: boolean;
   loading?: boolean;
 };
 
@@ -36,6 +38,7 @@ export default function MarkupPanel({
   onDelete,
   onDownload,
   canProcess,
+  readOnly,
   loading,
 }: Props) {
   const filtered = useMemo(
@@ -88,7 +91,7 @@ export default function MarkupPanel({
             onClick={() => onSelect(m.id)}
             onApply={() => onApply(m.id)}
             onReject={() => onReject(m.id)}
-            onDelete={() => onDelete(m.id)}
+            onDelete={readOnly ? undefined : () => onDelete(m.id)}
           />
         ))}
       </div>

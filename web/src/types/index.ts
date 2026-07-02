@@ -19,6 +19,9 @@ export type GjFeatureCollection<P = Record<string, unknown>, G = GjGeometry> = {
 };
 
 // 행정 단위 (bnd_adm_pg 한 행)
+// 권한 레벨: 1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가). master는 무시.
+export type PermLevel = 1 | 2 | 3;
+
 export type AdminUnit = {
   adm_cd: string;       // 8자리
   adm_nm: string;
@@ -26,6 +29,7 @@ export type AdminUnit = {
   sido_nm: string;
   sigungu_cd: string;   // 5
   sigungu_nm: string;
+  perm_level?: PermLevel; // 계정 권한 레벨(picker 권한 컨트롤용)
 };
 
 export type UserRole = 'user' | 'master';
@@ -35,6 +39,7 @@ export type AuthUser = {
   role: UserRole;
   adm_cd?: string;      // role=user 일 때 본인 담당 읍면
   adm_nm?: string;
+  perm_level?: PermLevel; // role=user 일 때 본인 권한(2=열람전용)
   token: string;
 };
 

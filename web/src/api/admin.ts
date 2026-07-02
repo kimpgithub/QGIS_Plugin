@@ -62,6 +62,18 @@ export function deleteAllMarkup(): Promise<{ deleted: number }> {
   return api('/api/admin/markup', { method: 'DELETE' });
 }
 
+// PATCH /api/admin/account/{adm_cd}/perm — 계정 권한 레벨 변경(master 전용)
+// level: 1=정상, 2=편집회수(열람전용), 3=접근회수(로그인불가)
+export function setAccountPerm(
+  adm_cd: string,
+  level: 1 | 2 | 3
+): Promise<{ adm_cd: string; perm_level: number }> {
+  return api(`/api/admin/account/${adm_cd}/perm`, {
+    method: 'PATCH',
+    body: { level },
+  });
+}
+
 // ── 공간정보 내보내기(전국/시도, master 전용) ────────────────────────────
 export type MarkupKindCount = {
   add: number;

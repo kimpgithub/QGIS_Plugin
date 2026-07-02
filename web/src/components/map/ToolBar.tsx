@@ -12,6 +12,8 @@ type Props = {
   onLogout?: () => void;
   // 발주처 총괄(00000000) 일 때만 전달 — '관리 현황' 진입 버튼.
   onOpenAdmin?: () => void;
+  // false 면 편집 도구(라인등록/삭제표기/속성등록) 숨김 — 열람전용(perm_level=2) 계정.
+  canEdit?: boolean;
 };
 
 // '라인삭제'(delete) 툴은 혼동을 일으켜 제거 — 요청 삭제는 수정요청 카드의
@@ -39,20 +41,22 @@ export default function ToolBar({
   userId,
   onLogout,
   onOpenAdmin,
+  canEdit = true,
 }: Props) {
   return (
     <div style={styles.bar}>
       <div style={styles.left}>
-        {BTNS.map((b) => (
-          <button
-            key={b.id}
-            type="button"
-            style={active === b.id ? styles.btnActive : styles.btn}
-            onClick={() => onChange(active === b.id ? null : b.id)}
-          >
-            {b.label}
-          </button>
-        ))}
+        {canEdit &&
+          BTNS.map((b) => (
+            <button
+              key={b.id}
+              type="button"
+              style={active === b.id ? styles.btnActive : styles.btn}
+              onClick={() => onChange(active === b.id ? null : b.id)}
+            >
+              {b.label}
+            </button>
+          ))}
         {showAdminPicker && (
           <button type="button" style={styles.btn} onClick={onOpenAdminPicker}>
             행정읍면 선택
