@@ -13,8 +13,9 @@ type Props = {
   onReject: (id: number) => void;
   // [요청삭제] — 확인 모달을 거쳐 삭제
   onDelete: (id: number) => void;
-  // 라인등록/삭제표기/속성등록 공간정보를 GeoJSON 으로 다운로드 (QGIS 작업용)
-  onDownload?: () => void;
+  // 공간정보 다운로드(QGIS 작업용) — 둘 다 관리자 전용, 넘어온 것만 버튼 표시.
+  onDownloadThis?: () => void; // 현재 선택한 읍면 1개 (GeoJSON)
+  onDownloadBulk?: () => void; // 전국/시도 (ZIP) — 범위 선택 모달
   canProcess?: boolean;
   // true 면 요청취소 버튼 숨김 — 열람전용(perm_level=2) 계정.
   readOnly?: boolean;
@@ -36,7 +37,8 @@ export default function MarkupPanel({
   onApply,
   onReject,
   onDelete,
-  onDownload,
+  onDownloadThis,
+  onDownloadBulk,
   canProcess,
   readOnly,
   loading,
@@ -51,16 +53,28 @@ export default function MarkupPanel({
       <div style={styles.head}>
         <div style={styles.titleRow}>
           <div style={styles.title}>수정요청</div>
-          {onDownload && (
-            <button
-              type="button"
-              style={styles.dlBtn}
-              onClick={onDownload}
-              title="라인등록/삭제표기/속성등록을 GeoJSON 파일로 저장 (QGIS에서 바로 열림)"
-            >
-              ⬇ 공간정보
-            </button>
-          )}
+          <div style={styles.dlGroup}>
+            {onDownloadThis && (
+              <button
+                type="button"
+                style={styles.dlBtn}
+                onClick={onDownloadThis}
+                title="현재 선택한 읍면의 수정요청을 GeoJSON 파일로 저장 (QGIS에서 바로 열림)"
+              >
+                ⬇ 현재 읍면
+              </button>
+            )}
+            {onDownloadBulk && (
+              <button
+                type="button"
+                style={styles.dlBtn}
+                onClick={onDownloadBulk}
+                title="전국/시도 범위를 골라 수정요청 공간정보를 ZIP 으로 저장"
+              >
+                ⬇ 전국·시도
+              </button>
+            )}
+          </div>
         </div>
         <div style={styles.filters}>
           {FILTER_ROWS.map((r) => (
@@ -122,6 +136,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
   },
   title: { fontSize: 13, fontWeight: 600, color: '#1f2937' },
+  dlGroup: { display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' },
   dlBtn: {
     padding: '3px 10px',
     border: '1px solid #c9ced6',
@@ -130,6 +145,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     cursor: 'pointer',
     color: '#374151',
+    whiteSpace: 'nowrap',
   },
   filters: { display: 'flex', gap: 12 },
   flbl: {
