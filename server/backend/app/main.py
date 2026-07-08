@@ -506,10 +506,28 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
     merged = sorted(f"{a}/{r}" for (a, r), c in key_counts.items() if c > 1)
 
     admins = sorted({r["adm_cd"] for r in rows})
-    deleted = inserted = 0
+    deleted = inserted = carried = 0
     with pool.connection() as conn:
         with conn.cursor() as cur:
             if rows:
+                # 0) 완료체크 승계 준비 — 부호 없는(gid 키) 완료체크만 대상.
+                #    부호 있는 행은 키가 부호라 재업로드에도 자동 유지되므로 제외.
+                #    삭제 전에 옛 도형을 스냅샷 → 삽입 후 공간 매칭으로 새 gid 로 이전.
+                cur.execute(
+                    """
+                    CREATE TEMP TABLE _confirm_carry ON COMMIT DROP AS
+                    SELECT b.adm_cd, b.gid AS old_gid,
+                           ST_PointOnSurface(ST_MakeValid(b.geom)) AS pt,
+                           c.confirmed_by, c.confirmed_at
+                    FROM boundary b
+                    JOIN boundary_confirm c
+                      ON c.adm_cd = b.adm_cd AND c.ri_cd = 'gid:' || b.gid
+                    WHERE b.adm_cd = ANY(%s)
+                      AND (b.ri_cd IS NULL OR btrim(b.ri_cd) = '')
+                      AND b.geom IS NOT NULL
+                    """,
+                    (admins,),
+                )
                 # 1) 제출된 읍면의 기존 경계 전부 삭제
                 cur.execute(
                     "DELETE FROM boundary WHERE adm_cd = ANY(%s)", (admins,))
@@ -547,8 +565,49 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
                     (srid, json.dumps(rows)),
                 )
                 inserted = cur.rowcount
+                # 3) 완료체크 공간 매칭 승계 — 옛 폴리곤의 내부점(대표점)을 포함하는
+                #    새 폴리곤이 '같은 위치'. 그 새 gid 로 완료체크를 이전한다.
+                #    ST_MakeValid 로 위상오류(self-intersection) 방어. 점-폴리곤
+                #    포함이라 폴리곤 교차보다 견고하고 자연히 1:1. 여럿에 포함되면
+                #    가장 작은(가장 안쪽) 폴리곤을 채택.
+                cur.execute(
+                    """
+                    INSERT INTO boundary_confirm
+                      (adm_cd, ri_cd, confirmed_by, confirmed_at)
+                    SELECT o.adm_cd, 'gid:' || nm.new_gid,
+                           o.confirmed_by, o.confirmed_at
+                    FROM _confirm_carry o
+                    CROSS JOIN LATERAL (
+                      SELECT n.gid AS new_gid
+                      FROM boundary n
+                      WHERE n.adm_cd = o.adm_cd
+                        AND (n.ri_cd IS NULL OR btrim(n.ri_cd) = '')
+                        AND n.geom IS NOT NULL
+                        AND ST_Intersects(ST_MakeValid(n.geom), o.pt)
+                      ORDER BY ST_Area(ST_MakeValid(n.geom)) ASC
+                      LIMIT 1
+                    ) nm
+                    ON CONFLICT (adm_cd, ri_cd) DO NOTHING
+                    """,
+                )
+                carried = cur.rowcount
+                # 4) 승계 못한 옛 gid 체크 정리 — 대응 경계가 사라진 gid 키 제거.
+                cur.execute(
+                    """
+                    DELETE FROM boundary_confirm c
+                    WHERE c.adm_cd = ANY(%s)
+                      AND c.ri_cd LIKE 'gid:%%'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM boundary b
+                        WHERE b.adm_cd = c.adm_cd
+                          AND 'gid:' || b.gid = c.ri_cd
+                      )
+                    """,
+                    (admins,),
+                )
         conn.commit()
     return {"affected": inserted, "inserted": inserted, "deleted": deleted,
+            "confirmed_carried": carried,
             "admins": admins, "features": len(body["features"]),
             "merged": merged}
 
