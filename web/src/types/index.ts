@@ -30,6 +30,7 @@ export type AdminUnit = {
   sigungu_cd: string;   // 5
   sigungu_nm: string;
   perm_level?: PermLevel; // 계정 권한 레벨(picker 권한 컨트롤용)
+  has_cog?: boolean;      // 스캔 이미지(COG) 보유 여부 — false 면 경계만 검수
 };
 
 export type UserRole = 'user' | 'master';

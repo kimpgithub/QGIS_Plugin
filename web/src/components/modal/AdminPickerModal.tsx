@@ -146,6 +146,11 @@ export default function AdminPickerModal({
               <span style={styles.nm}>
                 {a.sido_nm} {a.sigungu_nm} {a.adm_nm}
               </span>
+              {a.has_cog === false && (
+                <span style={styles.noImg} title="스캔 이미지가 없어 경계만 검수합니다">
+                  이미지 없음
+                </span>
+              )}
             </button>
             <div style={styles.perm}>
               {PERM_OPTS.map((p) => {
@@ -239,6 +244,17 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+  },
+  // 스캔 이미지 없는 읍면 표시 — 경계만 검수 가능함을 알림.
+  noImg: {
+    flexShrink: 0,
+    fontSize: 10,
+    padding: '1px 5px',
+    borderRadius: 3,
+    background: '#f3f4f6',
+    color: '#6b7280',
+    border: '1px solid #e5e7eb',
+    whiteSpace: 'nowrap',
   },
   perm: { display: 'flex', gap: 3, flexShrink: 0 },
   permBtn: {

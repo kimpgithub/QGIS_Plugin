@@ -284,18 +284,26 @@ def refresh_token(user: dict = Depends(get_user)):
 # ---------------------------------------------------------------- admins
 @app.get("/api/admins")
 def list_admins(_: dict = Depends(get_user)):
-    """COG 가 업로드된 admin 만 (AdminUnit[]).
-    admin_node ⨯ cog_catalog INNER JOIN — picker 에 검수 대상만 노출.
+    """검수 대상 admin 목록 (AdminUnit[]).
+
+    노출 조건 = COG(스캔 이미지) **또는** 경계(boundary) 가 있는 읍면.
+    이미지가 아직 없어도 경계 SHP 만 올라온 읍면(예: 정선군)은 경계 검수가
+    가능하므로 목록에 나와야 한다 — 과거 cog_catalog INNER JOIN 이라 이런
+    읍면이 통째로 가려졌다. (지도는 경계 기준으로 맞춰지고, 이미지 없으면
+    COG 레이어만 꺼진 채 정상 동작.)
     플러그인의 /api/admins 연결 테스트는 list length 만 보므로 호환."""
     rows = fetchall(
         """
         SELECT n.adm_cd, n.adm_nm,
                n.sgg_cd AS sigungu_cd, n.sgg_nm AS sigungu_nm,
                n.sido_cd, n.sido_nm,
-               COALESCE(a.perm_level, 1) AS perm_level
+               COALESCE(a.perm_level, 1) AS perm_level,
+               EXISTS (SELECT 1 FROM cog_catalog c WHERE c.adm_cd = n.adm_cd)
+                 AS has_cog
         FROM admin_node n
-        JOIN cog_catalog c ON c.adm_cd = n.adm_cd
         LEFT JOIN auth a ON a.admin_cd = n.adm_cd
+        WHERE EXISTS (SELECT 1 FROM cog_catalog c WHERE c.adm_cd = n.adm_cd)
+           OR EXISTS (SELECT 1 FROM boundary  b WHERE b.adm_cd = n.adm_cd)
         ORDER BY n.sido_cd, n.sgg_cd, n.adm_cd
         """
     )
