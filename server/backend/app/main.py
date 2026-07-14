@@ -543,6 +543,12 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
                 # 2) 새 경계 일괄 삽입.
                 #    - 같은 실제 부호(ri_cd) 폴리곤들 → ST_Union 으로 1행 병합
                 #    - 빈 부호(NULL) 폴리곤들 → 병합하지 않고 각각 1행 (ordinality 로 그룹 분리)
+                #
+                #    ST_MakeValid — QGIS 제출 SHP 에 자기교차(self-intersection) 폴리곤이
+                #    섞여 있으면 ST_Union(lwgeom_unaryunion) 이 TopologyException 을 던져
+                #    업로드 전체가 500 으로 실패했다. 유효화 후 union 한다.
+                #    ST_CollectionExtract(...,3) — MakeValid 결과에 선/점이 섞여도 폴리곤만
+                #    남겨 MultiPolygon 컬럼 타입을 지킨다.
                 cur.execute(
                     """
                     INSERT INTO boundary
@@ -557,8 +563,10 @@ def replace_boundary(body: dict, srid: int = 4326, user: dict = Depends(require_
                                WHEN f->'geometry' IS NULL
                                  OR jsonb_typeof(f->'geometry') = 'null'
                                THEN NULL
-                               ELSE ST_Transform(ST_SetSRID(
-                                 ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179)
+                               ELSE ST_CollectionExtract(ST_MakeValid(
+                                 ST_Transform(ST_SetSRID(
+                                   ST_GeomFromGeoJSON((f->'geometry')::text), %s), 5179)
+                               ), 3)
                              END AS geom,
                              f->>'adm_cd' AS adm_cd, f->>'adm_nm' AS adm_nm,
                              f->>'ri_cd'  AS ri_cd,  f->>'ri_nm'  AS ri_nm,
