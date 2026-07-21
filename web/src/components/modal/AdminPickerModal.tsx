@@ -110,7 +110,7 @@ export default function AdminPickerModal({
   }, [admins, sido, sgg, q]);
 
   return (
-    <Modal open={open} title="행정읍면 선택" onClose={onCancel} width={760}>
+    <Modal open={open} title="행정읍면 선택" onClose={onCancel} width={940}>
       <div style={styles.filters}>
         <select
           style={styles.sel}
