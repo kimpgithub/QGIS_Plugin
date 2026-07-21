@@ -156,36 +156,40 @@ export default function AdminPickerModal({
               onClick={() => onSelect(a)}
               title="클릭: 이 읍면 열기"
             >
-              <span style={styles.code}>{a.adm_cd}</span>
-              <span style={styles.nameCell}>
-                <span style={styles.nm}>
-                  {a.sido_nm} {a.sigungu_nm} {a.adm_nm}
-                </span>
-                {a.has_cog === false && (
-                  <span style={styles.noImg} title="스캔 이미지가 없어 경계만 검수합니다">
-                    이미지 없음
+              <span style={styles.grpInfo}>
+                <span style={styles.code}>{a.adm_cd}</span>
+                <span style={styles.nameCell}>
+                  <span style={styles.nm}>
+                    {a.sido_nm} {a.sigungu_nm} {a.adm_nm}
                   </span>
-                )}
+                  {a.has_cog === false && (
+                    <span style={styles.noImg} title="스캔 이미지가 없어 경계만 검수합니다">
+                      이미지 없음
+                    </span>
+                  )}
+                </span>
               </span>
-              <span
-                style={{
-                  ...styles.progress,
-                  ...((a.remark_count ?? 0) === 0 ? styles.metaEmpty : {}),
-                }}
-                title="완료체크 수 / 보완사항 수"
-              >
-                {(a.remark_count ?? 0) > 0
-                  ? `${a.confirmed_count ?? 0}/${a.remark_count}`
-                  : '-'}
-              </span>
-              <span
-                style={{
-                  ...styles.cardTime,
-                  textAlign: a.latest_card_at ? 'right' : 'center',
-                }}
-                title="최근 카드 등록 일시(KST)"
-              >
-                {a.latest_card_at ? fmtCardTime(a.latest_card_at) : '-'}
+              <span style={styles.grpProgress}>
+                <span
+                  style={{
+                    ...styles.progress,
+                    ...((a.remark_count ?? 0) === 0 ? styles.metaEmpty : {}),
+                  }}
+                  title="완료체크 수 / 보완사항 수"
+                >
+                  {(a.remark_count ?? 0) > 0
+                    ? `${a.confirmed_count ?? 0}/${a.remark_count}`
+                    : '-'}
+                </span>
+                <span
+                  style={{
+                    ...styles.cardTime,
+                    textAlign: a.latest_card_at ? 'right' : 'center',
+                  }}
+                  title="최근 카드 등록 일시(KST)"
+                >
+                  {a.latest_card_at ? fmtCardTime(a.latest_card_at) : '-'}
+                </span>
               </span>
             </button>
             <div style={styles.perm}>
@@ -250,19 +254,19 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #e5e7eb',
     borderRadius: 4,
   },
-  // 한 행의 모든 요소(코드·지명·진척도·시간·권한버튼)를 동일 간격(GAP)으로.
+  // 3덩어리(지역정보 // 진척 // 권한) — 덩어리 사이 16px.
   row: {
     display: 'flex',
     alignItems: 'center',
-    gap: 12,
+    gap: 16,
     padding: '6px 12px',
     borderBottom: '1px solid #f1f3f7',
   },
-  // 코드·지명·진척도·시간 — 내용 폭에 맞춰 흐르고, 요소 사이는 row 와 같은 간격.
+  // 지역정보 // 진척 두 덩어리 — 덩어리 사이 16px.
   rowMain: {
     minWidth: 0,
     display: 'flex',
-    gap: 12,
+    gap: 16,
     alignItems: 'center',
     background: 'none',
     border: 'none',
@@ -270,6 +274,21 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'left',
     fontSize: 13,
     padding: '3px 0',
+  },
+  // 덩어리1: 코드 + 지명 (내부 8px)
+  grpInfo: {
+    flex: '0 1 auto',
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+  // 덩어리2: 진척도 + 시간 (내부 8px)
+  grpProgress: {
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
   },
   code: {
     fontFamily: 'ui-monospace, Consolas, monospace',
@@ -314,9 +333,10 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #eef1f5',
     fontWeight: 600,
   },
-  // 최근 카드 일시 — 내용폭(고정폭 monospace). 간격은 gap 이 담당.
+  // 최근 카드 일시 — 고정폭(시간 문자열 폭). 카드 없을 때 '-' 도 같은 폭 차지.
   cardTime: {
     flexShrink: 0,
+    width: 128,
     fontSize: 12.5,
     color: '#4b5563',
     whiteSpace: 'nowrap',
@@ -333,7 +353,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #e5e7eb',
     whiteSpace: 'nowrap',
   },
-  perm: { display: 'flex', gap: 12, flexShrink: 0 },
+  perm: { display: 'flex', gap: 8, flexShrink: 0 },
   permBtn: {
     fontSize: 11,
     padding: '3px 7px',
