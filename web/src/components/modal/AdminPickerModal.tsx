@@ -276,7 +276,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#6b7280',
   },
   headMain: { display: 'flex', gap: 32, alignItems: 'center' },
-  hInfo: { flex: '0 0 300px', textAlign: 'left' },  // grpInfo 폭과 동일, 좌측정렬
+  hInfo: { flex: '0 0 300px', textAlign: 'center' },  // 헤더만 칸 가운데(컨텐츠는 좌측)
   hBadge: { width: 60, textAlign: 'center' }, // progress 폭과 동일
   hTime: { width: 128, textAlign: 'center' }, // cardTime 폭과 동일, 칸 가운데
   hPerm: { marginLeft: 'auto', width: 174, textAlign: 'center' }, // 권한 버튼 묶음 위
