@@ -31,6 +31,9 @@ export type AdminUnit = {
   sigungu_nm: string;
   perm_level?: PermLevel; // 계정 권한 레벨(picker 권한 컨트롤용)
   has_cog?: boolean;      // 스캔 이미지(COG) 보유 여부 — false 면 경계만 검수
+  remark_count?: number;    // 보완사항(비고) 있는 행정리 수 = 완료체크 대상
+  confirmed_count?: number; // 그중 완료체크된 수 (confirmed_count ≤ remark_count)
+  latest_card_at?: string | null; // 최근 수정요청 카드 등록 시각(UTC ISO) / 없으면 null
 };
 
 export type UserRole = 'user' | 'master';

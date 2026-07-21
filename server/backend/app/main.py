@@ -291,23 +291,61 @@ def list_admins(_: dict = Depends(get_user)):
     가능하므로 목록에 나와야 한다 — 과거 cog_catalog INNER JOIN 이라 이런
     읍면이 통째로 가려졌다. (지도는 경계 기준으로 맞춰지고, 이미지 없으면
     COG 레이어만 꺼진 채 정상 동작.)
-    플러그인의 /api/admins 연결 테스트는 list length 만 보므로 호환."""
+    플러그인의 /api/admins 연결 테스트는 list length 만 보므로 호환.
+
+    각 읍면에 검수 진척 요약을 함께 반환:
+      · remark_count      = 보완사항(비고) 있는 행정리 수 = 완료체크 대상
+      · confirmed_count   = 그중 완료체크된 수 (분자 ≤ 분모 보장)
+      · latest_card_at    = 가장 최근 수정요청 카드(review_markup) 등록 시각
+                            (모든 상태 포함, UTC ISO — 표시 시 KST 변환)
+    """
     rows = fetchall(
         """
+        WITH rc AS (   -- 읍면별 보완사항 수 / 그중 완료체크 수
+          SELECT b.adm_cd,
+                 count(*) FILTER (
+                   WHERE b.remark IS NOT NULL AND btrim(b.remark) <> ''
+                 ) AS remark_count,
+                 count(*) FILTER (
+                   WHERE b.remark IS NOT NULL AND btrim(b.remark) <> ''
+                     AND c.ri_cd IS NOT NULL
+                 ) AS confirmed_count
+          FROM boundary b
+          LEFT JOIN boundary_confirm c
+            ON c.adm_cd = b.adm_cd
+           AND c.ri_cd = COALESCE(NULLIF(btrim(b.ri_cd), ''), 'gid:' || b.gid)
+          GROUP BY b.adm_cd
+        ),
+        cd AS (        -- 읍면별 최근 카드 등록 시각
+          SELECT adm_cd, max(created_at) AS latest_card_at
+          FROM review_markup GROUP BY adm_cd
+        )
         SELECT n.adm_cd, n.adm_nm,
                n.sgg_cd AS sigungu_cd, n.sgg_nm AS sigungu_nm,
                n.sido_cd, n.sido_nm,
                COALESCE(a.perm_level, 1) AS perm_level,
                EXISTS (SELECT 1 FROM cog_catalog c WHERE c.adm_cd = n.adm_cd)
-                 AS has_cog
+                 AS has_cog,
+               COALESCE(rc.remark_count, 0)    AS remark_count,
+               COALESCE(rc.confirmed_count, 0) AS confirmed_count,
+               cd.latest_card_at
         FROM admin_node n
         LEFT JOIN auth a ON a.admin_cd = n.adm_cd
+        LEFT JOIN rc     ON rc.adm_cd  = n.adm_cd
+        LEFT JOIN cd     ON cd.adm_cd  = n.adm_cd
         WHERE EXISTS (SELECT 1 FROM cog_catalog c WHERE c.adm_cd = n.adm_cd)
            OR EXISTS (SELECT 1 FROM boundary  b WHERE b.adm_cd = n.adm_cd)
         ORDER BY n.sido_cd, n.sgg_cd, n.adm_cd
         """
     )
-    return [{**r, "adm_cd": r["adm_cd"].strip()} for r in rows]
+    out = []
+    for r in rows:
+        d = {**r, "adm_cd": r["adm_cd"].strip()}
+        # timestamptz → ISO 문자열 (프론트에서 KST 로 포맷)
+        lca = d.get("latest_card_at")
+        d["latest_card_at"] = lca.isoformat() if lca else None
+        out.append(d)
+    return out
 
 
 class PermBody(BaseModel):

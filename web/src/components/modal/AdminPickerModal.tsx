@@ -9,6 +9,20 @@ const PERM_OPTS: { level: PermLevel; label: string; title: string }[] = [
   { level: 2, label: '편집회수', title: '열람 전용 — 등록/체크/요청취소 차단' },
   { level: 3, label: '접근회수', title: '로그인 불가' },
 ];
+// 최근 카드 일시 — UTC ISO → 한국시간(KST) 'YY/MM/DD hh:mm:ss'.
+function fmtCardTime(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: '2-digit', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const g = (t: string) => parts.find((x) => x.type === t)?.value ?? '';
+  return `${g('year')}/${g('month')}/${g('day')} ${g('hour')}:${g('minute')}:${g('second')}`;
+}
+
 const PERM_ACTIVE: Record<PermLevel, React.CSSProperties> = {
   1: { background: '#dcfce7', borderColor: '#16a34a', color: '#15803d', fontWeight: 600 },
   2: { background: '#fef3c7', borderColor: '#d97706', color: '#b45309', fontWeight: 600 },
@@ -151,6 +165,21 @@ export default function AdminPickerModal({
                   이미지 없음
                 </span>
               )}
+              <span style={styles.rightMeta}>
+                {(a.remark_count ?? 0) > 0 && (
+                  <span
+                    style={styles.progress}
+                    title="완료체크 수 / 보완사항 수"
+                  >
+                    {a.confirmed_count ?? 0}/{a.remark_count}
+                  </span>
+                )}
+                {a.latest_card_at && (
+                  <span style={styles.cardTime} title="최근 카드 등록 일시(KST)">
+                    {fmtCardTime(a.latest_card_at)}
+                  </span>
+                )}
+              </span>
             </button>
             <div style={styles.perm}>
               {PERM_OPTS.map((p) => {
@@ -244,6 +273,31 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+  },
+  // 진척도 + 최근 카드 일시 — 이름 뒤 오른쪽 정렬.
+  rightMeta: {
+    marginLeft: 'auto',
+    display: 'flex',
+    gap: 8,
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  progress: {
+    fontSize: 11,
+    fontWeight: 600,
+    padding: '1px 6px',
+    borderRadius: 3,
+    background: '#eef2ff',
+    color: '#4338ca',
+    border: '1px solid #e0e7ff',
+    whiteSpace: 'nowrap',
+    fontFamily: 'ui-monospace, Consolas, monospace',
+  },
+  cardTime: {
+    fontSize: 11,
+    color: '#6b7280',
+    whiteSpace: 'nowrap',
+    fontFamily: 'ui-monospace, Consolas, monospace',
   },
   // 스캔 이미지 없는 읍면 표시 — 경계만 검수 가능함을 알림.
   noImg: {
