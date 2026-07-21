@@ -147,6 +147,18 @@ export default function AdminPickerModal({
         />
       </div>
       <div style={styles.list}>
+        <div style={styles.headRow}>
+          <div style={styles.headMain}>
+            <span style={styles.hInfo}>행정읍면</span>
+            <span style={styles.grpProgress}>
+              <span style={styles.hBadge} title="완료체크 수 / 보완사항 수">
+                진척
+              </span>
+              <span style={styles.hTime}>최근 수정요청</span>
+            </span>
+          </div>
+          <span style={styles.hPerm}>권한</span>
+        </div>
         {rows.length === 0 && <div style={styles.empty}>일치하는 항목 없음</div>}
         {rows.map((a) => (
           <div key={a.adm_cd} style={styles.row}>
@@ -254,6 +266,26 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #e5e7eb',
     borderRadius: 4,
   },
+  // 상단 고정 헤더 — 데이터 행과 컬럼 폭·간격을 동일하게 맞춰 정렬.
+  headRow: {
+    position: 'sticky',
+    top: 0,
+    zIndex: 1,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 16,
+    padding: '7px 12px',
+    background: '#f8fafc',
+    borderBottom: '1px solid #d0d3da',
+    fontSize: 12,
+    fontWeight: 700,
+    color: '#6b7280',
+  },
+  headMain: { display: 'flex', gap: 32, alignItems: 'center' },
+  hInfo: { flex: '0 0 300px' },              // grpInfo 폭과 동일
+  hBadge: { width: 60, textAlign: 'center' }, // progress 폭과 동일
+  hTime: { width: 128, textAlign: 'right' },  // cardTime 폭과 동일
+  hPerm: { marginLeft: 'auto', width: 174, textAlign: 'center' }, // 권한 버튼 묶음 위
   // 3덩어리(지역정보 // 진척 // 권한) — 덩어리 사이 32px.
   row: {
     display: 'flex',
@@ -275,9 +307,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     padding: '3px 0',
   },
-  // 덩어리1: 코드 + 지명 (내부 8px)
+  // 덩어리1: 코드 + 지명 (내부 8px). 헤더와 정렬 위해 폭 고정.
   grpInfo: {
-    flex: '0 1 auto',
+    flex: '0 0 300px',
     minWidth: 0,
     display: 'flex',
     alignItems: 'center',
@@ -297,9 +329,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   // 지명 셀 — 이름(줄임표) + '이미지 없음' 배지. 길면 줄임, 짧으면 내용폭.
   nameCell: {
-    flex: '0 1 auto',
+    flex: '1 1 auto',
     minWidth: 0,
-    maxWidth: 300,
     display: 'flex',
     alignItems: 'center',
     gap: 6,
@@ -316,7 +347,7 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
     fontSize: 13,
     fontWeight: 700,
-    minWidth: 48,
+    width: 60,
     textAlign: 'center',
     padding: '2px 8px',
     borderRadius: 4,
