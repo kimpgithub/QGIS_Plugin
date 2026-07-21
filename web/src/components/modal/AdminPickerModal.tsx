@@ -254,19 +254,19 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #e5e7eb',
     borderRadius: 4,
   },
-  // 3덩어리(지역정보 // 진척 // 권한) — 덩어리 사이 16px.
+  // 3덩어리(지역정보 // 진척 // 권한) — 덩어리 사이 32px.
   row: {
     display: 'flex',
     alignItems: 'center',
-    gap: 16,
+    gap: 32,
     padding: '6px 12px',
     borderBottom: '1px solid #f1f3f7',
   },
-  // 지역정보 // 진척 두 덩어리 — 덩어리 사이 16px.
+  // 지역정보 // 진척 두 덩어리 — 덩어리 사이 32px.
   rowMain: {
     minWidth: 0,
     display: 'flex',
-    gap: 16,
+    gap: 32,
     alignItems: 'center',
     background: 'none',
     border: 'none',
