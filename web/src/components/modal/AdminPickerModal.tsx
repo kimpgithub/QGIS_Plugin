@@ -250,20 +250,19 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #e5e7eb',
     borderRadius: 4,
   },
+  // 한 행의 모든 요소(코드·지명·진척도·시간·권한버튼)를 동일 간격(GAP)으로.
   row: {
     display: 'flex',
     alignItems: 'center',
-    gap: 10,
+    gap: 12,
     padding: '6px 12px',
     borderBottom: '1px solid #f1f3f7',
   },
-  // 코드 · 지명 · 진척도 · 시간 4열 고정 그리드 — 행마다 세로 정렬.
+  // 코드·지명·진척도·시간 — 내용 폭에 맞춰 흐르고, 요소 사이는 row 와 같은 간격.
   rowMain: {
-    flex: 1,
     minWidth: 0,
-    display: 'grid',
-    gridTemplateColumns: '78px minmax(0, 1fr) 56px 132px',
-    columnGap: 14,
+    display: 'flex',
+    gap: 12,
     alignItems: 'center',
     background: 'none',
     border: 'none',
@@ -275,10 +274,13 @@ const styles: Record<string, React.CSSProperties> = {
   code: {
     fontFamily: 'ui-monospace, Consolas, monospace',
     color: '#1f6feb',
+    flexShrink: 0,
   },
-  // 지명 셀 — 이름(줄임표) + '이미지 없음' 배지.
+  // 지명 셀 — 이름(줄임표) + '이미지 없음' 배지. 길면 줄임, 짧으면 내용폭.
   nameCell: {
+    flex: '0 1 auto',
     minWidth: 0,
+    maxWidth: 300,
     display: 'flex',
     alignItems: 'center',
     gap: 6,
@@ -290,9 +292,9 @@ const styles: Record<string, React.CSSProperties> = {
     textOverflow: 'ellipsis',
     minWidth: 0,
   },
-  // 진척도 배지 — 그리드 3열. 배지 폭은 내용에 맞추고 열 안에서 가운데.
+  // 진척도 배지 — 내용폭 배지, 요소 사이 간격은 row/rowMain 의 gap 이 담당.
   progress: {
-    justifySelf: 'center',
+    flexShrink: 0,
     fontSize: 13,
     fontWeight: 700,
     minWidth: 48,
@@ -312,9 +314,9 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #eef1f5',
     fontWeight: 600,
   },
-  // 최근 카드 일시 — 그리드 4열. 열 전체를 채워 우측정렬.
+  // 최근 카드 일시 — 내용폭(고정폭 monospace). 간격은 gap 이 담당.
   cardTime: {
-    justifySelf: 'stretch',
+    flexShrink: 0,
     fontSize: 12.5,
     color: '#4b5563',
     whiteSpace: 'nowrap',
@@ -331,7 +333,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #e5e7eb',
     whiteSpace: 'nowrap',
   },
-  perm: { display: 'flex', gap: 3, flexShrink: 0 },
+  perm: { display: 'flex', gap: 12, flexShrink: 0 },
   permBtn: {
     fontSize: 11,
     padding: '3px 7px',
