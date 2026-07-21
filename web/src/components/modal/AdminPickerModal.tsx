@@ -353,7 +353,8 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #e5e7eb',
     whiteSpace: 'nowrap',
   },
-  perm: { display: 'flex', gap: 8, flexShrink: 0 },
+  // 권한 버튼 묶음 — 오른쪽 끝에 붙여 우측 빈 여백 제거(정보 왼쪽 / 액션 오른쪽).
+  perm: { display: 'flex', gap: 8, flexShrink: 0, marginLeft: 'auto' },
   permBtn: {
     fontSize: 11,
     padding: '3px 7px',
