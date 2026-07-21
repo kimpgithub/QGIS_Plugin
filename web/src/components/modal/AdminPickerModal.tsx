@@ -157,35 +157,35 @@ export default function AdminPickerModal({
               title="클릭: 이 읍면 열기"
             >
               <span style={styles.code}>{a.adm_cd}</span>
-              <span style={styles.nm}>
-                {a.sido_nm} {a.sigungu_nm} {a.adm_nm}
+              <span style={styles.nameCell}>
+                <span style={styles.nm}>
+                  {a.sido_nm} {a.sigungu_nm} {a.adm_nm}
+                </span>
+                {a.has_cog === false && (
+                  <span style={styles.noImg} title="스캔 이미지가 없어 경계만 검수합니다">
+                    이미지 없음
+                  </span>
+                )}
               </span>
-              {a.has_cog === false && (
-                <span style={styles.noImg} title="스캔 이미지가 없어 경계만 검수합니다">
-                  이미지 없음
-                </span>
-              )}
-              <span style={styles.rightMeta}>
-                <span
-                  style={{
-                    ...styles.progress,
-                    ...((a.remark_count ?? 0) === 0 ? styles.metaEmpty : {}),
-                  }}
-                  title="완료체크 수 / 보완사항 수"
-                >
-                  {(a.remark_count ?? 0) > 0
-                    ? `${a.confirmed_count ?? 0}/${a.remark_count}`
-                    : '-'}
-                </span>
-                <span
-                  style={{
-                    ...styles.cardTime,
-                    ...(a.latest_card_at ? {} : { textAlign: 'center' }),
-                  }}
-                  title="최근 카드 등록 일시(KST)"
-                >
-                  {a.latest_card_at ? fmtCardTime(a.latest_card_at) : '-'}
-                </span>
+              <span
+                style={{
+                  ...styles.progress,
+                  ...((a.remark_count ?? 0) === 0 ? styles.metaEmpty : {}),
+                }}
+                title="완료체크 수 / 보완사항 수"
+              >
+                {(a.remark_count ?? 0) > 0
+                  ? `${a.confirmed_count ?? 0}/${a.remark_count}`
+                  : '-'}
+              </span>
+              <span
+                style={{
+                  ...styles.cardTime,
+                  textAlign: a.latest_card_at ? 'right' : 'center',
+                }}
+                title="최근 카드 등록 일시(KST)"
+              >
+                {a.latest_card_at ? fmtCardTime(a.latest_card_at) : '-'}
               </span>
             </button>
             <div style={styles.perm}>
@@ -253,46 +253,49 @@ const styles: Record<string, React.CSSProperties> = {
   row: {
     display: 'flex',
     alignItems: 'center',
-    gap: 8,
-    padding: '5px 10px',
+    gap: 10,
+    padding: '6px 12px',
     borderBottom: '1px solid #f1f3f7',
   },
+  // 코드 · 지명 · 진척도 · 시간 4열 고정 그리드 — 행마다 세로 정렬.
   rowMain: {
     flex: 1,
     minWidth: 0,
-    display: 'flex',
-    gap: 12,
+    display: 'grid',
+    gridTemplateColumns: '78px minmax(0, 1fr) 56px 132px',
+    columnGap: 14,
     alignItems: 'center',
     background: 'none',
     border: 'none',
     cursor: 'pointer',
     textAlign: 'left',
     fontSize: 13,
-    padding: '4px 0',
+    padding: '3px 0',
   },
   code: {
     fontFamily: 'ui-monospace, Consolas, monospace',
     color: '#1f6feb',
-    minWidth: 80,
+  },
+  // 지명 셀 — 이름(줄임표) + '이미지 없음' 배지.
+  nameCell: {
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
   },
   nm: {
     color: '#1f2937',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    minWidth: 0,
   },
-  // 진척도 + 최근 카드 일시 — 이름 뒤 오른쪽 고정 컬럼(값 없으면 '-' 로 정렬 유지).
-  rightMeta: {
-    marginLeft: 'auto',
-    display: 'flex',
-    gap: 10,
-    alignItems: 'center',
-    flexShrink: 0,
-  },
+  // 진척도 배지 — 그리드 3열. 배지 폭은 내용에 맞추고 열 안에서 가운데.
   progress: {
+    justifySelf: 'center',
     fontSize: 13,
     fontWeight: 700,
-    minWidth: 54,
+    minWidth: 48,
     textAlign: 'center',
     padding: '2px 8px',
     borderRadius: 4,
@@ -309,11 +312,11 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #eef1f5',
     fontWeight: 600,
   },
+  // 최근 카드 일시 — 그리드 4열. 열 전체를 채워 우측정렬.
   cardTime: {
+    justifySelf: 'stretch',
     fontSize: 12.5,
     color: '#4b5563',
-    minWidth: 132,
-    textAlign: 'right',
     whiteSpace: 'nowrap',
     fontFamily: 'ui-monospace, Consolas, monospace',
   },
