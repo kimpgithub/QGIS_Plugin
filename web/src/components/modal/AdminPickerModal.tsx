@@ -177,7 +177,13 @@ export default function AdminPickerModal({
                     ? `${a.confirmed_count ?? 0}/${a.remark_count}`
                     : '-'}
                 </span>
-                <span style={styles.cardTime} title="최근 카드 등록 일시(KST)">
+                <span
+                  style={{
+                    ...styles.cardTime,
+                    ...(a.latest_card_at ? {} : { textAlign: 'center' }),
+                  }}
+                  title="최근 카드 등록 일시(KST)"
+                >
                   {a.latest_card_at ? fmtCardTime(a.latest_card_at) : '-'}
                 </span>
               </span>
