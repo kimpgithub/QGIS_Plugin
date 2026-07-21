@@ -193,13 +193,7 @@ export default function AdminPickerModal({
                     ? `${a.confirmed_count ?? 0}/${a.remark_count}`
                     : '-'}
                 </span>
-                <span
-                  style={{
-                    ...styles.cardTime,
-                    textAlign: a.latest_card_at ? 'right' : 'center',
-                  }}
-                  title="최근 카드 등록 일시(KST)"
-                >
+                <span style={styles.cardTime} title="최근 카드 등록 일시(KST)">
                   {a.latest_card_at ? fmtCardTime(a.latest_card_at) : '-'}
                 </span>
               </span>
@@ -282,9 +276,9 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#6b7280',
   },
   headMain: { display: 'flex', gap: 32, alignItems: 'center' },
-  hInfo: { flex: '0 0 300px' },              // grpInfo 폭과 동일
+  hInfo: { flex: '0 0 300px', textAlign: 'center' },  // grpInfo 폭과 동일, 칸 가운데
   hBadge: { width: 60, textAlign: 'center' }, // progress 폭과 동일
-  hTime: { width: 128, textAlign: 'right' },  // cardTime 폭과 동일
+  hTime: { width: 128, textAlign: 'center' }, // cardTime 폭과 동일, 칸 가운데
   hPerm: { marginLeft: 'auto', width: 174, textAlign: 'center' }, // 권한 버튼 묶음 위
   // 3덩어리(지역정보 // 진척 // 권한) — 덩어리 사이 32px.
   row: {
@@ -313,6 +307,7 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
     display: 'flex',
     alignItems: 'center',
+    justifyContent: 'center',   // 코드+지명을 칸 가운데로 → 헤더 아래 정렬
     gap: 8,
   },
   // 덩어리2: 진척도 + 시간 (내부 8px)
@@ -329,7 +324,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   // 지명 셀 — 이름(줄임표) + '이미지 없음' 배지. 길면 줄임, 짧으면 내용폭.
   nameCell: {
-    flex: '1 1 auto',
+    flex: '0 1 auto',
     minWidth: 0,
     display: 'flex',
     alignItems: 'center',
@@ -368,6 +363,7 @@ const styles: Record<string, React.CSSProperties> = {
   cardTime: {
     flexShrink: 0,
     width: 128,
+    textAlign: 'center',
     fontSize: 12.5,
     color: '#4b5563',
     whiteSpace: 'nowrap',
