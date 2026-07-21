@@ -166,19 +166,20 @@ export default function AdminPickerModal({
                 </span>
               )}
               <span style={styles.rightMeta}>
-                {(a.remark_count ?? 0) > 0 && (
-                  <span
-                    style={styles.progress}
-                    title="완료체크 수 / 보완사항 수"
-                  >
-                    {a.confirmed_count ?? 0}/{a.remark_count}
-                  </span>
-                )}
-                {a.latest_card_at && (
-                  <span style={styles.cardTime} title="최근 카드 등록 일시(KST)">
-                    {fmtCardTime(a.latest_card_at)}
-                  </span>
-                )}
+                <span
+                  style={{
+                    ...styles.progress,
+                    ...((a.remark_count ?? 0) === 0 ? styles.metaEmpty : {}),
+                  }}
+                  title="완료체크 수 / 보완사항 수"
+                >
+                  {(a.remark_count ?? 0) > 0
+                    ? `${a.confirmed_count ?? 0}/${a.remark_count}`
+                    : '-'}
+                </span>
+                <span style={styles.cardTime} title="최근 카드 등록 일시(KST)">
+                  {a.latest_card_at ? fmtCardTime(a.latest_card_at) : '-'}
+                </span>
               </span>
             </button>
             <div style={styles.perm}>
@@ -274,28 +275,39 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
   },
-  // 진척도 + 최근 카드 일시 — 이름 뒤 오른쪽 정렬.
+  // 진척도 + 최근 카드 일시 — 이름 뒤 오른쪽 고정 컬럼(값 없으면 '-' 로 정렬 유지).
   rightMeta: {
     marginLeft: 'auto',
     display: 'flex',
-    gap: 8,
+    gap: 10,
     alignItems: 'center',
     flexShrink: 0,
   },
   progress: {
-    fontSize: 11,
-    fontWeight: 600,
-    padding: '1px 6px',
-    borderRadius: 3,
+    fontSize: 13,
+    fontWeight: 700,
+    minWidth: 54,
+    textAlign: 'center',
+    padding: '2px 8px',
+    borderRadius: 4,
     background: '#eef2ff',
     color: '#4338ca',
     border: '1px solid #e0e7ff',
     whiteSpace: 'nowrap',
     fontFamily: 'ui-monospace, Consolas, monospace',
   },
+  // 보완사항이 없어 '-' 만 표시되는 배지 — 연하게.
+  metaEmpty: {
+    background: '#f8fafc',
+    color: '#9ca3af',
+    border: '1px solid #eef1f5',
+    fontWeight: 600,
+  },
   cardTime: {
-    fontSize: 11,
-    color: '#6b7280',
+    fontSize: 12.5,
+    color: '#4b5563',
+    minWidth: 132,
+    textAlign: 'right',
     whiteSpace: 'nowrap',
     fontFamily: 'ui-monospace, Consolas, monospace',
   },
