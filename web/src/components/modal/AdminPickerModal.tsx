@@ -110,7 +110,7 @@ export default function AdminPickerModal({
   }, [admins, sido, sgg, q]);
 
   return (
-    <Modal open={open} title="행정읍면 선택" onClose={onCancel} width={940}>
+    <Modal open={open} title="행정읍면 선택" onClose={onCancel} width={820}>
       <div style={styles.filters}>
         <select
           style={styles.sel}
@@ -276,7 +276,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#6b7280',
   },
   headMain: { display: 'flex', gap: 32, alignItems: 'center' },
-  hInfo: { flex: '0 0 300px', textAlign: 'center' },  // grpInfo 폭과 동일, 칸 가운데
+  hInfo: { flex: '0 0 300px', textAlign: 'left' },  // grpInfo 폭과 동일, 좌측정렬
   hBadge: { width: 60, textAlign: 'center' }, // progress 폭과 동일
   hTime: { width: 128, textAlign: 'center' }, // cardTime 폭과 동일, 칸 가운데
   hPerm: { marginLeft: 'auto', width: 174, textAlign: 'center' }, // 권한 버튼 묶음 위
@@ -307,8 +307,7 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'center',   // 코드+지명을 칸 가운데로 → 헤더 아래 정렬
-    gap: 8,
+    gap: 8,   // 좌측정렬(코드가 세로로 나란히 → 목록 스캔 용이)
   },
   // 덩어리2: 진척도 + 시간 (내부 8px)
   grpProgress: {
@@ -324,7 +323,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   // 지명 셀 — 이름(줄임표) + '이미지 없음' 배지. 길면 줄임, 짧으면 내용폭.
   nameCell: {
-    flex: '0 1 auto',
+    flex: '1 1 auto',
     minWidth: 0,
     display: 'flex',
     alignItems: 'center',
