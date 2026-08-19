@@ -21,6 +21,11 @@ LEGACY_BASE_URLS = ('https://gis-hq.tail3b9b19.ts.net',)
 DEFAULT_BUCKET = 'gis-scan'
 HTTP_TIMEOUT = 30          # 일반 API 호출
 UPLOAD_TIMEOUT = 600       # 대용량 업로드
+# 경계 제출 1회 요청당 최대 피처 수. 시도 전체 SHP(수천 건, 수십 MB)를 한 번에
+# 보내면 nginx client_max_body_size(100m)·송신 타임아웃에 걸려
+# SSLWantWriteError/SSLEOFError 로 끊긴다. 서버는 payload 의 adm_cd 단위로
+# 전체 교체하므로 읍면(adm_cd) 단위로 나눠 보내도 결과는 동일하다.
+BOUNDARY_CHUNK_FEATURES = 1500
 
 
 @dataclass
@@ -141,16 +146,32 @@ def test_connection(cfg, timeout_s=10):
 
 # ----- 경계 제출 -----
 
-def submit_boundary(cfg, geojson, updated_by=''):
-    """경계 GeoJSON(FeatureCollection)을 서버에 제출 — 읍면 단위 전체 교체.
+def _chunk_by_admin(features, max_feats):
+    """피처를 adm_cd 별로 묶고, 묶음을 max_feats 이하로 합쳐 청크 리스트 반환.
 
-    PUT /api/boundary. (affected_count, 메시지) 반환.
-    경계 데이터만 다룬다 — 수정요청(마크업) 처리는 웹에서.
+    한 읍면(adm_cd)은 반드시 같은 청크에 들어간다 — 서버가 청크에 포함된
+    adm_cd 의 기존 경계를 전부 지우고 다시 넣기 때문에 읍면이 둘로 갈리면
+    뒤 청크가 앞 청크를 지운다.
     """
-    sess = _session(cfg)
-    params = {'updated_by': updated_by} if updated_by else None
+    by_adm = {}
+    for f in features:
+        adm = str((f.get('properties') or {}).get('adm_cd') or '')
+        by_adm.setdefault(adm, []).append(f)
+    chunks, cur = [], []
+    for adm in sorted(by_adm):
+        group = by_adm[adm]
+        if cur and len(cur) + len(group) > max_feats:
+            chunks.append(cur)
+            cur = []
+        cur.extend(group)
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _put_boundary_once(sess, cfg, geojson, params):
     r = sess.put(f'{cfg.api_base}/boundary', json=geojson, params=params,
-                 timeout=HTTP_TIMEOUT)
+                 timeout=(HTTP_TIMEOUT, UPLOAD_TIMEOUT))
     if r.status_code == 401:
         raise RuntimeError('인증 실패 — API 토큰 확인')
     if not r.ok:
@@ -162,13 +183,41 @@ def submit_boundary(cfg, geojson, updated_by=''):
             detail = None
         raise RuntimeError(
             f'서버 거부 ({r.status_code}): {detail or r.text[:300]}')
-    body = r.json() if r.content else {}
-    affected = body.get('affected', body.get('count', 0))
-    msg = body.get('message', f'{affected}건 반영')
-    deleted = body.get('deleted')
+    return r.json() if r.content else {}
+
+
+def submit_boundary(cfg, geojson, updated_by='', progress=None,
+                    chunk_size=BOUNDARY_CHUNK_FEATURES):
+    """경계 GeoJSON(FeatureCollection)을 서버에 제출 — 읍면 단위 전체 교체.
+
+    PUT /api/boundary. (affected_count, 메시지) 반환.
+    피처가 chunk_size 를 넘으면 adm_cd 단위로 묶어 여러 요청으로 분할 전송
+    (읍면은 쪼개지 않음). progress(str) 콜백으로 청크 진행을 알린다.
+    경계 데이터만 다룬다 — 수정요청(마크업) 처리는 웹에서.
+    """
+    sess = _session(cfg)
+    params = {'updated_by': updated_by} if updated_by else None
+    features = geojson.get('features') or []
+    chunks = _chunk_by_admin(features, chunk_size)
+    if len(chunks) <= 1:
+        chunks = [features]
+
+    affected = deleted = 0
+    merged = []
+    for i, feats in enumerate(chunks, 1):
+        if len(chunks) > 1 and progress:
+            progress(f'    청크 {i}/{len(chunks)} ({len(feats)}건) 전송 중…')
+        body = _put_boundary_once(
+            sess, cfg, {'type': 'FeatureCollection', 'features': feats}, params)
+        affected += body.get('affected', body.get('count', 0)) or 0
+        deleted += body.get('deleted') or 0
+        merged.extend(body.get('merged') or [])
+
+    msg = f'{affected}건 반영'
+    if len(chunks) > 1:
+        msg += f' ({len(chunks)}회 분할 전송)'
     if deleted:
         msg += f' (기존 {deleted}건 교체)'
-    merged = body.get('merged') or []
     if merged:
         # 같은 부호 폴리곤 여러 개 → 서버가 MultiPolygon 으로 병합 (비연속 행정리)
         sample = ', '.join(merged[:5])

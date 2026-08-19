@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-08-19 — 경계 제출 읍면 단위 분할 전송 (대용량 시도 SHP SSL 끊김 해결)
+
+시도 전체 SHP(예: 36_bnd_job_pg, 8,963건 ≈ 수십 MB)를 PUT /api/boundary 1회로
+보내면 nginx `/api/` 본문 한도(100m)·송신 타임아웃(30s)에 걸려
+`SSLWantWriteError`(송신 중 서버 수신 중단)로 실패. 다른 시도는 한도 이내라 정상.
+
+- **`api_client.submit_boundary`** — 피처 1,500건 초과 시 `adm_cd` 단위로 묶어
+  여러 요청으로 분할 전송(읍면은 쪼개지 않음 — 서버가 청크의 adm_cd 를 전체
+  교체하므로). 타임아웃 `(30, 600)`. `progress` 콜백으로 청크 진행 표시.
+- **`layer_control.boundary_to_geojson`** — `QgsJsonExporter.setPrecision(7)`
+  (기본 17자리 → 용량 절반 이하, 4326 7자리 ≈ 1cm).
+- 검증: `py_compile` OK, 청크 분할 단위 테스트 OK.
+- 서버 복귀 시 권장: `default.conf` `/api/` `proxy_read_timeout` 60s → 300s.
+
 ## 2026-06-11 — geom-null 행정리 수용 (서버·웹) — 플러그인 제출은 보류
 
 미매핑 행정리(폴리곤 없이 명부 이름만)를 웹에 "경계 없음"으로 노출하기 위한

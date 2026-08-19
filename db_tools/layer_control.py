@@ -216,7 +216,10 @@ def boundary_to_geojson(layer):
              if f.hasGeometry() and not f.geometry().isEmpty()]
     if not feats:
         return {'type': 'FeatureCollection', 'features': []}
-    fc = json.loads(QgsJsonExporter(layer).exportFeatures(feats))
+    exporter = QgsJsonExporter(layer)
+    # 기본 정밀도(17자리)는 용량만 키운다. EPSG:4326 소수 7자리 ≈ 1cm — 충분.
+    exporter.setPrecision(7)
+    fc = json.loads(exporter.exportFeatures(feats))
     for feat in fc.get('features', []):
         props = feat.get('properties', {}) or {}
         feat['properties'] = {k.lower(): v for k, v in props.items()

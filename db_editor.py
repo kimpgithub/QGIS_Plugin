@@ -1076,7 +1076,7 @@ class CompletedUploadWorker(QThread):
                 self.progress.emit(f'[경계] {label} — {n}건 제출 중…')
                 try:
                     affected, msg = api_client.submit_boundary(
-                        self.cfg, geojson)
+                        self.cfg, geojson, progress=self.progress.emit)
                     ok += 1
                     self.progress.emit(f'  ✅ {msg}')
                     rows.append(['boundary', label, 'OK', msg])
